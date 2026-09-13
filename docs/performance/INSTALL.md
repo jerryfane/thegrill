@@ -6,10 +6,12 @@ WIP and is not in these archives.
 
 ## Obtain, verify, unpack
 
-The prepared version is **0.1.0**. Preparation does not establish that a public
-release exists. Until a maintainer approves publication, use the staged archive
-and sidecars they provide, or the source fallback below. Never guess a tag or use
-a moving `latest` pin.
+The published prerelease is [**v0.1.0**](https://github.com/plotarmordev/thegrill/releases/tag/v0.1.0),
+from reviewed source `4ff02a780680a8475e83db25d187173a21d51f33`.
+Use the [published archive hashes](RELEASE-NOTES.md#published-artifact-verification)
+and the receipt for your native target. Never use a moving `latest` pin.
+The archive's bundled guide is the reviewed pre-publication snapshot; this page
+records the published download location without changing those released bytes.
 
 Choose `x86_64-unknown-linux-gnu` or `aarch64-unknown-linux-gnu` to match `uname -m`.
 The supported baseline is native Ubuntu 24.04 / glibc 2.39; older libc and other
@@ -23,8 +25,13 @@ version means the runtime is below the supported baseline: use a qualified OS
 or the source-build fallback on the intended host, not copied libc files or a
 TLS-verification workaround.
 
-For downloads, set the exact version, target and trusted HTTPS artifact directory
-supplied by the maintainer. In a fresh download directory:
+For this release, set the exact version and trusted HTTPS artifact directory,
+then set `TARGET` to your native triple. Use a fresh download directory:
+
+```sh
+VERSION=0.1.0
+ARTIFACT_BASE_URL=https://github.com/plotarmordev/thegrill/releases/download/v0.1.0
+```
 
 ```sh
 : "${VERSION:?exact approved or staged version}"
