@@ -1,10 +1,37 @@
 # Performance release notes
 
-## Prepared version 0.1.0 — not published
+## Version 0.1.0 — published prerelease
 
-This version matches the root and `grill-perf` packages. Preparation does not
-create a tag or a downloadable release. The exact reviewed source is recorded
-in each staged build receipt; a future approved tag must identify that commit.
+[v0.1.0 is published](https://github.com/plotarmordev/thegrill/releases/tag/v0.1.0)
+from explicitly approved source `4ff02a780680a8475e83db25d187173a21d51f33`.
+The tag, archive receipts and native installed-smoke summaries bind that source.
+The version matches the root and `grill-perf` packages; the quality CLI remains
+unpackaged.
+
+### Published artifact verification
+
+[Publication run 34765220280](https://github.com/plotarmordev/thegrill/actions/runs/34765220280)
+passed exact-source authorization, both native build/smoke paths, source/output
+scope and secret gates, and upload/tag identity checks before publishing.
+
+| Native target | Published archive SHA-256 |
+|---|---|
+| `aarch64-unknown-linux-gnu` | `f0174d3b3f1687eaf365f5519d1c44eb6750856bcdadb714674dd0dca5a454cf` |
+| `x86_64-unknown-linux-gnu` | `6f036b78f87fa01b47d263be2848ffd202e75e5a8bcce01d7644e1735cb40572` |
+
+All eight published assets were downloaded and checked against GitHub's asset
+digests, checksum sidecars and receipts. Both archives and executables matched
+the preapproval staging bytes; both native smoke summaries report success
+without Rust or a source checkout. The published ARM64 binary was also unpacked
+and run outside a checkout: all four GLM/DeepSeek candidate decisions reproduced
+the retained gates and role identities with zero network syscalls. Its evaluator
+hash is distinct from the live collector hash; this is offline replay of the
+[bounded live studies](SHARED-RECIPES.md#completed-glm-live-scope), not another
+live acquisition or a claim of model-quality validation.
+
+The public HTTPS archive download was separately exercised. Released archives
+remain unchanged, including their pre-publication documentation snapshot; the
+current [installation guide](INSTALL.md) supplies the published download URL.
 
 ### User-visible scope
 
@@ -35,7 +62,7 @@ in each staged build receipt; a future approved tag must identify that commit.
 
 ### Target and compatibility boundary
 
-Prepared targets are `x86_64-unknown-linux-gnu` and
+Published targets are `x86_64-unknown-linux-gnu` and
 `aarch64-unknown-linux-gnu`, built natively on Ubuntu 24.04 with glibc 2.39
 and Rust 1.98.0. The supported installed-runtime baseline is native Ubuntu
 24.04 with glibc 2.39; older libc, musl, other operating systems and emulation
@@ -112,15 +139,15 @@ asset hashes, input/pin/authentication/backend failures and budget exhaustion.
 The downloaded archives and every payload digest were independently checked
 against their checksum sidecars and build receipts.
 
-These are additional exact-source staging records, not published releases or
-replacements for the historical hashes above. First publication still requires
-explicit maintainer approval.
+These are historical exact-source staging records, not the published release
+assets and not replacements for the earlier hashes. Published assets are pinned
+separately above; historical qualification records remain unchanged.
 
 ### Remaining limits
 
-Prepared Actions artifacts require access to their retained workflow run; they
-are not approved release downloads. No arbitrary public archive availability is
-promised before explicit maintainer-approved publication.
+Historical Actions artifacts require access to their retained workflow run.
+Use the approved release assets linked above for published downloads; do not
+substitute an arbitrary archive with the same version number.
 
 Installation and loopback fixtures are not live-backend performance qualification,
 model/template qualification, GPU measurements or causal evidence. No serving,
