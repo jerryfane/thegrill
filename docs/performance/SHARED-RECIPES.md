@@ -28,56 +28,39 @@ manage serving state separately and obtain approval before model collection.
 Unsupported request controls must fail qualification; never strip a field to
 make a server accept the workload.
 
-## Install from an externally pinned source revision
+## Install and pin the actual artifact
 
-Use a clean **native Linux ARM64** machine with Git, the workspace-required
-Rust/Cargo toolchain, a C/C++ compiler and CMake for rustls/AWS-LC. Check the
-workspace `rust-version` and the public build instructions at the chosen revision.
-Do not substitute an emulated or cross-compiled installation for the native
-installation smoke. Installation and bundle verification require no model service.
+Follow [download, checksum verification and installation](INSTALL.md) before
+executing an archive. Use an explicitly approved release, or a separately reviewed
+staged archive while publication is pending; staged artifacts are not promised
+public release downloads. The supported native Linux targets and runtime
+requirements are stated there. No Rust checkout is required for this workflow.
 
-The initial CPU-qualified source pin is
-`a6729f9ab5410587bb9da1adb7b34944a9cfc436`.
-It identifies the collector and bundle, not a live recipe qualification.
-Set `SOURCE` to an absolute, new checkout path. For a later release, obtain
-another reviewed full immutable SHA; a branch or moving tag is not a pin.
-Stop if a command fails, and verify the checkout SHA before building.
+Set `GRILL_ROOT` to the absolute extracted package directory:
 
 ```sh
-SOURCE_GIT_SHA=a6729f9ab5410587bb9da1adb7b34944a9cfc436
-git clone https://github.com/plotarmordev/thegrill.git "${SOURCE:?absolute new checkout path required}"
-git -C "$SOURCE" checkout --detach "${SOURCE_GIT_SHA:?reviewed full published commit SHA required}"
-test "$(git -C "$SOURCE" rev-parse HEAD)" = "$SOURCE_GIT_SHA"
-cargo build --manifest-path "$SOURCE/Cargo.toml" -p grill-perf --release --locked
-GRILL_PERF="$SOURCE/target/release/grill-perf"
+GRILL_PERF="$GRILL_ROOT/bin/grill-perf"
+WORKLOADS="$GRILL_ROOT/workloads"
 "$GRILL_PERF" --version
-"$GRILL_PERF" --help
-"$GRILL_PERF" bundle verify "$SOURCE/crates/grill-perf/examples/recipes-v1.json" --json
-sha256sum "$GRILL_PERF" "$SOURCE/Cargo.lock"
-rustc -vV
-cargo --version
-uname -srm
+"$GRILL_PERF" bundle verify "$WORKLOADS/recipes-v1.json" --json
+sha256sum "$GRILL_PERF"
 ```
 
-Check the reported checkout commit against the external pin before building.
-Retain the checkout as the authoritative workload location. Select the executable
-by this absolute path in every command; do not trust an unrelated `grill-perf`
-on `PATH`. Record the actual binary SHA, package version, Cargo.lock SHA, build
-command/profile, Rust/Cargo versions, target and native OS/architecture context.
-Record deliberate build flags if used; do not collect a whole-environment dump.
-The Git source revision is not `source_sha256`: that field hashes the exact
-workload file bytes. The normalized `workload_sha256` is the existing typed
-Workload serialization digest, not a generic JSON canonicalization.
+Retain the reviewed archive checksum/build receipt and actual binary/workload
+identities. Use this absolute executable path throughout, not an unrelated binary
+on `PATH`. Keep packaged workloads immutable during inspection and collection.
+The Git revision is not the workload `source_sha256`; the latter hashes exact
+file bytes. `workload_sha256` is the typed normalized workload identity.
 
-At this pin, a clean-source native Linux ARM64 build, offline bundle verification
-and the full four-entry CLI workflow were exercised with synthetic loopback
-responses. This is CPU installation/protocol evidence, not model qualification.
-Repeat the installation smoke on the target host before reporting it as verified.
+The source-build fallback remains documented in [INSTALL.md](INSTALL.md).
+Historical source `a6729f9ab5410587bb9da1adb7b34944a9cfc436` was CPU-qualified
+on native ARM64 for the original four-entry workflow. That historical record is
+not a current binary pin, live qualification or qualification of another target.
 
 ## Verify and select the exact workload
 
 ```sh
-MANIFEST="$SOURCE/crates/grill-perf/examples/recipes-v1.json"
+MANIFEST="$WORKLOADS/recipes-v1.json"
 "$GRILL_PERF" bundle verify "$MANIFEST" --json
 ```
 
@@ -141,6 +124,29 @@ Neither matching 32/400 counts nor selecting exact measured output establishes
 full protocol equivalence: control sets, failure handling, schedules and timing
 semantics remain separate. Qualify the declared workload and template rather
 than claiming source fidelity from token counts alone.
+
+### Measurement compatibility matrix
+
+This records how the existing selected workloads relate to the pinned upstream
+protocol. "Match" means equal under the stated prerequisites; "different" is an
+intentional, declared difference; "unsupported" is deliberately absent. It adds
+no workload variant, declared field or runtime behavior, and matching prompt text
+alone never establishes protocol equivalence.
+
+| Aspect | Existing TheGrill behavior | Pinned upstream `d0c7f712` behavior | Classification |
+|---|---|---|---|
+| Prompt bytes and concurrent lane variation | Frozen decode cases contain no `{salt}`, so concurrent lanes send the same case text. Where explicitly present, `{salt}` renders as `namespace[..16]-wave.index-lane`; the frozen prefill workload places it before its repeated fill. | `pickDecodeBenchPrompts` returns the base prompt for one lane and appends ` (stream i/n)` per lane at higher concurrency; `buildPrefillPrompt` leads every size with `[prefill-bench <uuid>]`. | Decode base prompts match; concurrent prompt variation differs. Prefill salt placement is analogous, not identical prompt bytes or proof of cache isolation. |
+| Warmup schedule, output and failure policy | Per-cell `warmup_trials`; frozen decode declares seven warmup waves (18 warmup requests) and prefill four, each at the declared exact output (400 and 8). Prefill warmups use each cell's full prompt size. Warmup is retained evidence: policy requires every declared warmup eligible, and a new v3 run stops later admission on failure without retry. | DecodeBench runs one capped 32-token warmup per job before the concurrency loop and ignores its failure; PrefillBench runs one best-effort warmup with an estimated 512-token prompt and an eight-token output cap. | Different: count, prompt size, output allowance and failure handling. The generic v3 `warmup_output` declaration can explicitly separate output allowance without rewriting these frozen workloads. |
+| Measured `min_tokens`, `ignore_eos`, `stop` | Exact output sets `min_tokens` and `ignore_eos: true`; the request schema has no `stop` field, so no `stop` is serialized, and a failed response is never re-sent with stripped controls. | DecodeBench adds `min_tokens`, `ignore_eos: true` and `stop: []`; an HTTP 400 carrying fill-force fields re-sends once through `stripFillForceFields`, which deletes all three. PrefillBench instead caps output at eight tokens without those fill-force fields. | Decode's initial `min_tokens`/`ignore_eos` match; prefill's output contract differs. `stop` is unsupported and its omission is not proven equivalent to `[]`; control-stripping retries are intentionally unsupported. |
+| Explicit thinking mapping | Exactly one declared mapping per workload: legacy `thinking` sends `chat_template_kwargs.thinking`; `thinking_control` `vllm-enable-thinking-v1` sends `chat_template_kwargs.enable_thinking`. Both cannot be non-null and neither is inferred from a model name. | `applyThinkingFlags` sends `enable_thinking`, `thinking` and `thinking_mode` together (off for these benches), and an HTTP 400 retry re-adds all three plus top-level `thinking`/`enable_thinking`. | Different: one declared key, no fallback. |
+| Reported versus estimated usage | Required metric counts come from provider-reported usage. Missing counts remain unavailable; the policy's matched-output gate requires completion counts for every metric. Counts are never estimated from text or SSE events. | Prefers `usage.completion_tokens` but falls back to `estimateTokenCount` (about four characters per token) for decode and prompt counts when usage is absent. | Different: estimates are unsupported. |
+| Text-event versus settle timing window | Policy `decode_tokens_per_second` uses `(n - 1) * 1e6 / (settle_us - first_generated_text_us)`, including terminal delay and parsing. The text-event rate uses `(n - 1) * 1e6 / (last_generated_text_us - first_generated_text_us)` and is an observation, not a selectable policy metric. | `decodeTps` uses the first-visible-token to last-visible-token window, excluding stream teardown. | Different for the policy gate; the text-event formula is not silently aliased to settle-window decode. |
+| Prefill cache exclusion | The derived prefill rate, and the policy gate, require provider-reported cached prompt tokens absent or zero; otherwise the sample is null. Absent cache telemetry is unknown, not evidence of a cold cache. A salt appended after a shared prefix does not isolate that prefix. | `buildPrefillPrompt` puts a fresh random salt at the start to reduce cross-run prefix reuse, runs one request per size and derives `prompt_tokens / TTFT` with a text-estimate fallback. | Analogous leading-salt placement; cache-field exclusion and usage fallback differ. |
+| Aggregation and failed-cell behavior | A fixed wave needs every lane eligible; an incomplete response nulls the wave completion total, and a failure or ineligibility stops later admission without retries. Policy requires complete eligible waves and observations per cell and metric; a missing or failed cell cannot pass and every gate reason is retained. | Aggregates only successful streams (`streamsOk`) into mean/median/min/max, reports `streamsFailed` and an error string, and continues to the next concurrency; the aggregate decode rate uses the earliest first-token to latest last-token window. | Different: fail-stop completeness versus a success-only partial aggregate. |
+
+This matrix introduces no new workload variant. Any necessary change identified
+by a pilot requires an explicit new declaration and identity, not an edit to a
+frozen workload or a silently weakened protocol.
 
 ## Create and approve the policy before collection
 
@@ -212,8 +218,9 @@ For a prefill study, use this separate complete policy instead:
 The metric enum also permits `wave_latency_us` and
 `achieved_completion_tokens_per_second`; direction is intrinsic to the metric.
 Every workload cell must appear exactly once with nonempty unique metrics.
-The declared trial minimum must fit the workload, and every cell must declare
-warmup. Basis-point schema bounds are engineering limits, not scientific advice.
+Admission enforces the declared trial minimum against the workload. The decision
+additionally requires warmup in every cell; admission alone does not enforce that
+condition. Basis-point schema bounds are engineering limits, not scientific advice.
 The reference-spread bound is an observed variability gate, not a confidence bound.
 See the [performance contract](CONTRACT.md) for policy admission and decision
 arithmetic. No policy generator subcommand is provided.
@@ -226,94 +233,81 @@ Reuse A's exact deployment declaration for the restored repeat. Keep the same
 model selector and stable endpoint for A/A2; changing a forward port prevents the
 declared reference identity from matching. Record B's actual declaration rather
 than copying A's declaration when the configuration changed.
+Native `run` admission permits absent deployment fields; it does not certify
+reference completeness. Missing reference declarations prevent a qualified
+`decide` result even when collection was admitted.
 
-## DeepSeek entrypoint: qualify first
+## One baseline/change/check decision path
 
-Set `WORKLOAD` to exactly one of these selections before creating its policy:
+Choose exactly one workload file before creating its policy. These frozen bundle
+entries are explicit data choices, not model detection or interchangeable
+qualifications:
 
-```sh
-WORKLOAD="$SOURCE/crates/grill-perf/examples/sparkdash-decode-v1.json"
-```
+| Declared mapping | Decode file | Prefill file |
+|---|---|---|
+| `enable_thinking: false` (historical GLM entry) | `glm-decode-v1.json` | `glm-prefill-v1.json` |
+| `thinking: false` (historical DeepSeek entry) | `sparkdash-decode-v1.json` | `sparkdash-prefill-v1.json` |
 
-or, for a separate prefill study:
-
-```sh
-WORKLOAD="$SOURCE/crates/grill-perf/examples/sparkdash-prefill-v1.json"
-```
+Set `WORKLOAD` to the chosen absolute file under `WORKLOADS`, or another explicitly
+reviewed workload. A new backend uses declared data through these same commands,
+not a new bundle mapping. Qualify its controls separately.
 
 Set `POLICY`, `DEPLOYMENT_A`, `DEPLOYMENT_B`, `A`, `B` and `A2` to absolute paths.
 Each output directory must be new with an existing parent. Set `ENDPOINT_A`,
-`ENDPOINT_B` and `MODEL` explicitly to approved serving selections. The following
-blocks assume HTTPS; literal-loopback HTTP additionally needs `--local-http` on
-each run. Add `--auth-env MODEL_API_KEY` only when an independently supplied
-credential is required. Do not put credentials into the policy or workload.
+`ENDPOINT_B` and `MODEL` explicitly. These commands assume HTTPS; literal-loopback
+HTTP additionally needs `--local-http` on each preflight/run. Add
+`--auth-env MODEL_API_KEY` only when the independently supplied credential is
+required; its value never belongs in the policy, workload or command arguments.
 
-Collect A with the approved policy:
+First inspect and admit both declared configurations offline:
+
+```sh
+"$GRILL_PERF" bundle inspect "$WORKLOAD"
+"$GRILL_PERF" preflight "$WORKLOAD" --policy "$POLICY" --endpoint "$ENDPOINT_A" \
+  --model "$MODEL" --deployment "$DEPLOYMENT_A"
+"$GRILL_PERF" preflight "$WORKLOAD" --policy "$POLICY" --endpoint "$ENDPOINT_B" \
+  --model "$MODEL" --deployment "$DEPLOYMENT_B"
+```
+
+Preflight prints each run's complete warmup/measured request and output ceilings.
+Approve the whole three-role window, not just one run's allowance: the unchanged
+workload is executed once in each of A, B and A2. A separate unchanged-control
+exercise adds its own explicitly planned traffic. Per-request deadlines remain
+finite; no automatic probes, extra repetitions or budget expansion occur.
+
+Capture the baseline with the policy already bound:
 
 ```sh
 "$GRILL_PERF" run "$WORKLOAD" --policy "$POLICY" --endpoint "$ENDPOINT_A" \
   --model "$MODEL" --deployment "$DEPLOYMENT_A" --out "$A" --json
 ```
 
-After A has completed, obtain approval and change the serving setup separately.
-Ensure collection does not overlap, then collect B:
+After A completes, make the separately authorized serving change, then capture B:
 
 ```sh
 "$GRILL_PERF" run "$WORKLOAD" --policy "$POLICY" --endpoint "$ENDPOINT_B" \
   --model "$MODEL" --deployment "$DEPLOYMENT_B" --out "$B" --json
 ```
 
-After B has completed, restore A separately and verify the restoration through
-the operator's approved procedure. Collect a new, independent repeat; copying a
-run directory is not a repeat:
+After B completes, restore and independently verify A through the operator's
+approved procedure. Capture a fresh A2, then check the retained evidence offline:
 
 ```sh
 "$GRILL_PERF" run "$WORKLOAD" --policy "$POLICY" --endpoint "$ENDPOINT_A" \
   --model "$MODEL" --deployment "$DEPLOYMENT_A" --out "$A2" --json
-"$GRILL_PERF" compare "$A" "$B" --reference "$A2" --json
 "$GRILL_PERF" decide "$A" "$B" --reference "$A2" --json
 ```
 
-## GLM entrypoint: qualify independently later
+This is the native policy-bound `run`/`decide` path, not a new mode of the
+eight-acquisition `baseline`/`check` capture commands. Explicit selections there
+remain descriptive; the default C1 assessment retains its own semantics.
+Do not pass a capture root as a
+native policy run or choose one of its acquisitions after seeing the results.
+A final A/B/A2 verdict cannot precede the post-candidate reference.
 
-Do not transfer DeepSeek's qualification to GLM. Obtain separate authorization
-and review the actual GLM template/control support first. Select exactly one
-GLM workload and create its own policy with its actual source digest:
-
-```sh
-WORKLOAD="$SOURCE/crates/grill-perf/examples/glm-decode-v1.json"
-```
-
-or, for a separate prefill study:
-
-```sh
-WORKLOAD="$SOURCE/crates/grill-perf/examples/glm-prefill-v1.json"
-```
-
-Use fresh GLM-specific paths, approved model/endpoint selections and complete
-actual deployment declarations, under the same prerequisites as DeepSeek.
-Collect the baseline:
-
-```sh
-"$GRILL_PERF" run "$WORKLOAD" --policy "$POLICY" --endpoint "$ENDPOINT_A" \
-  --model "$MODEL" --deployment "$DEPLOYMENT_A" --out "$A" --json
-```
-
-After completion and a separately authorized configuration change, collect B:
-
-```sh
-"$GRILL_PERF" run "$WORKLOAD" --policy "$POLICY" --endpoint "$ENDPOINT_B" \
-  --model "$MODEL" --deployment "$DEPLOYMENT_B" --out "$B" --json
-```
-
-After completion and separately verified restoration of A, collect A2:
-
-```sh
-"$GRILL_PERF" run "$WORKLOAD" --policy "$POLICY" --endpoint "$ENDPOINT_A" \
-  --model "$MODEL" --deployment "$DEPLOYMENT_A" --out "$A2" --json
-"$GRILL_PERF" compare "$A" "$B" --reference "$A2" --json
-"$GRILL_PERF" decide "$A" "$B" --reference "$A2" --json
-```
+For an unchanged-control exercise, declare the same deployment in all three roles
+and make no serving change. Its result tests the stated policy against those
+observed periods; PASS does not establish causality or future repeatability.
 
 ## Read decisions without broadening the claim
 
@@ -334,12 +328,58 @@ nonoverlap or physical restoration. Paused/resumed sessions do not qualify as
 uninterrupted performance acquisitions. Preserve every cell and metric; do not
 select only favorable gates or treat a withheld comparison percentage as zero.
 
+### Supported policy eligibility conditions
+
+These are the existing conditions under which an explicitly chosen workload can
+support a `decide` verdict. Failing a required condition prevents PASS; unresolved
+and invalid gates remain visible alongside any separately resolved regression.
+
+- The policy must bind prospective exact pins before dispatch: `collector_sha256`
+  is the actual executable and `workload_source_sha256` is the exact selected
+  workload file bytes. Baseline, candidate and reference must all carry the same
+  captured policy bytes.
+- A separately collected A2 reference is required and must declare a start after
+  the candidate. A missing repeat, or a baseline/reference identity that is not a
+  declared match, is INCONCLUSIVE; `compare` alone is eligibility-only.
+- Every declared warmup must exist and be eligible. A cell that declares no
+  warmup cannot pass.
+- Every declared cell and metric must show complete eligible coverage: the
+  expected measured waves and observations for the declared trials and
+  concurrency. Missing observations are reported, never treated as zero.
+- The ordered measured lanes must report equal completion counts across baseline,
+  candidate and reference, and this applies to every policy metric including
+  latency-only gates. A completed capture without matched reported counts is not
+  eligible.
+- The pooled baseline/reference range must sit around a positive minimum and fit
+  the declared reference-spread budget.
+- Decode and prefill ranges pool lane observations from every measured wave, so
+  concurrent lanes contribute dispersion rather than independent repetitions; the
+  declared minimum trial count is a floor, not a precision or power guarantee.
+- Every gate keeps its own coverage and bounded reason codes. A resolved
+  REGRESSION outranks an unresolved INCONCLUSIVE gate; the aggregate outcome is
+  the maximum over gates, and PASS requires every gate rather than a favorable
+  filtered subset.
+
+Explicit-selection baseline/check captures and raw `compare` output remain
+descriptive; neither produces this policy PASS/REGRESSION vocabulary.
+See the [policy guide](README.md#captured-observed-envelope-policy) for the closed schema
+and decision arithmetic.
+
 Maintain separate source-reviewed, loopback-tested and live-qualified statuses
 for each recipe and workload. Both explicit control mappings and all four
 workload entries were exercised through the CLI against synthetic responses.
-Live qualification remains pending: DeepSeek first under coordination, GLM
-separately later. Earlier model smoke receipts do not qualify this new
-bundle/policy workflow.
+Live qualification remains pending in the adopted pilot order: GLM EXL3 first,
+then DeepSeek DSpark2, then Qwen27 SGLang. Each window is separately authorized;
+the operator owns every serving change, restoration, credential and traffic
+budget, and TheGrill adds no launcher. Earlier model smoke receipts do not
+qualify this new bundle/policy workflow.
+
+The Qwen pilot is source-reviewed from the authoritative pinned
+[`ndec.py`](https://github.com/MiaAI-Lab/Qwen3.8-27B-SGLang-DGX-Spark/blob/9fb18edf8cfb3364e8aa89258e6d5ab1fe1fd11a/bench/ndec.py):
+one 16-token warmup, then two nonstreaming calls per prompt at caps 60 and 600
+across two prompts, reporting `(c600 - c60) / (t600 - t60)` from provider
+completion counts and wall times. That differential estimate is a separate
+diagnostic, not streaming decode equivalence, and TheGrill does not implement it.
 
 Use the [manual reviewed report template](SHARED-REPORT-TEMPLATE.md) only after
 privacy review. It is not an exporter or replayable evidence package. No upstream

@@ -601,3 +601,7 @@ pub fn decide(a: &Path, b: &Path, reference: Option<&Path>) -> Decision {
         });
     result
 }
+
+#[cfg(test)]
+#[path = "../tests/support/policy_calibration.rs"]
+mod policy_calibration;

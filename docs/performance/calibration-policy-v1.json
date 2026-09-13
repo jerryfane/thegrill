@@ -1,0 +1,490 @@
+{
+  "boundary_checks": {
+    "cases": [
+      "boundary/latency_pass_exact",
+      "boundary/latency_regression_strict",
+      "boundary/latency_regression_boundary_is_not_regression",
+      "boundary/latency_improvement",
+      "boundary/rate_pass_exact",
+      "boundary/rate_regression_strict",
+      "boundary/rate_regression_boundary_is_not_regression",
+      "boundary/rate_improvement",
+      "boundary/direction_latency_adverse_high",
+      "boundary/direction_rate_adverse_low",
+      "boundary/zero_reference_minimum",
+      "boundary/zero_candidate_rate",
+      "boundary/zero_candidate_latency",
+      "boundary/spread_exact_boundary",
+      "boundary/spread_beyond_budget",
+      "boundary/latency_straddle",
+      "boundary/rate_straddle",
+      "boundary/overflow_spread_products_fit",
+      "boundary/overflow_spread_products_exceed",
+      "boundary/overflow_decision_products_fit",
+      "boundary/overflow_decision_products_exceed"
+    ],
+    "status": "passed"
+  },
+  "budget": {
+    "boundary_cases": 21,
+    "live_requests": 0,
+    "scenario_rows": 9000,
+    "stopping": "fixed replicates; no extension, replacement, retries or outcome-conditioned exclusions"
+  },
+  "corpus_sha256": "23b8912690637e5437d8c5a79af0c96c06ac4a5c4fa1d3f3db4099b7052a26d2",
+  "identities_sha256": {
+    "Cargo.lock": "6f1b08507c8b5647abcb3ac72886316de725d011baf373a4ca22082557f9ef3f",
+    "Cargo.toml": "142ee2dca910ba18b3c85102fe97f17910a5d9ab7818492ecbd92e030e31780f",
+    "crates/grill-perf/Cargo.toml": "1403c8dcc129fa4bab93aeb29f023ac352d18260603ec4bf20c2ed6cd3b90dd6",
+    "crates/grill-perf/src/bundle.rs": "0f2ba2b502e4ffef0d214d5cc09b669c9195feb40cb137bad1d983e344c0d0be",
+    "crates/grill-perf/src/evidence.rs": "752ebd9d711d742e3587c2ca4a04145a93f5cf7aa5a0be2fc6f15570427e264d",
+    "crates/grill-perf/src/lifecycle.rs": "0a09734de22f4c9d43e6eb4b415ae3aa105f67c02758f27a5522e46423976e91",
+    "crates/grill-perf/src/main.rs": "5fa21b8aa7c0e12772e608a97b5f7be2c6ee3e929e904ea15d2a1d3a67b5aa5d",
+    "crates/grill-perf/src/metrics.rs": "38797d3eab2755a3f549f95e545b79bb16295028ed311026c97d1651d47d6c05",
+    "crates/grill-perf/src/model.rs": "b803081fcaca9870fca03adf4b3f33a4b5d2729b198689c062e42c7bf32b4870",
+    "crates/grill-perf/src/policy.rs": "34cd3eb017316c53b16017d147a41dc69cd756a14bacfc35708bf86c99f2410f",
+    "crates/grill-perf/src/run.rs": "82f12dcd9a8c6421cfb1092e9d2be1d1dc30737a4182cf99454f2a8396aa050b",
+    "crates/grill-perf/src/selection.rs": "d7918ef72c7030d3dc88762dc075816549dc1c6a2a89c0e2eecf247d853dd683",
+    "crates/grill-perf/src/sequence.rs": "d95acc2f12844c656b33ba423f7432b8ba482586aa6c9d59748dc95f9b43043f",
+    "crates/grill-perf/src/study.rs": "845cf49e9527e217529968d7cc3cf6bc5112dbb5009ed9f65286c496d4cbe18b",
+    "crates/grill-perf/src/wire.rs": "ab552d18ef1fd59a11a4d27363ea140105272522d1b67d4e99de47a2ab6a2872",
+    "crates/grill-perf/tests/support/policy_calibration.rs": "1ad0776616af1c409288c2940c912dd066ec608f2055e5cc5992032fa6adb413",
+    "docs/performance/CALIBRATION.md": "dd26bf5f90025a5309f56e96c4c99fd4926faf4ae1f61a864f7a1e3af392db77",
+    "docs/performance/CONTRACT.md": "ebf7d8de7b1cc043df9a00ce5066657e74ed20d4ec9dd3a3c2ba30045bd75ba0",
+    "tools/calibrate-policy.py": "0ffcde4531bd71717a96402cc5ab7250e12f00af361c000048a6e23e97b35c6d"
+  },
+  "kind": "policy-evaluate-offline-calibration-v1",
+  "limitations": [
+    "gate inputs are supplied as extrema; no claim about how real captures produce them",
+    "scenario frequencies describe this fixed synthetic experiment, not serving behavior",
+    "no statistical-confidence, guaranteed-sensitivity, equivalence or causal claim",
+    "coverage, eligibility and evidence-verification gates outside pure evaluate are exercised by the existing real CLI policy tests, not by this corpus",
+    "arithmetic disagreements are reported under production_cross_check, never edited"
+  ],
+  "method": {
+    "assumptions": "extrema are supplied directly; wave/lane observation, coverage, role ordering, output-amount matching and evidence verification are outside this corpus and covered by existing real CLI policy tests",
+    "decision_rule": "PASS requires the worst adverse bound within tolerance; REGRESSION requires the best adverse bound strictly beyond tolerance; otherwise INCONCLUSIVE; overflow is ERROR",
+    "directions": {
+      "latency": "adverse-high (wave_latency_us)",
+      "rate": "adverse-low (achieved/decode/prefill tokens per second)"
+    },
+    "oracle": "stdlib fractions.Fraction plus an explicit u128 checked-multiplication model",
+    "unit": "one policy gate: pooled reference extrema versus candidate extrema"
+  },
+  "production_cross_check": {
+    "arithmetic_disagreements": {
+      "count": 0,
+      "first": []
+    },
+    "build_provenance": "operator must independently verify binary/source correspondence",
+    "evaluator_sha256": "1ba0f64bacd83c7810b315b12efdad560229ff27c1662287e3f48c48226c7ddd",
+    "results_sha256": "f183b7f0017f7a657d3c8628578e707f4a8ed812cb4df538cdd3e75947705413",
+    "rows": 9021,
+    "status": "matched"
+  },
+  "qualification": "offline synthetic oracle only; not live qualification, not a statistical-confidence calibration and not a product gate",
+  "replicates_per_scenario_direction": 500,
+  "runtime": {
+    "platform": "Linux-6.17.0-1029-nvidia-aarch64-with-glibc2.39",
+    "python": "3.12.3 (main, Jun 19 2026, 12:46:00) [GCC 13.3.0]"
+  },
+  "scenarios": [
+    {
+      "direction": "latency",
+      "name": "unchanged",
+      "outcomes": {
+        "ERROR": 0,
+        "INCONCLUSIVE": 0,
+        "PASS": 500,
+        "REGRESSION": 0
+      },
+      "parameters": {
+        "kind": "unchanged"
+      },
+      "reasons": {},
+      "rng_seed": 93643424213671239530140643643141300040454819307277820496841674993999652649023,
+      "unresolved_gate_frequency": {
+        "denominator": 500,
+        "numerator": 0,
+        "rate": 0.0
+      }
+    },
+    {
+      "direction": "rate",
+      "name": "unchanged",
+      "outcomes": {
+        "ERROR": 0,
+        "INCONCLUSIVE": 0,
+        "PASS": 500,
+        "REGRESSION": 0
+      },
+      "parameters": {
+        "kind": "unchanged"
+      },
+      "reasons": {},
+      "rng_seed": 60484787418754862043399655640346033776892563581645132447322482529834547113643,
+      "unresolved_gate_frequency": {
+        "denominator": 500,
+        "numerator": 0,
+        "rate": 0.0
+      }
+    },
+    {
+      "direction": "latency",
+      "name": "noise_within_tolerance",
+      "outcomes": {
+        "ERROR": 0,
+        "INCONCLUSIVE": 0,
+        "PASS": 500,
+        "REGRESSION": 0
+      },
+      "parameters": {
+        "kind": "noise",
+        "max_fraction_of_tolerance": 0.5
+      },
+      "reasons": {},
+      "rng_seed": 103145644290980474051927520772077427191916401602139488876984295499877791863892,
+      "unresolved_gate_frequency": {
+        "denominator": 500,
+        "numerator": 0,
+        "rate": 0.0
+      }
+    },
+    {
+      "direction": "rate",
+      "name": "noise_within_tolerance",
+      "outcomes": {
+        "ERROR": 0,
+        "INCONCLUSIVE": 0,
+        "PASS": 500,
+        "REGRESSION": 0
+      },
+      "parameters": {
+        "kind": "noise",
+        "max_fraction_of_tolerance": 0.5
+      },
+      "reasons": {},
+      "rng_seed": 99927280095368399931819866977594595934019774534813269485027082968097853894298,
+      "unresolved_gate_frequency": {
+        "denominator": 500,
+        "numerator": 0,
+        "rate": 0.0
+      }
+    },
+    {
+      "direction": "latency",
+      "name": "noise_straddling_tolerance",
+      "outcomes": {
+        "ERROR": 0,
+        "INCONCLUSIVE": 175,
+        "PASS": 325,
+        "REGRESSION": 0
+      },
+      "parameters": {
+        "kind": "noise",
+        "max_fraction_of_tolerance": 2.0
+      },
+      "reasons": {
+        "envelope_straddles_tolerance": 175
+      },
+      "rng_seed": 33815066277749464220956667567970568056895209946846278974878357024825488329464,
+      "unresolved_gate_frequency": {
+        "denominator": 500,
+        "numerator": 175,
+        "rate": 0.35
+      }
+    },
+    {
+      "direction": "rate",
+      "name": "noise_straddling_tolerance",
+      "outcomes": {
+        "ERROR": 0,
+        "INCONCLUSIVE": 387,
+        "PASS": 113,
+        "REGRESSION": 0
+      },
+      "parameters": {
+        "kind": "noise",
+        "max_fraction_of_tolerance": 2.0
+      },
+      "reasons": {
+        "envelope_straddles_tolerance": 387
+      },
+      "rng_seed": 76668319675491638867829708825413235797599144463369151214978735324369174848770,
+      "unresolved_gate_frequency": {
+        "denominator": 500,
+        "numerator": 387,
+        "rate": 0.774
+      }
+    },
+    {
+      "direction": "latency",
+      "name": "reference_drift",
+      "outcomes": {
+        "ERROR": 0,
+        "INCONCLUSIVE": 500,
+        "PASS": 0,
+        "REGRESSION": 0
+      },
+      "parameters": {
+        "kind": "reference_drift"
+      },
+      "reasons": {
+        "reference_spread_exceeded": 500
+      },
+      "rng_seed": 110156908547345671950753318493793730550412506262114279872338188017046819693436,
+      "unresolved_gate_frequency": {
+        "denominator": 500,
+        "numerator": 500,
+        "rate": 1.0
+      }
+    },
+    {
+      "direction": "rate",
+      "name": "reference_drift",
+      "outcomes": {
+        "ERROR": 0,
+        "INCONCLUSIVE": 500,
+        "PASS": 0,
+        "REGRESSION": 0
+      },
+      "parameters": {
+        "kind": "reference_drift"
+      },
+      "reasons": {
+        "reference_spread_exceeded": 500
+      },
+      "rng_seed": 19456086354682305677434605633491339838830110320591704645251559029030294078310,
+      "unresolved_gate_frequency": {
+        "denominator": 500,
+        "numerator": 500,
+        "rate": 1.0
+      }
+    },
+    {
+      "direction": "latency",
+      "name": "correlated_shift",
+      "outcomes": {
+        "ERROR": 0,
+        "INCONCLUSIVE": 0,
+        "PASS": 500,
+        "REGRESSION": 0
+      },
+      "parameters": {
+        "kind": "correlated"
+      },
+      "reasons": {},
+      "rng_seed": 1552355893342250999732968010768503874872774280389645529779620022413563588848,
+      "unresolved_gate_frequency": {
+        "denominator": 500,
+        "numerator": 0,
+        "rate": 0.0
+      }
+    },
+    {
+      "direction": "rate",
+      "name": "correlated_shift",
+      "outcomes": {
+        "ERROR": 0,
+        "INCONCLUSIVE": 0,
+        "PASS": 500,
+        "REGRESSION": 0
+      },
+      "parameters": {
+        "kind": "correlated"
+      },
+      "reasons": {},
+      "rng_seed": 51355864847167827067807551628148027109672877654860044054916662915579813119010,
+      "unresolved_gate_frequency": {
+        "denominator": 500,
+        "numerator": 0,
+        "rate": 0.0
+      }
+    },
+    {
+      "direction": "latency",
+      "name": "slowdown_beyond_tolerance",
+      "outcomes": {
+        "ERROR": 0,
+        "INCONCLUSIVE": 0,
+        "PASS": 0,
+        "REGRESSION": 500
+      },
+      "parameters": {
+        "adverse": true,
+        "kind": "shift",
+        "max_fraction_of_tolerance": 4.0,
+        "min_fraction_of_tolerance": 1.5
+      },
+      "reasons": {},
+      "rng_seed": 8579681570417832068332758111291041933192747810340082110748003474817296309798,
+      "unresolved_gate_frequency": {
+        "denominator": 500,
+        "numerator": 0,
+        "rate": 0.0
+      }
+    },
+    {
+      "direction": "rate",
+      "name": "slowdown_beyond_tolerance",
+      "outcomes": {
+        "ERROR": 0,
+        "INCONCLUSIVE": 0,
+        "PASS": 0,
+        "REGRESSION": 500
+      },
+      "parameters": {
+        "adverse": true,
+        "kind": "shift",
+        "max_fraction_of_tolerance": 4.0,
+        "min_fraction_of_tolerance": 1.5
+      },
+      "reasons": {},
+      "rng_seed": 51328851524129933880692441674347946096079990612579031117470994818275769151187,
+      "unresolved_gate_frequency": {
+        "denominator": 500,
+        "numerator": 0,
+        "rate": 0.0
+      }
+    },
+    {
+      "direction": "latency",
+      "name": "slowdown_within_tolerance",
+      "outcomes": {
+        "ERROR": 0,
+        "INCONCLUSIVE": 0,
+        "PASS": 500,
+        "REGRESSION": 0
+      },
+      "parameters": {
+        "adverse": true,
+        "kind": "shift",
+        "max_fraction_of_tolerance": 0.75,
+        "min_fraction_of_tolerance": 0.25,
+        "nonzero_tolerance": true
+      },
+      "reasons": {},
+      "rng_seed": 50037395018564473369760703233637986626461468757857942702773180252579617713774,
+      "unresolved_gate_frequency": {
+        "denominator": 500,
+        "numerator": 0,
+        "rate": 0.0
+      }
+    },
+    {
+      "direction": "rate",
+      "name": "slowdown_within_tolerance",
+      "outcomes": {
+        "ERROR": 0,
+        "INCONCLUSIVE": 0,
+        "PASS": 500,
+        "REGRESSION": 0
+      },
+      "parameters": {
+        "adverse": true,
+        "kind": "shift",
+        "max_fraction_of_tolerance": 0.75,
+        "min_fraction_of_tolerance": 0.25,
+        "nonzero_tolerance": true
+      },
+      "reasons": {},
+      "rng_seed": 105587823113902549085027457178336242527954094371143552375052752190390877518866,
+      "unresolved_gate_frequency": {
+        "denominator": 500,
+        "numerator": 0,
+        "rate": 0.0
+      }
+    },
+    {
+      "direction": "latency",
+      "name": "improvement_beyond_tolerance",
+      "outcomes": {
+        "ERROR": 0,
+        "INCONCLUSIVE": 0,
+        "PASS": 500,
+        "REGRESSION": 0
+      },
+      "parameters": {
+        "adverse": false,
+        "kind": "shift",
+        "max_fraction_of_tolerance": 4.0,
+        "min_fraction_of_tolerance": 1.5
+      },
+      "reasons": {},
+      "rng_seed": 82063843867125083670340608319189330094816013573709070620106271205173902322346,
+      "unresolved_gate_frequency": {
+        "denominator": 500,
+        "numerator": 0,
+        "rate": 0.0
+      }
+    },
+    {
+      "direction": "rate",
+      "name": "improvement_beyond_tolerance",
+      "outcomes": {
+        "ERROR": 0,
+        "INCONCLUSIVE": 0,
+        "PASS": 500,
+        "REGRESSION": 0
+      },
+      "parameters": {
+        "adverse": false,
+        "kind": "shift",
+        "max_fraction_of_tolerance": 4.0,
+        "min_fraction_of_tolerance": 1.5
+      },
+      "reasons": {},
+      "rng_seed": 21933535311048218656855483164411676649602866343622534241732059445327682283411,
+      "unresolved_gate_frequency": {
+        "denominator": 500,
+        "numerator": 0,
+        "rate": 0.0
+      }
+    },
+    {
+      "direction": "latency",
+      "name": "mixed_extrema_straddle",
+      "outcomes": {
+        "ERROR": 0,
+        "INCONCLUSIVE": 500,
+        "PASS": 0,
+        "REGRESSION": 0
+      },
+      "parameters": {
+        "kind": "straddle"
+      },
+      "reasons": {
+        "envelope_straddles_tolerance": 500
+      },
+      "rng_seed": 38948554913488518775948212606597498880866044561035912487187675442463096893167,
+      "unresolved_gate_frequency": {
+        "denominator": 500,
+        "numerator": 500,
+        "rate": 1.0
+      }
+    },
+    {
+      "direction": "rate",
+      "name": "mixed_extrema_straddle",
+      "outcomes": {
+        "ERROR": 0,
+        "INCONCLUSIVE": 500,
+        "PASS": 0,
+        "REGRESSION": 0
+      },
+      "parameters": {
+        "kind": "straddle"
+      },
+      "reasons": {
+        "envelope_straddles_tolerance": 500
+      },
+      "rng_seed": 33041641717092842264587462042922437095402653043468550615125436219108902396630,
+      "unresolved_gate_frequency": {
+        "denominator": 500,
+        "numerator": 500,
+        "rate": 1.0
+      }
+    }
+  ],
+  "seed": 32
+}

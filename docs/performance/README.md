@@ -279,6 +279,11 @@ retrospectively through `decide`. New runs use plan v3 independently of this opt
 Policy-bearing plans require this reader; older readers may reject the new
 optional `policy_sha256` field.
 
+For installed-artifact commands, follow the
+[prospective A/B/A2 workflow](SHARED-RECIPES.md#one-baselinechangecheck-decision-path).
+It accepts an explicitly chosen workload; selected `baseline`/`check` captures
+remain a separate descriptive path.
+
 The declaration is a closed JSON object, bounded to 64 KiB:
 
 ```json
