@@ -368,13 +368,125 @@ and decision arithmetic.
 Maintain separate source-reviewed, loopback-tested and live-qualified statuses
 for each recipe and workload. Both explicit control mappings and all four
 workload entries were exercised through the CLI against synthetic responses.
-Live qualification remains pending in the adopted pilot order: GLM EXL3 first,
-then DeepSeek DSpark2, then Qwen27 SGLang. Each window is separately authorized;
-the operator owns every serving change, restoration, credential and traffic
-budget, and TheGrill adds no launcher. Earlier model smoke receipts do not
-qualify this new bundle/policy workflow.
+The current campaign includes GLM EXL3 and DeepSeek DSpark2 only. Qwen is
+explicitly excluded because its deployment is not set up; its live qualification
+is not a campaign completion gate. The operator owns every serving change,
+restoration, credential and traffic budget, and TheGrill adds no launcher.
+Earlier model smoke receipts do not qualify this new bundle/policy workflow.
 
-The Qwen pilot is source-reviewed from the authoritative pinned
+### Demonstrated capped-prefill variant
+
+The GLM live exercise exposed a difference that source review alone did not
+qualify: under exact eight-token output, a prefill response emitted `OK` and then
+an unsolicited tool-call frame. Native collection stopped as unsupported, with
+missing usage and incomplete coverage. That failed acquisition remains failed.
+Do not weaken the text-only parser, estimate usage, or retry the same request
+after stripping exact-output controls.
+
+An explicitly new capped-eight-token workload and prospective policy completed
+the prefill exercise. For the same 4K/16K scope, author a new file from either
+declared prefill mapping before creating any policy:
+
+```sh
+# PREFILL_SOURCE is the explicitly chosen original workload, not a selection.
+# Choose a new PREFILL_CAPPED path; noclobber prevents overwriting prior evidence.
+(
+  set -C
+  jq '.version = 3
+      | .name = "campaign-prefill-capped-4k-16k-v1"
+      | .request.output.mode = "cap"
+      | .cases |= map(select(.id == "prefill-4k" or .id == "prefill-16k"))
+      | .cells |= map(select(.id == "prefill-4k-1" or .id == "prefill-16k-1"))' \
+    "$PREFILL_SOURCE" > "$PREFILL_CAPPED"
+)
+"$GRILL_PERF" bundle inspect "$PREFILL_CAPPED"
+```
+
+This is explicit workload authoring with `jq`, not a backend fallback or a new
+installed-runtime dependency. It preserves the chosen thinking mapping. Bind the
+new file's exact source hash in a new policy and collect fresh A/B/A2 evidence;
+never reuse an exact-output acquisition in the capped study. With three measured
+trials and one warmup per cell, the variant admits eight requests and at most
+64 output tokens per acquisition. It is not historical exact-eight-token
+equivalence and is not added to the frozen `recipes-v1.json` mapping.
+
+Cap mode permits differing completion counts. The existing matched-output gate
+still requires equal reported counts across A/B/A2 for every measured lane;
+variation remains INCONCLUSIVE, not a reason to relax the gate after collection.
+
+### Completed GLM live scope
+
+The installed ARM64 collector at source
+`e26b2e61d1ba2d2802059d53bf7985aa0ed1c567`, binary SHA-256
+`e19a5794c12e72534e46a06b1ca3bf55d394421305395a5a09788be57ffed5a5`,
+completed five separately collected roles for decode C1/C2 and capped prefill
+4K/16K. Policies were frozen before acquisition: three measured trials per cell,
+1,000 basis points adverse tolerance and 2,500 basis points reference spread.
+Those are this campaign's engineering limits, not recommended statistical margins.
+
+| Study | Unchanged A/control/control-reference | A/candidate/restored-A2 |
+|---|---|---|
+| Decode: latency, achieved throughput, settle-window decode at C1/C2 | PASS, all six gates | REGRESSION, all six gates |
+| Capped prefill: reported prompt tokens / first-text time at 4K/16K | PASS, both gates | PASS, both gates |
+
+All ten accepted acquisitions were complete and eligible. All four offline
+decisions replayed with zero network syscalls. The campaign issued 107 generation
+requests, including the four-request protocol probe and three requests in the
+failed exact-prefill acquisition; requested output ceiling was 20,056 tokens.
+Reported completion counts totalled 19,808 for requests with usage; the failed
+request had no usage and its actual completion count remains unavailable.
+The capped-prefill responses reported two completion tokens and answered `OK`;
+decode's ordered counting output was truncated by its exact-token budget.
+No semantic full-task, model-quality, cold-device, causal or future-repeatability
+claim follows. Deployment identities, serving changes and raw receipts stay
+private; the table does not qualify another model, workload, or artifact.
+
+### Completed DeepSeek live scope
+
+The same installed collector and prospective engineering limits completed decode
+C1/C2 and capped prefill 4K/16K on the declared DeepSeek deployment. Each study
+retains separate A, control, control-reference, candidate and restored-A2 roles.
+
+| Study | Unchanged A/control/control-reference | A/candidate/restored-A2 |
+|---|---|---|
+| Decode: latency, achieved throughput, settle-window decode at C1/C2 | PASS, all six gates | REGRESSION, all six gates |
+| Capped prefill: reported prompt tokens / first-text time at 4K/16K | PASS, both gates | PASS, both gates |
+
+All ten accepted acquisitions were complete and eligible, and all four decisions
+replayed with zero network syscalls. The candidate included a coupled serving
+change, not an isolated causal variable. An earlier candidate acquisition for
+each workload had an incorrect deployment declaration: effective startup
+configuration disagreed with the declared derived setting. Both captures remain
+retained but excluded from qualification. Before inspecting their timing or
+computing a candidate decision, the operator pinned a corrected declaration and
+an additional finite allowance, then collected separately identified replacement
+captures without changing the workloads or policy thresholds.
+
+Those replacements had extra prior-acquisition warmup history relative to the
+fresh-launch baseline and restored reference. The direction of any warmup or
+thermal effect is unknown; neither PASS nor REGRESSION establishes symmetric
+cold-start performance or gains a stronger causal interpretation from this
+history.
+
+The DeepSeek exercise issued 127 generation requests with a requested output
+ceiling of 23,888 tokens. This includes 124 benchmark requests (the protocol
+probe, ten accepted acquisitions and two declaration-invalid acquisitions) plus
+three bounded launcher smoke requests. The benchmark responses reported 23,504
+completion tokens; the launcher smoke responses' actual token counts were not
+retained, and their combined requested ceiling was 96. An earlier unsuccessful
+startup served no requests. Optional unbounded startup API warmup was disabled;
+internal engine initialization is not a benchmark request.
+
+Every retained benchmark response reported zero cached prompt tokens and no
+reasoning text. Capped-prefill responses answered `OK` with two reported
+completion tokens; decode output was truncated by the exact-token budget.
+These are observed control/usage facts for the captured requests, not cache
+attestation, semantic full-task completion, model-quality validation or future
+repeatability. Raw receipts and deployment-local details remain private.
+
+### Source-reviewed Qwen diagnostic, excluded from this campaign
+
+The Qwen diagnostic remains source-reviewed from the authoritative pinned
 [`ndec.py`](https://github.com/MiaAI-Lab/Qwen3.8-27B-SGLang-DGX-Spark/blob/9fb18edf8cfb3364e8aa89258e6d5ab1fe1fd11a/bench/ndec.py):
 one 16-token warmup, then two nonstreaming calls per prompt at caps 60 and 600
 across two prompts, reporting `(c600 - c60) / (t600 - t60)` from provider
