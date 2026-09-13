@@ -1,5 +1,9 @@
 # Offline C1 calibration
 
+The C1 interval experiment below retains its original scope and results. The
+[separate policy-gate check](#separate-observed-envelope-policy-arithmetic-check)
+does not reinterpret those intervals or make selected captures inferential.
+
 **Conclusion:** the existing arithmetic agrees with an independent calculation;
 its nominal interval is not a serving-regression certificate. Correlated
 acquisition summaries substantially inflate directional conclusions in the
@@ -156,3 +160,74 @@ snapshots need traffic and reset accounting and cannot identify a per-step cause
 Longer output improves granularity but establishes neither independence nor
 unbiased inference. No live backend, concurrent/history inference or mandatory
 merge gate was qualified by this experiment.
+
+## Separate observed-envelope policy arithmetic check
+
+The selected-workload native `run --policy` / `decide` path uses observed
+extrema, not the C1 interval above. Its
+[machine-readable oracle report](calibration-policy-v1.json) records **9,021
+gate inputs**: 21 exact boundary cases plus nine fixed synthetic families,
+500 replicates each in both latency and rate directions, seed **32**.
+There were **zero model requests**. All inputs matched the real private
+`policy::evaluate`, with **zero arithmetic disagreements**. Decisions use exact
+`Fraction` ratios in the independent Python calculation; a separate checked
+product model predicts production overflow. Displayed floating bounds are
+compared within absolute/relative tolerance `1e-12`.
+
+| Synthetic family | Latency PASS / INCONCLUSIVE / REGRESSION | Rate PASS / INCONCLUSIVE / REGRESSION |
+|---|---:|---:|
+| Unchanged | 500 / 0 / 0 | 500 / 0 / 0 |
+| Noise within tolerance | 500 / 0 / 0 | 500 / 0 / 0 |
+| Noise straddling tolerance | 325 / 175 / 0 | 113 / 387 / 0 |
+| Reference drift beyond spread budget | 0 / 500 / 0 | 0 / 500 / 0 |
+| Common-factor reference/candidate shift | 500 / 0 / 0 | 500 / 0 / 0 |
+| Slowdown beyond tolerance | 0 / 0 / 500 | 0 / 0 / 500 |
+| Slowdown within tolerance | 500 / 0 / 0 | 500 / 0 / 0 |
+| Improvement beyond tolerance | 500 / 0 / 0 | 500 / 0 / 0 |
+| Mixed extrema straddling tolerance | 0 / 500 / 0 | 0 / 500 / 0 |
+
+No scenario row produced ERROR; deterministic boundary rows separately exercise
+overflow ERROR, zero reference minima, defined zero candidate rates, exact
+tolerance equality and direction inversion. These frequencies describe only
+the declared generator. Extrema are supplied directly; there are no simulated
+independent trials or calibrated confidence levels. A common factor applied to
+both roles remains invisible to relative comparison. PASS does not prove no
+absolute drift, causality, future repeatability or guaranteed sensitivity.
+The driver retains every generated row; it neither clips generated rational
+values nor extends the budget after observing outcomes.
+
+Reproduce from the checkout with Python, the pinned Rust toolchain and `jq`:
+
+```sh
+OUT=$(mktemp -d)
+cargo --config profile.dev.package.sha2.opt-level=3 test -p grill-perf --locked \
+  --bin grill-perf --no-run --message-format=json > "$OUT/build.jsonl"
+TEST_BINARY=$(jq -r 'select(.reason == "compiler-artifact" and .profile.test == true and .target.name == "grill-perf") | .executable' "$OUT/build.jsonl")
+python3 tools/calibrate-policy.py --seed 32 --replicates 500 --out "$OUT/oracle"
+GRILL_POLICY_CALIBRATION_CORPUS="$OUT/oracle/corpus.jsonl" \
+GRILL_POLICY_CALIBRATION_RESULTS="$OUT/production.jsonl" \
+  "$TEST_BINARY" policy::policy_calibration::crosscheck_corpus --ignored --exact
+python3 tools/calibrate-policy.py --seed 32 --replicates 500 --out "$OUT/checked" \
+  --production-results "$OUT/production.jsonl" --production-binary "$TEST_BINARY"
+```
+
+The development-profile override affects fixture hashing only; never use it
+for release staging. The hook ignores corpus expectations and calls the real
+evaluator. Pins identify corpus, source and executable bytes; the operator must
+still establish binary/source correspondence through the actual build.
+Mismatched production rows make the driver fail, not silently revise a verdict.
+
+Pure gate arithmetic bypasses native evidence loading, completeness, matched
+output amounts and role ordering. Existing CLI policy regressions cover those
+gates. Separately, an installed ARM64 CPU fixture exercise made **280 requests**
+across both explicit thinking-control mappings: unchanged A/B/A2 returned PASS,
+deliberately slowed candidates returned REGRESSION, and post-shutdown replay
+made zero network syscalls. A further **nine-request** exercise returned
+INCONCLUSIVE after a candidate's first warmup received HTTP 400: exactly one
+candidate request, no control-stripping retry, then a fresh reference.
+The exercised staged binary SHA-256 was
+`d6dd2b55e7a5436b0c27f796ad3bf8d6b74bf6404c3a6a4a4cc06d0a28ef2a4a`.
+These are CPU protocol/workflow observations, not live model qualification,
+semantic-output validation, native x86 qualification of this change, or proof
+that a release has been published. The [shared workflow](SHARED-RECIPES.md)
+keeps those adoption gates separate.
