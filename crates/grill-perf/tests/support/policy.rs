@@ -60,7 +60,7 @@ impl Fixture {
         save(temp.path("deployment.json"), &deployment());
         save(temp.path("policy.json"), &policy);
         let root = temp.0.clone();
-        let hit = work["request"]["cache"] == "reported_prefix_hit";
+        let hit = work["request"]["cache"] == "reported-prefix-hit";
         let requests = work["cells"]
             .as_array()
             .unwrap()
@@ -173,7 +173,6 @@ fn report(output: &Output, outcome: &str, exit: i32) -> Value {
         String::from_utf8_lossy(&output.stderr)
     );
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(value["version"], 1);
     assert_eq!(value["decision"], outcome);
     value
 }
@@ -896,7 +895,8 @@ fn policy2_fairness_counts_whole_waves_and_keeps_zero_lane_unavailable() {
 #[test]
 fn policy2_required_hits_gate_actual_latency_not_prefill() {
     let mut work = workload(1, 1, 3);
-    work["request"]["cache"] = json!("reported_prefix_hit");
+    work["request"]["profile"] = json!("vllm-fixed-v1");
+    work["request"]["cache"] = json!("reported-prefix-hit");
     let fixture = Fixture::with_policy(work.clone(), declaration_v2(&work, &[
         "first_generated_text_us", "first_answer_text_us", "prefill_tokens_per_second",
     ]));

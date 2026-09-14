@@ -168,11 +168,17 @@ fn schedule4_deadline_retains_wait_and_active_peer_without_replacement() {
 #[test]
 fn schedule4_cancel_settles_all_admitted_peers_before_publication() {
     let temp = Temp::new();
-    let server = Server::new(|mut stream, _, _| {
+    let (sent, ready) = std::sync::mpsc::sync_channel(2);
+    let server = Server::new(move |mut stream, _, _| {
         header(&mut stream, "text/event-stream");
         frame(&mut stream, json!({"choices":[{"delta":{"content":"active"}}]}));
+        sent.send(()).unwrap();
         let mut byte = [0];
-        assert_eq!(stream.read(&mut byte).unwrap(), 0);
+        match stream.read(&mut byte) {
+            Ok(0) => (),
+            Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => (),
+            result => panic!("expected cancellation to close the peer: {result:?}"),
+        }
     });
     let work = mixed_first(scheduled());
     let input = temp.path("work.json");
@@ -182,6 +188,8 @@ fn schedule4_cancel_settles_all_admitted_peers_before_publication() {
         .arg(temp.path("run")).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
     server.wait_for_request(&mut child);
     server.wait_for_request(&mut child);
+    ready.recv_timeout(Duration::from_secs(5)).unwrap();
+    ready.recv_timeout(Duration::from_secs(5)).unwrap();
     assert!(!temp.path("run/wave-000000/wave.json").exists());
     assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGTERM) }, 0);
     assert!(!child.wait_with_output().unwrap().status.success());
