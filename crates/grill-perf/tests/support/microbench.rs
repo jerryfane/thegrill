@@ -363,7 +363,7 @@ fn mb_reduce_artifact(plan: &Value, per_repetition: &[Vec<u64>], mismatches: u64
         },
         "clock": plan["clock"],
         "execution": {
-            "warmups": 1, "iterations": 5, "deadline_ms": 120000,
+            "warmups": 1, "iterations": 5, "deadline_ms": plan["allowance"]["deadline_ms"],
             "work_units": 1572864, "memory_bytes": 6291456,
             "completed": true, "timed_out": false, "observed_fallback": null
         },
@@ -391,6 +391,7 @@ fn mb_receipt(collector: &str) -> Value {
         "program": null,
         "program_sha256": null,
         "source_sha256": null,
+        "program_output": null,
         "started_unix_ms": START,
         "observation_unix_ms": START,
         "duration_ms": 0,
@@ -409,6 +410,17 @@ fn mb_member(role: &Path, slot: &str, plan: &Value, artifact: &Value, collector:
     receipt["adapter"] = artifact["adapter"].clone();
     receipt["provenance"] = artifact["provenance"].clone();
     receipt["program_sha256"] = artifact["program_sha256"].clone();
+    if artifact["provenance"] == "native_observed" && artifact["adapter"] != "cpu-sum-u64-reference" {
+        let stdout = fs::read(dir.join("artifact.json")).unwrap();
+        mb_write_bytes(&dir.join("stdout.bin"), &stdout);
+        mb_write_bytes(&dir.join("stderr.bin"), b"");
+        receipt["source_sha256"] = json!(mb_sha(&stdout));
+        receipt["program_output"] = json!({
+            "stdout_sha256": mb_sha(&stdout), "stderr_sha256": mb_sha(b""),
+            "stdout_bytes": stdout.len(), "stderr_bytes": 0,
+            "stdout_truncated": false, "stderr_truncated": false
+        });
+    }
     receipt["plan_sha256"] = json!(mb_sha(&fs::read(dir.join("plan.json")).unwrap()));
     receipt["artifact_sha256"] = json!(mb_sha(&fs::read(dir.join("artifact.json")).unwrap()));
     receipt["started_unix_ms"] = plan["acquisition"]["started_unix_ms"].clone();
@@ -486,7 +498,7 @@ fn mb_inspect(temp: &Temp, name: &str, plan: &Value, artifact: &Value) -> (i32, 
     mb_write(&dir.join("artifact.json"), artifact);
     let output = cli()
         .args(["microbench", "inspect"])
-        .arg(&dir)
+        .arg(dir.join("artifact.json"))
         .arg("--json")
         .output()
         .unwrap();
@@ -1252,13 +1264,20 @@ fn e3_parity_tolerance_boundaries_and_tier_fallbacks() {
     let temp = Temp::new();
     let plan = mb_e3_plan("a01", START);
 
-    // Exactly on the recomputed maxabs and nRMSE bounds passes.
+    // Exactly on the public helper's binary64 maxabs and nRMSE bounds passes.
     let mut boundary = mb_e3_artifact(&plan, "e3-grouped", "0.003500000");
-    boundary["correctness"]["e3"]["nrmse"] = json!("0.015100000");
+    boundary["correctness"]["e3"]["nrmse"] = json!("0.015099999999999999");
     let (code, report) = mb_inspect(&temp, "e3-boundary", &plan, &boundary);
     assert_eq!(code, 0, "{report}");
 
-    // One micro-unit beyond the bound fails.
+    // Decimal 0.0151 is the next binary64 value above the actual nRMSE bound.
+    let mut rounded_up = boundary.clone();
+    rounded_up["correctness"]["e3"]["nrmse"] = json!("0.015100000");
+    let (code, report) = mb_inspect(&temp, "e3-rounded-up", &plan, &rounded_up);
+    assert_eq!(code, 1);
+    assert!(mb_has(&report, "invalid", "CORRECTNESS_FAILED"), "{report}");
+
+    // Above the independent maxabs bound also fails.
     let (code, report) = mb_inspect(
         &temp,
         "e3-over",
@@ -1344,6 +1363,14 @@ fn external_program_launch_pins_the_program_and_retains_failures() {
     let receipt: Value = serde_json::from_slice(&fs::read(out.join("receipt.json")).unwrap()).unwrap();
     assert_eq!(receipt["program_sha256"], program_sha);
     assert_eq!(receipt["status"], "captured");
+    assert_eq!(fs::read(out.join("stdout.bin")).unwrap(), fs::read(&body_path).unwrap());
+    assert_eq!(fs::read(out.join("stderr.bin")).unwrap(), b"");
+    let inspected = cli().args(["microbench", "inspect"]).arg(&out).arg("--json").output().unwrap();
+    assert_eq!(mb_code(&inspected), 0);
+    assert_eq!(mb_stdout(&inspected)["acquisition_checked"], true);
+    let structural = cli().args(["microbench", "inspect"]).arg(out.join("artifact.json")).arg("--json").output().unwrap();
+    assert_eq!(mb_code(&structural), 0);
+    assert_eq!(mb_stdout(&structural)["acquisition_checked"], false);
 
     // A program that does not match the pinned hash never runs.
     let mut wrong = plan.clone();
@@ -1362,7 +1389,11 @@ fn external_program_launch_pins_the_program_and_retains_failures() {
         .output()
         .unwrap();
     assert_eq!(mb_code(&rejected), 1);
-    assert!(String::from_utf8_lossy(&rejected.stderr).contains("program_sha256"));
+    let wrong_receipt: Value =
+        serde_json::from_slice(&fs::read(temp.path("wrong").join("receipt.json")).unwrap()).unwrap();
+    assert_eq!(wrong_receipt["status"], "failed");
+    assert_eq!(fs::read(temp.path("wrong").join("stdout.bin")).unwrap(), b"");
+    assert_eq!(fs::read(temp.path("wrong").join("stderr.bin")).unwrap(), b"");
     assert!(!temp.path("wrong").join("artifact.json").exists());
 
     // Nonzero exit, malformed output and a missed deadline are retained as
@@ -1410,4 +1441,223 @@ fn external_program_launch_pins_the_program_and_retains_failures() {
             .unwrap();
         assert_eq!(mb_code(&inspected), 1, "{name}");
     }
+}
+
+/// Finite local fixture programs only; these commands do not load device adapters.
+#[cfg(target_os = "linux")]
+fn mb_program_command(temp: &Temp, name: &str, script: &str, deadline: u64) -> (Command, PathBuf) {
+    let program = temp.path(&format!("{name}.sh"));
+    mb_write_bytes(&program, script.as_bytes());
+    fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
+    let digest = mb_sha(script.as_bytes());
+    let mut plan = mb_reduce_plan("a01", START, 2);
+    plan["program_sha256"] = json!(digest);
+    plan["sources"] = mb_reduce_sources(&digest);
+    plan["allowance"]["deadline_ms"] = json!(deadline);
+    let plan_path = temp.path(&format!("{name}.json"));
+    mb_write(&plan_path, &plan);
+    let out = temp.path(name);
+    let mut command = cli();
+    command.args(["microbench", "capture", "--adapter", "nccl-allreduce-sum"])
+        .arg("--plan").arg(plan_path).arg("--out").arg(&out)
+        .arg("--program").arg(program).args(["--authorize-device-window", "--json"])
+        .stdout(Stdio::piped()).stderr(Stdio::piped());
+    (command, out)
+}
+
+#[cfg(target_os = "linux")]
+fn mb_raw_receipt(out: &Path) -> Value {
+    let receipt: Value = serde_json::from_slice(&fs::read(out.join("receipt.json")).unwrap()).unwrap();
+    for stream in ["stdout", "stderr"] {
+        let bytes = fs::read(out.join(format!("{stream}.bin"))).unwrap();
+        assert_eq!(receipt["program_output"][format!("{stream}_sha256")], mb_sha(&bytes));
+        assert_eq!(receipt["program_output"][format!("{stream}_bytes")], bytes.len());
+    }
+    assert_eq!(receipt["source_sha256"], receipt["program_output"]["stdout_sha256"]);
+    receipt
+}
+
+#[cfg(target_os = "linux")]
+fn mb_assert_child_stopped(pid_file: &Path) {
+    let pid: u32 = fs::read_to_string(pid_file).unwrap().trim().parse().unwrap();
+    // Read only: never signal an already-reaped descendant by its numeric PID.
+    let limit = Instant::now() + Duration::from_secs(1);
+    loop {
+        match fs::read_to_string(format!("/proc/{pid}/stat")) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+            Ok(stat) if matches!(stat.rsplit_once(") ").unwrap().1.as_bytes()[0], b'Z' | b'X') => return,
+            Ok(_) if Instant::now() < limit => thread::sleep(Duration::from_millis(2)),
+            state => panic!("owned finite descendant still running: {state:?}"),
+        }
+    }
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn external_program_deadline_does_not_join_inherited_pipes() {
+    let temp = Temp::new();
+    let pid = temp.path("descendant.pid");
+    let script = format!(
+        "#!/bin/sh\nprintf diagnostic >&2\nsleep 2 &\nprintf '%s\\n' \"$!\" > '{}'\nwait\n", pid.display()
+    );
+    let (mut command, out) = mb_program_command(&temp, "deadline", &script, 50);
+    let output = command.output().unwrap();
+    assert_eq!(mb_code(&output), 1);
+    let receipt = mb_raw_receipt(&out);
+    assert!(receipt["duration_ms"].as_u64().unwrap() < 1000);
+    assert_eq!(receipt["status"], "failed");
+    assert_eq!(fs::read(out.join("stderr.bin")).unwrap(), b"diagnostic");
+    mb_assert_child_stopped(&pid);
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn external_program_cancellation_cleans_only_owned_group() {
+    let temp = Temp::new();
+    for (name, signal) in [("interrupt", libc::SIGINT), ("terminate", libc::SIGTERM)] {
+        let pid = temp.path(&format!("{name}.pid"));
+        let script = format!(
+            "#!/bin/sh\nprintf cancellation-diagnostic >&2\nsleep 2 &\nprintf '%s\\n' \"$!\" > '{}'\nwait\n", pid.display()
+        );
+        let (mut command, out) = mb_program_command(&temp, name, &script, 10000);
+        let collector = command.spawn().unwrap();
+        let ready_limit = Instant::now() + Duration::from_secs(2);
+        while !pid.exists() && Instant::now() < ready_limit {
+            thread::sleep(Duration::from_millis(2));
+        }
+        assert!(pid.exists(), "producer did not reach cancellation handshake");
+        // A separately owned finite child is outside the collector's new group.
+        let mut unrelated = Command::new("sleep").arg("2").spawn().unwrap();
+        // Collector has not been reaped, so its PID remains reserved.
+        assert_eq!(unsafe { libc::kill(collector.id() as libc::pid_t, signal) }, 0);
+        let started = Instant::now();
+        let output = collector.wait_with_output().unwrap();
+        assert_eq!(mb_code(&output), 1);
+        assert!(started.elapsed() < Duration::from_secs(1));
+        let receipt = mb_raw_receipt(&out);
+        assert_eq!(receipt["status"], "failed");
+        assert!(receipt["failure"].as_str().unwrap().contains("cancelled"));
+        assert_eq!(fs::read(out.join("stderr.bin")).unwrap(), b"cancellation-diagnostic");
+        mb_assert_child_stopped(&pid);
+        assert!(unrelated.try_wait().unwrap().is_none(), "unrelated child was signalled");
+        unrelated.kill().unwrap();
+        unrelated.wait().unwrap();
+    }
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn external_program_retains_failed_raw_bytes_and_output_caps() {
+    let temp = Temp::new();
+    for (name, script, stdout, stderr) in [
+        ("malformed-raw", "#!/bin/sh\nprintf not-json\nprintf diagnostic >&2\n", b"not-json".as_slice(), b"diagnostic".as_slice()),
+        ("nonzero-raw", "#!/bin/sh\nprintf partial\nprintf failed >&2\nexit 7\n", b"partial".as_slice(), b"failed".as_slice()),
+        ("spawn-raw", "#!/nonexistent-grill-fixture-interpreter\n", b"".as_slice(), b"".as_slice()),
+    ] {
+        let (mut command, out) = mb_program_command(&temp, name, script, 10000);
+        assert_eq!(mb_code(&command.output().unwrap()), 1);
+        let receipt = mb_raw_receipt(&out);
+        assert_eq!(receipt["status"], "failed");
+        assert_eq!(fs::read(out.join("stdout.bin")).unwrap(), stdout);
+        assert_eq!(fs::read(out.join("stderr.bin")).unwrap(), stderr);
+        // Corruption is checked even though failed captures have no artifact.json.
+        fs::write(out.join("stderr.bin"), b"tampered").unwrap();
+        let inspected = cli().args(["microbench", "inspect"]).arg(&out).output().unwrap();
+        assert_eq!(mb_code(&inspected), 1);
+        assert!(String::from_utf8_lossy(&inspected.stderr).contains("IdentityDrift"));
+    }
+    for (name, script, stream, cap) in [
+        ("stdout-cap", "#!/bin/sh\nhead -c 1048577 /dev/zero\n", "stdout", 1048576),
+        ("stderr-cap", "#!/bin/sh\nhead -c 65537 /dev/zero >&2\n", "stderr", 65536),
+    ] {
+        let (mut command, out) = mb_program_command(&temp, name, script, 10000);
+        assert_eq!(mb_code(&command.output().unwrap()), 1);
+        let receipt = mb_raw_receipt(&out);
+        assert_eq!(receipt["status"], "failed");
+        assert_eq!(receipt["program_output"][format!("{stream}_bytes")], cap);
+        assert_eq!(receipt["program_output"][format!("{stream}_truncated")], true);
+    }
+}
+
+#[test]
+fn external_raw_evidence_integrity_gates_native_comparison() {
+    let temp = Temp::new();
+    let mut roles = Vec::new();
+    let revision = mb_reduce_plan("unused", START, 2)["revision"].as_str().unwrap().to_string();
+    for (role_index, role) in ["baseline", "candidate", "reference"].into_iter().enumerate() {
+        let dir = mb_dir(&temp.path(role));
+        for index in 0..3 {
+            let slot = format!("{role}{index:02}");
+            let plan = mb_reduce_plan(&slot, START + (role_index * 60000 + index * 1000) as u64, 2);
+            let artifact = mb_reduce_artifact(&plan, &vec![vec![1000, 1000]; 5], 0);
+            mb_member(&dir, &slot, &plan, &artifact, COLLECTOR);
+        }
+        roles.push(dir);
+    }
+    let mut study = mb_study(&revision, &revision, 3, 3);
+    study["adapter"] = json!("nccl-allreduce-sum");
+    let compare = |name| mb_compare(&temp, name, &study, &roles[0], &roles[1], &roles[2]);
+    let (code, report, _) = compare("intact-raw");
+    assert_eq!(code, 0, "{report}");
+    let member = roles[1].join("candidate00");
+    let receipt_path = member.join("receipt.json");
+    let original = fs::read(&receipt_path).unwrap();
+    let receipt: Value = serde_json::from_slice(&original).unwrap();
+    for mode in ["missing-manifest", "missing-stdout", "changed-stderr", "source-drift", "truncation", "changed-artifact"] {
+        let mut changed = receipt.clone();
+        let stdout = fs::read(member.join("stdout.bin")).unwrap();
+        let artifact = fs::read(member.join("artifact.json")).unwrap();
+        match mode {
+            "missing-manifest" => { changed.as_object_mut().unwrap().remove("program_output"); }
+            "missing-stdout" => { fs::remove_file(member.join("stdout.bin")).unwrap(); }
+            "changed-stderr" => { fs::write(member.join("stderr.bin"), b"changed").unwrap(); }
+            "source-drift" => { changed["source_sha256"] = json!("0".repeat(64)); }
+            "truncation" => { changed["program_output"]["stdout_truncated"] = json!(true); }
+            "changed-artifact" => {
+                let mut value: Value = serde_json::from_slice(&artifact).unwrap();
+                value["samples"][0]["raw"] = json!("900");
+                value["samples"][0]["duration"]["numerator"] = json!(900);
+                mb_write(&member.join("artifact.json"), &value);
+                changed["artifact_sha256"] = json!(mb_sha(&fs::read(member.join("artifact.json")).unwrap()));
+            }
+            _ => unreachable!(),
+        }
+        mb_write(&receipt_path, &changed);
+        let (code, report, _) = compare(mode);
+        assert!(code == 1 || code == 2, "{mode}: {report}");
+        assert_ne!(report["decision"], "PASS", "{mode}: {report}");
+        fs::write(&receipt_path, &original).unwrap();
+        fs::write(member.join("stdout.bin"), &stdout).unwrap();
+        fs::write(member.join("stderr.bin"), b"").unwrap();
+        fs::write(member.join("artifact.json"), &artifact).unwrap();
+    }
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn external_program_normal_exit_cleans_inherited_pipe_descendants() {
+    let temp = Temp::new();
+    let pid = temp.path("normal-child.pid");
+    let body = temp.path("normal-body.json");
+    let script = format!(
+        "#!/bin/sh\nsleep 2 &\nprintf '%s\\n' \"$!\" > '{}'\nhead -c 65536 /dev/zero >&2\ncat '{}'\n", pid.display(), body.display()
+    );
+    let (mut command, out) = mb_program_command(&temp, "normal", &script, 10000);
+    let plan: Value = serde_json::from_slice(&fs::read(temp.path("normal.json")).unwrap()).unwrap();
+    mb_write(&body, &mb_reduce_artifact(&plan, &vec![vec![1000, 1000]; 5], 0));
+    // Exact caps remain complete evidence; only excess bytes imply truncation.
+    let mut bytes = fs::read(&body).unwrap();
+    bytes.resize(1048576, b' ');
+    fs::write(&body, &bytes).unwrap();
+    let output = command.output().unwrap();
+    assert_eq!(mb_code(&output), 0, "{}", String::from_utf8_lossy(&output.stdout));
+    let receipt = mb_raw_receipt(&out);
+    assert!(receipt["duration_ms"].as_u64().unwrap() < 1000,
+        "waited for a descendant's inherited pipe");
+    assert_eq!(receipt["status"], "captured");
+    assert_eq!(receipt["program_output"]["stdout_bytes"], 1048576);
+    assert_eq!(receipt["program_output"]["stderr_bytes"], 65536);
+    assert_eq!(receipt["program_output"]["stdout_truncated"], false);
+    assert_eq!(receipt["program_output"]["stderr_truncated"], false);
+    mb_assert_child_stopped(&pid);
 }

@@ -30,9 +30,39 @@ grill-perf microbench compare --study STUDY --baseline DIR --candidate DIR --ref
 ```
 
 `capture` writes `plan.json`, `artifact.json` and `receipt.json` into a fresh
-`DIR`; an existing directory is never overwritten. `import` writes the same
-three files with `provenance: imported`, so retained producer bytes can be
-compared offline without ever being labelled as exercised.
+`DIR`; an existing directory is never overwritten. External capture additionally
+retains bounded `stdout.bin` and `stderr.bin` on success **and failure**, including
+malformed JSON, nonzero exit and program setup/spawn failure (empty files when
+no bytes were observed). A failed launch need not have `artifact.json`.
+`import` writes the original three files with `provenance: imported`; CPU and
+import receipts have `program_output: null`.
+
+External receipts carry `program_output` with `stdout_sha256`, `stderr_sha256`,
+`stdout_bytes`, `stderr_bytes`, `stdout_truncated`, and `stderr_truncated`.
+Hashes and lengths describe the exact retained prefixes: stdout is capped at
+1 MiB and stderr at 64 KiB, independently. Neither counter claims to count bytes
+discarded beyond its cap. A cap, read/setup failure or incomplete drainage is
+explicitly recorded in `failure`; any truncation withholds native eligibility.
+`source_sha256` keeps its source-input meaning: original imported artifact bytes
+for import, retained producer stdout for native external capture, null for CPU.
+It is not repurposed as a stderr or receipt hash.
+
+Directory inspection and comparison verify present receipts and raw manifests,
+bounded regular raw files, byte lengths, hashes and the native stdout/source
+digest binding. Complete native stdout is parsed again and must equal
+`artifact.json` after the collector's sole provenance normalization. A missing
+manifest cannot qualify a native external acquisition; old receipts remain
+readable, not silently upgraded. Missing/tampered raw bytes, a rewritten artifact
+without matching source bytes, or truncation withhold a favorable comparison.
+Failed captures' present raw manifests are checked even when no artifact exists.
+This is consistency checking, not authenticated execution: rewriting an entire
+self-consistent evidence directory is not prevented.
+
+`inspect FILE` remains plain structural inspection (`acquisition_checked: false`);
+it checks any present sibling raw manifest but does not establish an eligible
+native acquisition. `inspect DIR` performs acquisition checks
+(`acquisition_checked: true`). Neither flag is device qualification or a study
+verdict; inspect reasons and compare the complete prospectively declared study.
 
 Exit codes follow the existing observed-envelope order: `0` PASS, `1` ERROR
 (invalid, corrupt, drifted or incomplete-declaration evidence), `2`
@@ -242,9 +272,49 @@ substituted for the algorithm payload. `microbench inspect` prints both.
 Every plan declares finite `work_units`, `memory_bytes` and `deadline_ms`
 before execution. The collector rejects a plan whose declared allowance cannot
 cover the frozen cell, and withholds evidence whose observed work or memory
-exceeds the declaration. A producer is killed at the declared Grill-side
-deadline; the partial run is retained as a failed receipt with no artifact, so a
-timeout can never masquerade as an empty successful measurement.
+exceeds the declaration. Linux external capture places only the explicitly
+spawned program in a fresh process group. Deadline expiry, observed SIGINT or
+SIGTERM cancellation, capture failure, and normal leader exit all finish by
+signalling that owned group with SIGKILL, including its normal descendants.
+The collector never signals the invoking shell's group, unrelated PIDs,
+operator-started peers or services. A graceful **collector cancellation** means
+the collector retains a failed receipt; it does not promise a producer shutdown
+hook or a distributed collective's graceful teardown.
+
+The collector observes leader exit with `waitid(WNOWAIT | WNOHANG)` and sends
+its sole group signal **before reaping the leader**. The unreaped leader reserves
+the numeric PID/PGID, avoiding signal-after-reap reuse races even on normal exit.
+An ignored SIGCHLD, auto-reap setting or competing SIGCHLD handler fails setup
+closed; unexpected loss of the waitable leader prevents any numeric group
+signal and records a cleanup failure. No group signal occurs after `try_wait`.
+
+There are no blocking reader threads or joins. Both output pipes are nonblocking;
+each polling turn reads at most 16 chunks of 8192 bytes per stream, then checks
+exit, caps, cancellation and the monotonic deadline. The poll sleep is 2 ms.
+After the group signal, drainage and nonblocking leader reaping have a separate
+100 ms allowance. Open pipes at that boundary are closed, their retained prefixes
+are marked truncated, and cleanup/reap failures remain visible. A descendant
+holding a pipe cannot extend collection until EOF. Under ordinary scheduling,
+the collection budget is the declared deadline plus one bounded polling turn
+and at most 100 ms cleanup plus its final polling turn; receipt `duration_ms`
+includes launch and cleanup, not program hashing or evidence publication.
+
+These are algorithmic wait bounds, **not hard real-time OS guarantees**.
+Scheduling stalls, blocked kernel execution (including spawn/exec or filesystem
+I/O), and uninterruptible tasks cannot be preempted by this collector. A task
+still unreapable after cleanup is reported rather than awaited indefinitely.
+The collector catches SIGINT/SIGTERM from external setup through the collection
+decision before final publication; a later signal does not revoke an already
+committing result. Storage failure can leave partial evidence without a final
+receipt. SIGKILL of the collector, power loss and crashes cannot run cleanup or
+guarantee a receipt. A producer that deliberately escapes its process group
+(for example with `setsid`) is outside group containment; no process discovery,
+subreaper or daemon is introduced to chase it. Ordinary descendants in the
+owned group receive the cleanup signal, but this is not a hostile-program sandbox.
+
+Native external launch fails closed on non-Linux platforms rather than using
+direct-child-only cleanup. This platform gate does not apply to CPU reference,
+import or offline inspection paths.
 
 ## Launching the collective: direct pinned execution, explicit environment
 
@@ -334,8 +404,9 @@ before the measured acquisitions run:
 * Every acquisition in a study must have been recorded by one collector
   identity; a mixed set is `CollectorMismatch`.
 
-Each acquisition directory is exactly what `capture`/`import` produce
-(`plan.json`, `artifact.json`, `receipt.json`), so a role directory looks like:
+Each acquisition directory is what `capture`/`import` produce
+(`plan.json`, `artifact.json`, `receipt.json`, and for native external captures
+`stdout.bin` and `stderr.bin`), so a CPU role directory looks like:
 
 ```
 baseline/

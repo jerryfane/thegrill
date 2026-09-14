@@ -66,6 +66,7 @@ use crate::model::{FILE_CAP, Result};
 use crate::policy::Outcome;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "linux")]
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -77,8 +78,13 @@ pub const VERSION: u32 = 1;
 
 /// Bounded operator program output; a larger artifact is rejected.
 pub const OUTPUT_CAP: usize = 1024 * 1024;
-/// Bounded retained stderr for a failed operator program.
+/// Bounded retained stderr for every operator program.
 pub const STDERR_CAP: usize = 64 * 1024;
+/// Polling cadence and post-signal drain/reap allowance, not real-time guarantees.
+#[cfg(target_os = "linux")]
+const PROGRAM_POLL: Duration = Duration::from_millis(2);
+#[cfg(target_os = "linux")]
+const PROGRAM_CLEANUP: Duration = Duration::from_millis(100);
 /// Bounded significant digits in a retained decimal value.
 pub const DECIMAL_DIGITS: usize = 32;
 /// Bounded decimal exponent magnitude in a retained scientific value.
@@ -642,6 +648,18 @@ pub enum ReceiptStatus {
     Failed,
 }
 
+/// Hashes and lengths describe exactly the retained prefixes, not discarded bytes.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ProgramOutput {
+    pub stdout_sha256: String,
+    pub stderr_sha256: String,
+    pub stdout_bytes: u64,
+    pub stderr_bytes: u64,
+    pub stdout_truncated: bool,
+    pub stderr_truncated: bool,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Receipt {
@@ -656,6 +674,7 @@ pub struct Receipt {
     pub program: Option<String>,
     pub program_sha256: Option<String>,
     pub source_sha256: Option<String>,
+    pub program_output: Option<ProgramOutput>,
     pub started_unix_ms: u64,
     pub observation_unix_ms: u64,
     pub duration_ms: u64,
@@ -1978,99 +1997,285 @@ fn cpu_reference(plan: &Plan, bound: u32, collector_sha256: &str) -> Result<Arti
 // Explicit operator programs
 // ---------------------------------------------------------------------------
 
+#[derive(Default)]
 struct ProgramRun {
     stdout: Vec<u8>,
     stderr: Vec<u8>,
     stdout_truncated: bool,
+    stderr_truncated: bool,
     status: Option<i32>,
-    timed_out: bool,
-    spawn_error: Option<String>,
+    failure: Option<String>,
     elapsed_ms: u64,
 }
 
-fn read_bounded(reader: impl std::io::Read, cap: usize) -> (Vec<u8>, bool) {
-    use std::io::Read;
-    let mut bytes = Vec::new();
-    let mut limited = reader.take(cap as u64 + 1);
-    let read_error = limited.read_to_end(&mut bytes).is_err();
-    let truncated = read_error || bytes.len() > cap;
-    bytes.truncate(cap);
-    (bytes, truncated)
+impl ProgramRun {
+    fn fail(&mut self, detail: impl AsRef<str>) {
+        if let Some(failure) = &mut self.failure {
+            failure.push_str("; ");
+            failure.push_str(detail.as_ref());
+        } else {
+            self.failure = Some(detail.as_ref().to_string());
+        }
+    }
+
+    fn output(&self) -> ProgramOutput {
+        ProgramOutput {
+            stdout_sha256: evidence::digest(&self.stdout),
+            stderr_sha256: evidence::digest(&self.stderr),
+            stdout_bytes: self.stdout.len() as u64,
+            stderr_bytes: self.stderr.len() as u64,
+            stdout_truncated: self.stdout_truncated,
+            stderr_truncated: self.stderr_truncated,
+        }
+    }
 }
 
-/// Launch one explicitly declared program with a bounded Grill-side deadline.
-/// The program is invoked as `PROGRAM [extra..] --plan PLAN`, so a wrapper such
-/// as `torchrun --nproc-per-node N SCRIPT` receives the plan as a trailing
-/// argument for the script. Only stdout is parsed as the artifact body, and
-/// stdout is never interpreted as shell.
+/// Scoped to the synchronous external-capture command, including publication.
+/// Existing serving collectors own their separate process-wide signal latch.
+#[cfg(target_os = "linux")]
+mod program_signals {
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    static ACTIVE: Mutex<()> = Mutex::new(());
+    static CANCELLED: AtomicBool = AtomicBool::new(false);
+
+    extern "C" fn cancel(_: libc::c_int) {
+        CANCELLED.store(true, Ordering::SeqCst);
+    }
+
+    pub fn cancelled() -> bool {
+        CANCELLED.load(Ordering::SeqCst)
+    }
+
+    pub struct Guard {
+        previous: Vec<(libc::c_int, libc::sigaction)>,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl Guard {
+        pub fn install() -> crate::model::Result<Self> {
+            let lock = ACTIVE.try_lock().map_err(|_| "external capture already active")?;
+            CANCELLED.store(false, Ordering::SeqCst);
+            let mut guard = Self { previous: Vec::new(), _lock: lock };
+            // Auto-reaping or a competing SIGCHLD handler can release the PID/PGID.
+            let mut chld: libc::sigaction = unsafe { std::mem::zeroed() };
+            if unsafe { libc::sigaction(libc::SIGCHLD, std::ptr::null(), &mut chld) } != 0
+                || chld.sa_sigaction != libc::SIG_DFL
+                || chld.sa_flags & libc::SA_NOCLDWAIT != 0
+            {
+                return Err("external capture requires a waitable child leader".into());
+            }
+            for signal in [libc::SIGINT, libc::SIGTERM] {
+                let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+                action.sa_sigaction = cancel as *const () as libc::sighandler_t;
+                unsafe { libc::sigemptyset(&mut action.sa_mask) };
+                let mut previous = unsafe { std::mem::zeroed() };
+                if unsafe { libc::sigaction(signal, &action, &mut previous) } != 0 {
+                    return Err(format!("install capture signal handler: {}", std::io::Error::last_os_error()));
+                }
+                guard.previous.push((signal, previous));
+            }
+            Ok(guard)
+        }
+    }
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            for (signal, previous) in self.previous.iter().rev() {
+                unsafe { libc::sigaction(*signal, previous, std::ptr::null_mut()) };
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn nonblocking(stream: &impl std::os::fd::AsRawFd) -> std::io::Result<()> {
+    let fd = stream.as_raw_fd();
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// At most 16 reads per stream per tick, so a busy writer cannot starve the timer.
+#[cfg(target_os = "linux")]
+fn drain(
+    stream: &mut impl std::io::Read,
+    bytes: &mut Vec<u8>,
+    cap: usize,
+    truncated: &mut bool,
+    done: &mut bool,
+) -> std::io::Result<()> {
+    if *done {
+        return Ok(());
+    }
+    let mut buffer = [0_u8; 8192];
+    for _ in 0..16 {
+        match stream.read(&mut buffer) {
+            Ok(0) => {
+                *done = true;
+                break;
+            }
+            Ok(count) => {
+                let retained = count.min(cap - bytes.len());
+                bytes.extend_from_slice(&buffer[..retained]);
+                *truncated |= retained < count;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => break,
+            Err(error) => {
+                *truncated = true;
+                *done = true;
+                return Err(error);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Observe exit without reaping: the owned leader reserves its PID and PGID.
+#[cfg(target_os = "linux")]
+fn leader_exited(pid: u32) -> std::io::Result<bool> {
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    let result = unsafe {
+        libc::waitid(libc::P_PID, pid, &mut info, libc::WEXITED | libc::WNOHANG | libc::WNOWAIT)
+    };
+    if result != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(unsafe { info.si_pid() } != 0)
+}
+
+/// Launch only PROGRAM [extra..] --plan PLAN. No shell interpretation.
+/// No wait/reader joins: cleanup has its own finite drain/reap allowance.
+#[cfg(target_os = "linux")]
 fn run_program(program: &Path, extra: &[String], plan_path: &Path, deadline: Duration) -> ProgramRun {
-    let mut command = Command::new(program);
-    command
-        .args(extra)
-        .arg("--plan")
-        .arg(plan_path)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    use std::os::unix::process::CommandExt;
     let started = Instant::now();
-    let mut child = match command.spawn() {
+    let mut run = ProgramRun::default();
+    if program_signals::cancelled() {
+        run.fail("collector cancelled before program launch");
+        return run;
+    }
+    let mut child = match Command::new(program)
+        .args(extra).arg("--plan").arg(plan_path)
+        .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped())
+        .process_group(0).spawn()
+    {
         Ok(child) => child,
         Err(error) => {
-            return ProgramRun {
-                stdout: Vec::new(),
-                stderr: Vec::new(),
-                stdout_truncated: false,
-                status: None,
-                timed_out: false,
-                spawn_error: Some(format!("spawn {}: {error}", program.display())),
-                elapsed_ms: started.elapsed().as_millis() as u64,
-            };
+            run.fail(format!("spawn {}: {error}", program.display()));
+            run.elapsed_ms = started.elapsed().as_millis() as u64;
+            return run;
         }
     };
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
-    let out_reader = std::thread::spawn(move || match stdout {
-        Some(stream) => read_bounded(stream, OUTPUT_CAP),
-        None => (Vec::new(), false),
-    });
-    let err_reader = std::thread::spawn(move || match stderr {
-        Some(stream) => read_bounded(stream, STDERR_CAP),
-        None => (Vec::new(), false),
-    });
-    let mut status = None;
-    let mut timed_out = false;
-    let mut wait_error = None;
-    loop {
-        match child.try_wait() {
-            Ok(Some(state)) => {
-                status = state.code();
-                break;
-            }
-            Ok(None) => (),
-            Err(error) => {
-                let _ = child.kill();
-                wait_error = Some(format!("wait for {}: {error}", program.display()));
-                break;
-            }
-        }
-        if started.elapsed() >= deadline {
-            let _ = child.kill();
-            timed_out = true;
-            let _ = child.wait();
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(2));
+    let pid = child.id();
+    let mut stdout = child.stdout.take().expect("piped stdout");
+    let mut stderr = child.stderr.take().expect("piped stderr");
+    let mut out_done = false;
+    let mut err_done = false;
+    if let Err(error) = nonblocking(&stdout) {
+        run.fail(format!("stdout nonblocking setup: {error}"));
+        run.stdout_truncated = true;
+        out_done = true; // Never read a descriptor whose nonblocking setup failed.
     }
-    let (stdout, stdout_truncated) = out_reader.join().unwrap_or((Vec::new(), false));
-    let (stderr, _) = err_reader.join().unwrap_or((Vec::new(), false));
+    if let Err(error) = nonblocking(&stderr) {
+        run.fail(format!("stderr nonblocking setup: {error}"));
+        run.stderr_truncated = true;
+        err_done = true;
+    }
+    let mut cleanup_started = None;
+    let mut reaped = false;
+    let mut cancellation_recorded = false;
+    loop {
+        if let Err(error) = drain(&mut stdout, &mut run.stdout, OUTPUT_CAP, &mut run.stdout_truncated, &mut out_done) {
+            run.fail(format!("stdout read failed: {error}"));
+        }
+        if let Err(error) = drain(&mut stderr, &mut run.stderr, STDERR_CAP, &mut run.stderr_truncated, &mut err_done) {
+            run.fail(format!("stderr read failed: {error}"));
+        }
+        if program_signals::cancelled() && !cancellation_recorded {
+            run.fail("collector cancelled by SIGINT or SIGTERM");
+            cancellation_recorded = true;
+        }
+        if cleanup_started.is_none() {
+            if run.stdout_truncated || run.stderr_truncated {
+                run.fail("program stdout/stderr capture truncated (cap or read/setup failure)");
+            }
+            if started.elapsed() >= deadline {
+                run.fail(format!("program exceeded the declared {} ms deadline", deadline.as_millis()));
+            }
+            let exited = match leader_exited(pid) {
+                Ok(exited) => exited,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => false,
+                Err(error) => {
+                    // In particular ECHILD means identity is no longer reserved.
+                    // Never signal a numeric PID/PGID after that loss of ownership.
+                    run.fail(format!("observe owned leader failed; group not signalled: {error}"));
+                    break;
+                }
+            };
+            if exited || run.failure.is_some() {
+                // This is the ONLY group signal. WNOWAIT above kept the leader
+                // unreaped even on normal exit; no try_wait occurs before it.
+                if unsafe { libc::kill(-(pid as libc::pid_t), libc::SIGKILL) } != 0 {
+                    run.fail(format!("owned group cleanup signal failed: {}", std::io::Error::last_os_error()));
+                }
+                cleanup_started = Some(Instant::now());
+            }
+        }
+        if let Some(cleanup) = cleanup_started {
+            // No further group signals are permitted after this reap.
+            if !reaped {
+                match child.try_wait() {
+                    Ok(Some(status)) => {
+                        run.status = status.code();
+                        reaped = true;
+                    }
+                    Ok(None) => (),
+                    Err(error) => {
+                        run.fail(format!("owned leader reap failed: {error}"));
+                        break;
+                    }
+                }
+            }
+            if reaped && out_done && err_done {
+                break;
+            }
+            if cleanup.elapsed() >= PROGRAM_CLEANUP {
+                if !reaped {
+                    run.fail("owned leader not reaped within 100 ms cleanup allowance");
+                }
+                break;
+            }
+        }
+        std::thread::sleep(PROGRAM_POLL);
+    }
+    if !out_done {
+        run.stdout_truncated = true;
+        run.fail("stdout drainage incomplete at cleanup boundary");
+    }
+    if !err_done {
+        run.stderr_truncated = true;
+        run.fail("stderr drainage incomplete at cleanup boundary");
+    }
+    if run.stdout_truncated || run.stderr_truncated {
+        run.fail("raw output is truncated; retained prefixes only");
+    }
+    if run.status != Some(0) {
+        run.fail(format!("program exited with status {:?}", run.status));
+    }
+    run.elapsed_ms = started.elapsed().as_millis() as u64;
+    run
+}
+
+#[cfg(not(target_os = "linux"))]
+fn run_program(_: &Path, _: &[String], _: &Path, _: Duration) -> ProgramRun {
     ProgramRun {
-        stdout,
-        stderr,
-        stdout_truncated,
-        status,
-        timed_out,
-        spawn_error: wait_error,
-        elapsed_ms: started.elapsed().as_millis() as u64,
+        failure: Some("native external capture requires Linux owned-process-group containment".into()),
+        ..ProgramRun::default()
     }
 }
 
@@ -2117,7 +2322,7 @@ pub struct CaptureReport {
 
 impl CaptureReport {
     pub fn exit(&self) -> u8 {
-        if !self.invalid.is_empty() || (self.artifact_sha256.is_none() && self.failure.is_some()) {
+        if !self.invalid.is_empty() || self.failure.is_some() {
             Outcome::Error.exit()
         } else if !self.unavailable.is_empty() {
             Outcome::Inconclusive.exit()
@@ -2149,6 +2354,8 @@ pub struct Inspection {
     pub operation: Operation,
     pub plan_sha256: Option<String>,
     pub plan_verified: bool,
+    /// Directory acquisition checks ran; a standalone file is structural only.
+    pub acquisition_checked: bool,
     pub artifact_sha256: String,
     /// Collector that produced this receipt, when one was retained.
     pub collector_sha256: Option<String>,
@@ -2424,6 +2631,7 @@ impl ReceiptSeed {
             program: None,
             program_sha256: None,
             source_sha256: None,
+            program_output: None,
             started_unix_ms: self.started_unix_ms,
             observation_unix_ms: self.observation_unix_ms,
             duration_ms: self.duration_ms,
@@ -2463,116 +2671,79 @@ pub fn capture(options: &CaptureOptions) -> Result<CaptureReport> {
         plan.adapter.name()
     )];
     evidence::fresh(&options.out)?;
-    let (artifact, mut receipt, failure) = if plan.adapter.external() {
-        let program = options.program.as_deref().ok_or(
-            "this adapter requires an explicitly declared --program; there is no discovery",
-        )?;
-        let program_sha256 = hash_program(program)?;
-        if plan.program_sha256.as_deref() != Some(program_sha256.as_str()) {
-            return Err(
-                "the declared program does not match plan.program_sha256; re-pin the plan instead of running a different producer"
-                    .into(),
-            );
+    #[cfg(target_os = "linux")]
+    let signal_guard = plan.adapter.external().then(program_signals::Guard::install);
+    let (artifact, mut receipt, mut failure) = if plan.adapter.external() {
+        let program = options.program.as_deref();
+        let mut program_sha256 = None;
+        let setup = (|| -> Result<()> {
+            #[cfg(target_os = "linux")]
+            if let Some(Err(error)) = &signal_guard {
+                return Err(error.clone());
+            }
+            let program = program.ok_or(
+                "this adapter requires an explicitly declared --program; there is no discovery",
+            )?;
+            let digest = hash_program(program)?;
+            program_sha256 = Some(digest.clone());
+            if plan.program_sha256.as_deref() != Some(digest.as_str()) {
+                return Err("the declared program does not match plan.program_sha256; re-pin the plan instead of running a different producer".into());
+            }
+            Ok(())
+        })();
+        if let Some(program) = program {
+            command.push(format!("program={}", program.display()));
         }
-        command.push(format!("program={}", program.display()));
         command.extend(options.args.iter().cloned());
         let plan_path = options.out.join("plan.json");
         evidence::write(&plan_path, &plan_bytes)?;
-        let run = run_program(
-            program,
-            &options.args,
-            &plan_path,
-            Duration::from_millis(plan.allowance.deadline_ms),
-        );
-        let source_sha256 = Some(evidence::digest(&run.stdout));
-        let failure = if let Some(error) = &run.spawn_error {
-            Some(error.clone())
-        } else if run.timed_out {
-            Some(format!(
-                "program exceeded the declared {} ms deadline and was terminated",
-                plan.allowance.deadline_ms
-            ))
-        } else if run.status != Some(0) {
-            Some(format!("program exited with status {:?}", run.status))
-        } else if run.stdout_truncated {
-            Some("program output exceeded the bounded artifact allowance".into())
-        } else {
-            None
+        let mut run = match setup {
+            Ok(()) => run_program(
+                program.expect("admitted program"), &options.args, &plan_path,
+                Duration::from_millis(plan.allowance.deadline_ms),
+            ),
+            Err(error) => ProgramRun { failure: Some(error), ..ProgramRun::default() },
         };
-        let parsed = if failure.is_none() {
+        // Raw bytes are authoritative even when JSON parsing, spawn or setup fails.
+        evidence::write(&options.out.join("stdout.bin"), &run.stdout)?;
+        evidence::write(&options.out.join("stderr.bin"), &run.stderr)?;
+        #[cfg(target_os = "linux")]
+        if program_signals::cancelled() && run.failure.is_none() {
+            run.fail("collector cancelled by SIGINT or SIGTERM");
+        }
+        let mut artifact = if run.failure.is_none() {
             match parse_artifact(&run.stdout) {
                 Ok(artifact) => Some(artifact),
                 Err(error) => {
-                    let mut receipt = ReceiptSeed {
-                        adapter: plan.adapter,
-                        provenance: Provenance::NativeObserved,
-                        status: ReceiptStatus::Failed,
-                        claim: "observed-producer-not-authenticated-execution",
-                        plan_sha256: plan_sha256.clone(),
-                        collector_sha256: collector_sha256.clone(),
-                        started_unix_ms,
-                        observation_unix_ms: unix_ms()?,
-                        duration_ms: run.elapsed_ms,
-                    }
-                    .build();
-                    receipt.program = Some(program.display().to_string());
-                    receipt.program_sha256 = Some(program_sha256.clone());
-                    receipt.source_sha256 = source_sha256.clone();
-                    receipt.command = command.clone();
-                    receipt.failure = Some(error.clone());
-                    publish(&options.out, &plan_bytes, None, &receipt)?;
-                    return Ok(CaptureReport {
-                        claim: "observed-producer-not-authenticated-execution".into(),
-                        status: "failed",
-                        adapter: plan.adapter,
-                        exerciser: exerciser(Provenance::NativeObserved, plan.adapter),
-                        provenance: Provenance::NativeObserved,
-                        plan_sha256,
-                        artifact_sha256: None,
-                        out: options.out.display().to_string(),
-                        program: Some(program.display().to_string()),
-                        program_sha256: Some(program_sha256),
-                        samples: 0,
-                        statistic: None,
-                        invalid: Vec::new(),
-                        unavailable: vec![Reason::InvalidArtifact],
-                        failure: Some(error),
-                        scope: scope_sentence(Provenance::NativeObserved, plan.adapter),
-                    });
+                    run.fail(error);
+                    None
                 }
             }
         } else {
             None
         };
-        let mut artifact = parsed;
-        if let Some(payload) = artifact.as_mut()
-            && payload.provenance != Provenance::NativeObserved
-        {
-            payload.submitted_provenance = Some(payload.provenance);
-            payload.provenance = Provenance::NativeObserved;
+        if let Some(payload) = artifact.as_mut() {
+            native_provenance(payload);
         }
         let mut receipt = ReceiptSeed {
             adapter: plan.adapter,
             provenance: Provenance::NativeObserved,
-            status: if failure.is_some() {
-                ReceiptStatus::Failed
-            } else {
-                ReceiptStatus::Captured
-            },
+            status: if run.failure.is_some() { ReceiptStatus::Failed } else { ReceiptStatus::Captured },
             claim: "observed-producer-not-authenticated-execution",
             plan_sha256: plan_sha256.clone(),
             collector_sha256: collector_sha256.clone(),
             started_unix_ms,
             observation_unix_ms: unix_ms()?,
             duration_ms: run.elapsed_ms,
-        }
-        .build();
-        receipt.program = Some(program.display().to_string());
-        receipt.program_sha256 = Some(program_sha256);
-        receipt.source_sha256 = source_sha256;
+        }.build();
+        let output = run.output();
+        receipt.program = program.map(|path| path.display().to_string());
+        receipt.program_sha256 = program_sha256;
+        receipt.source_sha256 = Some(output.stdout_sha256.clone());
+        receipt.program_output = Some(output);
         receipt.command = command;
-        receipt.failure = failure.clone();
-        (artifact, receipt, failure)
+        receipt.failure = run.failure.clone();
+        (artifact, receipt, run.failure)
     } else {
         if options.program.is_some() {
             return Err(
@@ -2612,7 +2783,7 @@ pub fn capture(options: &CaptureOptions) -> Result<CaptureReport> {
         let failure = receipt.failure.clone();
         (Some(artifact), receipt, failure)
     };
-    let findings = match &artifact {
+    let mut findings = match &artifact {
         Some(artifact) => check_artifact(Some(&plan), artifact),
         None => {
             let mut findings = Findings::new();
@@ -2621,6 +2792,13 @@ pub fn capture(options: &CaptureOptions) -> Result<CaptureReport> {
         }
     };
     receipt.failure = receipt.failure.clone().or_else(|| failure.clone());
+    #[cfg(target_os = "linux")]
+    if plan.adapter.external() && program_signals::cancelled() {
+        failure.get_or_insert_with(|| "collector cancelled by SIGINT or SIGTERM".into());
+        receipt.status = ReceiptStatus::Failed;
+        receipt.failure = failure.clone();
+        findings.withhold(Reason::CaptureFailed);
+    }
     let (plan_sha256, artifact_sha256) =
         publish(&options.out, &plan_bytes, artifact.as_ref(), &receipt)?;
     Ok(CaptureReport {
@@ -2718,24 +2896,128 @@ enum LoadError {
     Invalid(Reason),
 }
 
+/// The only collector normalization applied to a native producer payload.
+fn native_provenance(artifact: &mut Artifact) {
+    if artifact.provenance != Provenance::NativeObserved {
+        artifact.submitted_provenance = Some(artifact.provenance);
+        artifact.provenance = Provenance::NativeObserved;
+    }
+}
+
+fn read_receipt(path: &Path) -> std::result::Result<Option<Receipt>, LoadError> {
+    let path = path.join("receipt.json");
+    match std::fs::symlink_metadata(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(_) => Err(LoadError::Invalid(Reason::InvalidArtifact)),
+        Ok(_) => {
+            let bytes = evidence::read(&path, FILE_CAP)
+                .map_err(|_| LoadError::Invalid(Reason::InvalidArtifact))?;
+            serde_json::from_slice(&bytes).map(Some)
+                .map_err(|_| LoadError::Invalid(Reason::InvalidArtifact))
+        }
+    }
+}
+
+/// Verify every present raw-output manifest, including failed acquisitions.
+/// Missing manifests are admitted by the archival reader, not by native eligibility.
+fn check_program_output(path: &Path, receipt: &Receipt) -> std::result::Result<Option<Vec<u8>>, LoadError> {
+    let Some(output) = &receipt.program_output else {
+        return Ok(None);
+    };
+    if !sha256(&output.stdout_sha256) || !sha256(&output.stderr_sha256)
+        || output.stdout_bytes > OUTPUT_CAP as u64 || output.stderr_bytes > STDERR_CAP as u64
+        || receipt.provenance != Provenance::NativeObserved || !receipt.adapter.external()
+        || receipt.source_sha256.as_deref() != Some(output.stdout_sha256.as_str())
+    {
+        return Err(LoadError::Invalid(Reason::IdentityDrift));
+    }
+    let stdout = evidence::read(&path.join("stdout.bin"), OUTPUT_CAP)
+        .map_err(|_| LoadError::Invalid(Reason::InvalidArtifact))?;
+    let stderr = evidence::read(&path.join("stderr.bin"), STDERR_CAP)
+        .map_err(|_| LoadError::Invalid(Reason::InvalidArtifact))?;
+    if stdout.len() as u64 != output.stdout_bytes || stderr.len() as u64 != output.stderr_bytes
+        || evidence::digest(&stdout) != output.stdout_sha256
+        || evidence::digest(&stderr) != output.stderr_sha256
+    {
+        return Err(LoadError::Invalid(Reason::IdentityDrift));
+    }
+    Ok(Some(stdout))
+}
+
 fn load_dir(path: &Path) -> std::result::Result<Loaded, LoadError> {
     evidence::directory(path).map_err(|_| LoadError::Unavailable(Reason::MissingArtifact))?;
     let plan_bytes = evidence::read(&path.join("plan.json"), FILE_CAP)
         .map_err(|_| LoadError::Unavailable(Reason::MissingArtifact))?;
     let plan = parse_plan(&plan_bytes).map_err(|_| LoadError::Invalid(Reason::InvalidPlan))?;
+    let receipt = read_receipt(path)?;
+    let raw_stdout = receipt.as_ref().map(|receipt| check_program_output(path, receipt)).transpose()?.flatten();
     let artifact_bytes = evidence::read(&path.join("artifact.json"), FILE_CAP)
         .map_err(|_| LoadError::Unavailable(Reason::MissingArtifact))?;
     let artifact =
         parse_artifact(&artifact_bytes).map_err(|_| LoadError::Invalid(Reason::InvalidArtifact))?;
-    let receipt = evidence::read(&path.join("receipt.json"), FILE_CAP)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<Receipt>(&bytes).ok());
-    let findings = check_artifact(Some(&plan), &artifact);
+    let plan_sha256 = evidence::digest(&plan_bytes);
+    let artifact_sha256 = evidence::digest(&artifact_bytes);
+    let mut findings = check_artifact(Some(&plan), &artifact);
+    match &receipt {
+        None => findings.withhold(Reason::MissingArtifact),
+        Some(receipt) => {
+            if receipt.kind != RECEIPT_KIND || receipt.version != VERSION
+                || receipt.plan_sha256 != plan_sha256
+                || receipt.artifact_sha256.as_deref() != Some(artifact_sha256.as_str())
+                || receipt.adapter != artifact.adapter || receipt.provenance != artifact.provenance
+                || receipt.program_sha256 != artifact.program_sha256
+                || !sha256(&receipt.collector_sha256)
+            {
+                findings.invalidate(Reason::IdentityDrift);
+            }
+            let expected_status = match receipt.provenance {
+                Provenance::NativeObserved => ReceiptStatus::Captured,
+                Provenance::Imported => ReceiptStatus::Imported,
+                Provenance::Declared => ReceiptStatus::Failed,
+            };
+            if receipt.failure.is_some() || receipt.status != expected_status {
+                findings.withhold(Reason::CaptureFailed);
+            }
+            if receipt.provenance == Provenance::NativeObserved {
+                if receipt.started_unix_ms < plan.acquisition.started_unix_ms
+                    || receipt.observation_unix_ms < receipt.started_unix_ms
+                {
+                    findings.invalidate(Reason::ObservedStartsOutOfOrder);
+                }
+                if !artifact.adapter.external() {
+                    let kernel = format!("cpu-sum-u64-reference-v1;collector:{}", receipt.collector_sha256);
+                    if artifact.kernel_revision.as_deref() != Some(kernel.as_str()) {
+                        findings.invalidate(Reason::IdentityDrift);
+                    }
+                }
+            }
+            if artifact.provenance == Provenance::NativeObserved && artifact.adapter.external() {
+                match (&receipt.program_output, raw_stdout) {
+                    (Some(output), Some(stdout)) => {
+                        if output.stdout_truncated || output.stderr_truncated {
+                            findings.withhold(Reason::CaptureFailed);
+                        } else {
+                            match parse_artifact(&stdout) {
+                                Ok(mut raw) => {
+                                    native_provenance(&mut raw);
+                                    if raw != artifact {
+                                        findings.invalidate(Reason::IdentityDrift);
+                                    }
+                                }
+                                Err(_) => findings.invalidate(Reason::InvalidArtifact),
+                            }
+                        }
+                    }
+                    _ => findings.withhold(Reason::MissingArtifact),
+                }
+            }
+        }
+    }
     Ok(Loaded {
         plan,
-        plan_sha256: evidence::digest(&plan_bytes),
+        plan_sha256,
         artifact,
-        artifact_sha256: evidence::digest(&artifact_bytes),
+        artifact_sha256,
         receipt,
         findings,
     })
@@ -2773,11 +3055,11 @@ pub fn inspect(options: &InspectOptions) -> Result<Inspection> {
         None => (None, None),
     };
     let findings = check_artifact(plan.as_ref(), &artifact);
-    let receipt = options
-        .path
-        .parent()
-        .and_then(|parent| evidence::read(&parent.join("receipt.json"), FILE_CAP).ok())
-        .and_then(|bytes| serde_json::from_slice::<Receipt>(&bytes).ok());
+    let parent = options.path.parent().unwrap_or(Path::new("."));
+    let receipt = read_receipt(parent).map_err(|_| "invalid sibling microbench receipt")?;
+    if let Some(receipt) = &receipt {
+        check_program_output(parent, receipt).map_err(|_| "invalid retained program output")?;
+    }
     Ok(inspection_of(
         options.path.display().to_string(),
         plan_sha256,
@@ -2785,6 +3067,7 @@ pub fn inspect(options: &InspectOptions) -> Result<Inspection> {
         artifact,
         receipt,
         findings,
+        false,
     ))
 }
 
@@ -2796,6 +3079,7 @@ fn inspection(options: &InspectOptions, plan_sha256: String, loaded: Loaded) -> 
         loaded.artifact,
         loaded.receipt,
         loaded.findings,
+        true,
     )
 }
 
@@ -2806,6 +3090,7 @@ fn inspection_of(
     artifact: Artifact,
     receipt: Option<Receipt>,
     findings: Findings,
+    acquisition_checked: bool,
 ) -> Inspection {
     let statistic = statistic(&artifact);
     let derived = statistic.and_then(|value| derived(&artifact.operation, &artifact.clock, value));
@@ -2824,6 +3109,7 @@ fn inspection_of(
         submitted_provenance: artifact.submitted_provenance,
         operation: artifact.operation.clone(),
         plan_verified: plan_sha256.is_some(),
+        acquisition_checked,
         plan_sha256,
         artifact_sha256,
         collector_sha256,
@@ -2849,46 +3135,10 @@ fn inspection_of(
 
 fn load_view(slot: &str, path: &Path) -> AcquisitionView {
     match load_dir(path) {
-        Ok(mut loaded) => {
-            let mut observed_interval = None;
-            match &loaded.receipt {
-                None => loaded.findings.withhold(Reason::MissingArtifact),
-                Some(receipt) => {
-                    if receipt.kind != RECEIPT_KIND
-                        || receipt.version != VERSION
-                        || receipt.plan_sha256 != loaded.plan_sha256
-                        || receipt.artifact_sha256.as_deref() != Some(&loaded.artifact_sha256)
-                        || receipt.adapter != loaded.artifact.adapter
-                        || receipt.provenance != loaded.artifact.provenance
-                        || receipt.program_sha256 != loaded.artifact.program_sha256
-                        || !sha256(&receipt.collector_sha256)
-                    {
-                        loaded.findings.invalidate(Reason::IdentityDrift);
-                    }
-                    let expected_status = match receipt.provenance {
-                        Provenance::NativeObserved => ReceiptStatus::Captured,
-                        Provenance::Imported => ReceiptStatus::Imported,
-                        Provenance::Declared => ReceiptStatus::Failed,
-                    };
-                    if receipt.status != expected_status || receipt.failure.is_some() {
-                        loaded.findings.withhold(Reason::CaptureFailed);
-                    }
-                    if receipt.provenance == Provenance::NativeObserved {
-                        if receipt.started_unix_ms < loaded.plan.acquisition.started_unix_ms
-                            || receipt.observation_unix_ms < receipt.started_unix_ms
-                        {
-                            loaded.findings.invalidate(Reason::ObservedStartsOutOfOrder);
-                        }
-                        observed_interval = Some([receipt.started_unix_ms, receipt.observation_unix_ms]);
-                        if !loaded.artifact.adapter.external() {
-                            let kernel = format!("cpu-sum-u64-reference-v1;collector:{}", receipt.collector_sha256);
-                            if loaded.artifact.kernel_revision.as_deref() != Some(kernel.as_str()) {
-                                loaded.findings.invalidate(Reason::IdentityDrift);
-                            }
-                        }
-                    }
-                }
-            }
+        Ok(loaded) => {
+            let observed_interval = loaded.receipt.as_ref()
+                .filter(|receipt| receipt.provenance == Provenance::NativeObserved)
+                .map(|receipt| [receipt.started_unix_ms, receipt.observation_unix_ms]);
             let statistic = loaded.findings.clean().then(|| statistic(&loaded.artifact)).flatten();
             AcquisitionView {
                 slot: slot.to_string(),
