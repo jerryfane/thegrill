@@ -661,7 +661,7 @@ def main() -> int:
                 "device": torch.cuda.get_device_name(local),
                 "failures": failures,
             },
-            object_list=gathered if rank == 0 else None,
+            object_gather_list=gathered if rank == 0 else None,
         )
     except SystemExit:
         raise

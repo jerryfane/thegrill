@@ -67,6 +67,8 @@
   graceful-cleanup guarantees.
   Collective warmup failures from every rank survive gathering, even when all
   measured reductions are correct; a CPU-only producer regression covers this.
+  Use PyTorch's `object_gather_list` argument when gathering completed rank
+  observations; the CPU transport fixture preserves the real API signature.
 - Expand the explicit archive allowlist with domain examples, offline guides and
   four opt-in Python producer modules. Installed verification shares the staging
   payload contract and checks executable permissions as well as bytes.

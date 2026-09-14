@@ -3,11 +3,11 @@
   "version": 1,
   "adapter": "nccl-allreduce-sum",
   "revision": "0000000000000000000000000000000000000000000000000000000000000000",
-  "program_sha256": "0a80b4c9a69819a2f5f890c72fb8ca5fe81b4f775a209d7c09f0fcae05c99a85",
+  "program_sha256": "d1b0ac064a530a92eae6dbaaec7fefda7837df3dcc1e1d3971d34ae52680cf6d",
   "sources": [
     {
       "path": "tools/microbench/nccl_allreduce_sum.py",
-      "sha256": "0a80b4c9a69819a2f5f890c72fb8ca5fe81b4f775a209d7c09f0fcae05c99a85"
+      "sha256": "d1b0ac064a530a92eae6dbaaec7fefda7837df3dcc1e1d3971d34ae52680cf6d"
     },
     {
       "path": "doc/PERFORMANCE.md",

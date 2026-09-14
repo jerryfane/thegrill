@@ -65,10 +65,10 @@ with tempfile.TemporaryDirectory() as temp:
             def reduce(buffer, **kwargs):
                 buffer.value = 1 + int(corrupt_peer and rank == 1 and state['iteration'] == 0)
                 state['iteration'] += 1
-            def gather(payload, object_list):
-                gathered[rank] = payload
+            def gather(obj, object_gather_list=None, dst=0, group=None, group_dst=None):
+                gathered[rank] = obj
                 if rank == 0:
-                    object_list[:] = [gathered[0], gathered[1]]
+                    object_gather_list[:] = [gathered[0], gathered[1]]
             distributed.init_process_group = init
             distributed.get_rank = lambda: rank
             distributed.get_world_size = lambda: 2
