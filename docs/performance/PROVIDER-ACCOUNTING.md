@@ -133,22 +133,31 @@ metrics is rejected before any dispatch, and declaring a metrics credential for
 version 1 is rejected. Metrics snapshots remain excluded from the model
 transport policy except for the declared credential.
 
-## Required telemetry (policy integration contract)
+## Required telemetry in policy2
 
-Optional version 2 diagnostics never change performance eligibility. Required
-evidence is a separate, explicit declaration owned by policy2:
+Optional version 2 diagnostics do not change performance eligibility. A policy2
+may instead include a nonempty `required_telemetry` array at its root:
 
 ```json
-{"name":"vllm:num_preemptions_total",
- "labels":{"engine":"0","model_name":"..."},
- "predicate":"zero_counter_delta"}
+{"required_telemetry":[
+  {"name":"vllm:num_preemptions_total",
+   "labels":{"engine":"0","model_name":"fixture-model"},
+   "predicate":"zero_counter_delta"}
+]}
 ```
+
+Keep the policy's other required pins and cell gates. Collect every A/B/A2 role
+with `--metrics-url "$METRICS_URL" --metrics-version 2`. The zero-counter
+predicate additionally requires
+`--metrics-isolation exclusive-single-acquisition` before dispatch. This is an
+operator declaration, not proof of isolation or request attribution.
 
 - `name` must be a member of the closed allowlist (never an epoch gauge).
 - `labels` is the exact identity: `engine` and `model_name` are free-form, and
   the metric's own selector (`source` or `position`) is required with a value
-  from the closed set. Wildcards, unknown label names and empty requirements are
-  invalid policy.
+  from the closed set. There is no wildcard matching. Unknown label names,
+  null/empty arrays, more than 256 requirements, and duplicate identities are
+  rejected before dispatch.
 - `present` requires the series in every required snapshot (no attribution);
   `continuous_counter` additionally requires whole-capture continuity with an
   unchanged epoch; `zero_counter_delta` additionally requires an explicit
@@ -160,12 +169,20 @@ evidence is a separate, explicit declaration owned by policy2:
 | Outcome | Meaning | Required handling |
 |---|---|---|
 | `satisfied` | every promised observation holds | continue to the other gates |
-| `refuted` | a promised zero total advanced | never PASS |
-| `unavailable` (with a fixed reason such as `scope_not_isolated`, `reset_observed`, `epoch_changed`, `missing_required_snapshot`, `series_absent`, `contradictory_accounting`) | the promise is not observed | INCONCLUSIVE, never PASS |
-| `error` (`no_metrics2`, `invalid_requirement`) | the promise cannot be evaluated | ERROR |
+| `refuted` | a promised zero total advanced | candidate: REGRESSION; baseline or repeat: unqualified reference and INCONCLUSIVE |
+| `unavailable` | the promise lacks complete, continuous or consistent evidence | INCONCLUSIVE, never PASS |
+| `error` | unsupported or malformed required evidence | ERROR |
 
-Required declarations are invalid policy without version 2 metrics, and a
-version 1 summary never satisfies a requirement.
+Decision JSON retains a separate `required_telemetry` assessment for each role,
+alongside the performance gates. Aggregate precedence is unchanged:
+ERROR, REGRESSION, INCONCLUSIVE, PASS. Required declarations are invalid without
+version 2 metrics; policy1 rejects them. Metrics controls without a metrics URL
+are rejected instead of ignored.
+
+Every planned snapshot must be retained. Missing endpoints cannot become zero
+deltas; reset, missing-epoch and changed-epoch intervals expose no qualified
+acquisition delta. Acquisition accounting also withholds those intervals.
+Missing position vectors cannot establish a zero sum or monotonicity.
 
 ## Limits of this protocol
 

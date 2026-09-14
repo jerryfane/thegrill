@@ -546,11 +546,15 @@ impl Protocol {
         waves: usize,
         version: u32,
         auth_env: Option<String>,
+        isolation: Option<String>,
         model_auth_env: Option<&str>,
     ) -> Result<Self> {
         match version {
             1 if auth_env.is_some() => Err(
                 "metrics diagnostics version 1 does not accept a metrics credential".into(),
+            ),
+            1 if isolation.is_some() => Err(
+                "metrics isolation requires the explicit version-2 protocol".into(),
             ),
             1 => Ok(Self::V1(Config::new(endpoint, waves))),
             2 => {
@@ -566,7 +570,11 @@ impl Protocol {
                     // Fail before dispatch; only the name is retained, never the value.
                     crate::wire::credential(auth_env.as_deref())?;
                 }
-                Ok(Self::V2(v2::Config::new(endpoint, waves, auth_env)))
+                let mut config = v2::Config::new(endpoint, waves, auth_env);
+                if let Some(isolation) = isolation {
+                    config.isolation = isolation;
+                }
+                Ok(Self::V2(config))
             }
             _ => Err("unsupported metrics protocol version".into()),
         }

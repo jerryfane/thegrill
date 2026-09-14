@@ -1201,7 +1201,7 @@ fn metrics_version_two_reset_and_epoch_change_withhold_zero_preemption_evidence(
         .find(|series| series["name"] == V2_PREEMPTIONS)
         .unwrap()
         .clone();
-    assert_eq!(preemptions["delta"], 0.0);
+    assert!(preemptions["delta"].is_null());
     assert_eq!(preemptions["status"], "epoch_changed");
     assert_eq!(preemptions["epoch"]["status"], "changed");
 }

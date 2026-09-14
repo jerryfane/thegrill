@@ -17,7 +17,16 @@ pub struct Policy {
     collector_sha256: String,
     workload_source_sha256: String,
     min_trials: u32,
+    #[serde(default, deserialize_with = "Policy::deserialize_telemetry")]
+    required_telemetry: Option<Vec<crate::metrics::v2::Requirement>>,
     cells: Vec<CellPolicy>,
+}
+impl Policy {
+    fn deserialize_telemetry<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<Vec<crate::metrics::v2::Requirement>>, D::Error> {
+        Vec::deserialize(deserializer).map(Some)
+    }
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -114,6 +123,9 @@ pub enum Reason {
     EnvelopeStraddlesTolerance,
     ArithmeticOverflow,
     EvaluatorUnavailable,
+    RequiredTelemetryUnavailable,
+    RequiredTelemetryRefuted,
+    InvalidRequiredTelemetry,
 }
 impl Reason {
     pub fn as_str(self) -> &'static str {
@@ -141,6 +153,9 @@ impl Reason {
             Self::EnvelopeStraddlesTolerance => "envelope_straddles_tolerance",
             Self::ArithmeticOverflow => "arithmetic_overflow",
             Self::EvaluatorUnavailable => "evaluator_unavailable",
+            Self::RequiredTelemetryUnavailable => "required_telemetry_unavailable",
+            Self::RequiredTelemetryRefuted => "required_telemetry_refuted",
+            Self::InvalidRequiredTelemetry => "invalid_required_telemetry",
         }
     }
 }
@@ -154,6 +169,7 @@ pub fn parse(
     collector_sha256: &str,
     source_sha256: &str,
     workload: &Workload,
+    telemetry: Option<&crate::metrics::Protocol>,
 ) -> Result<Policy, Reason> {
     if bytes.len() > CAP {
         return Err(Reason::InvalidPolicy);
@@ -182,6 +198,27 @@ pub fn parse(
         || (policy.version == 2 && !matches!(workload.version, 1 | 3))
     {
         return Err(Reason::PolicyScopeMismatch);
+    }
+    if let Some(requirements) = &policy.required_telemetry {
+        if policy.version != 2 || requirements.is_empty() || requirements.len() > 256 {
+            return Err(Reason::InvalidPolicy);
+        }
+        let Some(crate::metrics::Protocol::V2(config)) = telemetry else {
+            return Err(Reason::PolicyScopeMismatch);
+        };
+        let mut identities = HashSet::new();
+        for requirement in requirements {
+            if !identities.insert((&requirement.name, &requirement.labels))
+                || crate::metrics::v2::validate_requirement(requirement).is_err()
+            {
+                return Err(Reason::InvalidRequiredTelemetry);
+            }
+            if requirement.predicate == crate::metrics::v2::Predicate::ZeroCounterDelta
+                && config.isolation != crate::metrics::v2::ISOLATION_EXCLUSIVE
+            {
+                return Err(Reason::PolicyScopeMismatch);
+            }
+        }
     }
     if policy.cells.len() != workload.cells.len() {
         return Err(Reason::PolicyScopeMismatch);
@@ -288,6 +325,8 @@ pub struct Decision {
     evaluator_sha256: Option<String>,
     roles: Roles<Option<RoleIdentity>>,
     gates: Vec<Gate>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    required_telemetry: Option<Roles<Option<crate::metrics::v2::Assessment>>>,
     reason_codes: Vec<Reason>,
 }
 fn observations(
@@ -480,6 +519,7 @@ pub fn decide(a: &Path, b: &Path, reference: Option<&Path>) -> Decision {
             reference: None,
         },
         gates: Vec::new(),
+        required_telemetry: None,
         reason_codes: Vec::new(),
     };
     match evidence::binary_digest() {
@@ -672,7 +712,46 @@ pub fn decide(a: &Path, b: &Path, reference: Option<&Path>) -> Decision {
             }
         }
     }
+    let mut telemetry_eligible = true;
+    if let Some(requirements) = left
+        .as_ref()
+        .and_then(|run| run.policy.as_ref())
+        .and_then(|policy| policy.required_telemetry.as_ref())
+    {
+        use crate::metrics::v2::AssessmentOutcome;
+        let assessments = runs.map(|run| {
+            run.and_then(|run| run.metrics.as_ref())
+                .map(|summary| crate::metrics::v2::assess(requirements, summary))
+        });
+        for (role, assessment) in assessments.iter().enumerate() {
+            match assessment.as_ref().map(|assessment| assessment.outcome) {
+                Some(AssessmentOutcome::Satisfied) => (),
+                Some(AssessmentOutcome::Refuted) if role == 1 => {
+                    result.decision = result.decision.max(Outcome::Regression);
+                    add(&mut result.reason_codes, Reason::RequiredTelemetryRefuted);
+                }
+                Some(AssessmentOutcome::Refuted) => {
+                    result.decision = result.decision.max(Outcome::Inconclusive);
+                    add(&mut result.reason_codes, Reason::ReferenceUnqualified);
+                    telemetry_eligible = false;
+                }
+                Some(AssessmentOutcome::Error) => {
+                    result.decision = Outcome::Error;
+                    add(&mut result.reason_codes, Reason::InvalidRequiredTelemetry);
+                    telemetry_eligible = false;
+                }
+                Some(AssessmentOutcome::Unavailable) | None => {
+                    result.decision = result.decision.max(Outcome::Inconclusive);
+                    add(&mut result.reason_codes, Reason::RequiredTelemetryUnavailable);
+                    telemetry_eligible = false;
+                }
+            }
+        }
+        let [baseline, candidate, reference] = assessments;
+        result.required_telemetry = Some(Roles { baseline, candidate, reference });
+    }
     result.eligibility = qualified
+        && telemetry_eligible
         && result.gates.iter().all(|g| {
             g.reason_codes.iter().all(|r| {
                 matches!(

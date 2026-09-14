@@ -296,6 +296,7 @@ pub(crate) fn load_verified(root: &Path) -> Result<Loaded, LoadError> {
                 &plan.collector_sha256,
                 &plan.source_sha256,
                 &plan.workload,
+                plan.metrics.as_ref(),
             )
             .map_err(|reason| LoadError {
                 detail: reason.as_str().into(),

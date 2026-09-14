@@ -124,7 +124,6 @@ struct Spec {
     kind: Kind,
     /// Selector label that identifies a member of the metric's own closed set.
     selector: Option<&'static str>,
-    meaning: &'static str,
 }
 
 const SPECS: [Spec; 14] = [
@@ -133,98 +132,84 @@ const SPECS: [Spec; 14] = [
         unit: "requests",
         kind: Kind::Gauge,
         selector: None,
-        meaning: "requests currently running in the engine",
     },
     Spec {
         name: WAITING,
         unit: "requests",
         kind: Kind::Gauge,
         selector: None,
-        meaning: "requests currently waiting to be scheduled",
     },
     Spec {
         name: PREEMPTIONS,
         unit: "preemptions",
         kind: Kind::Counter,
         selector: None,
-        meaning: "cumulative engine preemptions",
     },
     Spec {
         name: PREFIX_QUERIES,
         unit: "tokens",
         kind: Kind::Counter,
         selector: None,
-        meaning: "prefix cache queried tokens",
     },
     Spec {
         name: PREFIX_HITS,
         unit: "tokens",
         kind: Kind::Counter,
         selector: None,
-        meaning: "prefix cache hit (cached) tokens",
     },
     Spec {
         name: EXTERNAL_QUERIES,
         unit: "tokens",
         kind: Kind::Counter,
         selector: None,
-        meaning: "KV-connector cross-instance cache queried tokens",
     },
     Spec {
         name: EXTERNAL_HITS,
         unit: "tokens",
         kind: Kind::Counter,
         selector: None,
-        meaning: "KV-connector cross-instance cache hit tokens",
     },
     Spec {
         name: TOKENS_TOTAL,
         unit: "tokens",
         kind: Kind::Counter,
         selector: None,
-        meaning: "prefill prompt tokens processed by the engine",
     },
     Spec {
         name: TOKENS_BY_SOURCE,
         unit: "tokens",
         kind: Kind::Counter,
         selector: Some("source"),
-        meaning: "prefill prompt tokens split by the engine's reported source",
     },
     Spec {
         name: TOKENS_CACHED,
         unit: "tokens",
         kind: Kind::Counter,
         selector: None,
-        meaning: "cached prompt tokens (local plus external)",
     },
     Spec {
         name: DRAFTS,
         unit: "drafts",
         kind: Kind::Counter,
         selector: None,
-        meaning: "speculative draft rounds",
     },
     Spec {
         name: DRAFT_TOKENS,
         unit: "tokens",
         kind: Kind::Counter,
         selector: None,
-        meaning: "speculative draft tokens",
     },
     Spec {
         name: ACCEPTED_TOKENS,
         unit: "tokens",
         kind: Kind::Counter,
         selector: None,
-        meaning: "speculatively accepted tokens, including terminal accepted work not emitted",
     },
     Spec {
         name: ACCEPTED_POS,
         unit: "tokens",
         kind: Kind::Counter,
         selector: Some("position"),
-        meaning: "draft rounds whose accepted prefix reached this position",
     },
 ];
 
@@ -331,7 +316,9 @@ impl Config {
             return Err("unsupported metrics isolation declaration".into());
         }
         let url = crate::wire::endpoint(&self.endpoint, local_http)?;
-        if *self != Self::new(url.to_string(), waves, self.auth_env.clone()) {
+        let mut expected = Self::new(url.to_string(), waves, self.auth_env.clone());
+        expected.isolation.clone_from(&self.isolation);
+        if *self != expected {
             return Err("unsupported metrics protocol or bounds".into());
         }
         Ok(())
@@ -1021,11 +1008,12 @@ fn accounting(base_map: &Slices, full: &Slices, complete: bool) -> Vec<Accountin
             })
             .collect();
         positions.sort_by_key(|(position, _)| *position);
-        let position_total = positions
-            .iter()
-            .map(|(_, delta)| *delta)
-            .collect::<Option<Vec<f64>>>()
-            .map(|values| values.iter().sum());
+        let complete_positions = !positions.is_empty()
+            && positions.iter().enumerate().all(|(index, (position, value))| {
+                usize::try_from(*position).ok() == Some(index) && value.is_some()
+            });
+        let position_total = complete_positions
+            .then(|| positions.iter().filter_map(|(_, delta)| *delta).sum());
         checks.push(compare(
             &labels,
             "sum_accepted_tokens_per_pos_equals_spec_decode_num_accepted_tokens_total",
@@ -1043,8 +1031,8 @@ fn accounting(base_map: &Slices, full: &Slices, complete: bool) -> Vec<Accountin
         checks.push(compare(
             &labels,
             "accepted_tokens_per_pos_is_non_increasing_in_position",
-            complete.then_some(violations as f64),
-            complete.then_some(0.0),
+            (complete && complete_positions).then_some(violations as f64),
+            (complete && complete_positions).then_some(0.0),
             complete,
         ));
     }
@@ -1286,7 +1274,6 @@ pub fn derive(before: &[Series], after: &[Series], complete: bool) -> Views {
 struct Row {
     identity: Identity,
     kind: &'static str,
-    unit: &'static str,
     observations: usize,
     changed: bool,
     decreasing: bool,
@@ -1354,12 +1341,11 @@ pub fn acquisition(waves: &[super::WaveReport]) -> Option<Acquisition> {
             }
             Row {
                 kind: kind_of(&identity.name),
-                unit: unit_of(&identity.name),
                 observations,
                 changed,
                 decreasing,
-                first: values.iter().flatten().next().copied(),
-                last: values.iter().flatten().next_back().copied(),
+                first: values.first().copied().flatten(),
+                last: values.last().copied().flatten(),
                 values,
                 identity,
             }
@@ -1373,7 +1359,7 @@ pub fn acquisition(waves: &[super::WaveReport]) -> Option<Acquisition> {
     let mut series = Vec::with_capacity(rows.len());
     for row in &rows {
         let epoch = if row.kind == "counter" {
-            match epoch_of(&row.identity.name) {
+            Some(match epoch_of(&row.identity.name) {
                 Some(name) => {
                     let identity = Identity {
                         name: name.to_owned(),
@@ -1406,7 +1392,7 @@ pub fn acquisition(waves: &[super::WaveReport]) -> Option<Acquisition> {
                     value: None,
                     status: "undeclared",
                 },
-            }
+            })
         } else {
             None
         };
@@ -1450,33 +1436,43 @@ pub fn acquisition(waves: &[super::WaveReport]) -> Option<Acquisition> {
             observations: row.observations,
             first: row.first,
             last: row.last,
-            delta: row.first.zip(row.last).map(|(first, last)| last - first),
+            delta: (status == "continuous")
+                .then(|| row.first.zip(row.last).map(|(first, last)| last - first))
+                .flatten(),
             epoch,
             status,
         });
     }
-    let mut first_series = Vec::with_capacity(rows.len());
-    let mut last_series = Vec::with_capacity(rows.len());
-    for row in &rows {
-        if let Some(value) = row.first {
-            first_series.push(Series {
-                identity: row.identity.clone(),
-                unit: row.unit,
-                kind: row.kind,
-                value,
-            });
-        }
-        if let Some(value) = row.last {
-            last_series.push(Series {
-                identity: row.identity.clone(),
-                unit: row.unit,
-                kind: row.kind,
-                value,
-            });
-        }
-    }
-    let full = slices(&first_series, &last_series, &[]);
-    let base_map = slices(&first_series, &last_series, &["source", "position"]);
+    let full: Slices = rows
+        .iter()
+        .zip(&series)
+        .map(|(row, continuity)| {
+            let values = if row.kind == "counter" && continuity.status != "continuous" {
+                (None, None)
+            } else {
+                (row.first, row.last)
+            };
+            (
+                Key {
+                    name: row.identity.name.clone(),
+                    labels: row.identity.labels.clone(),
+                },
+                values,
+            )
+        })
+        .collect();
+    let base_map: Slices = full
+        .iter()
+        .map(|(key, values)| {
+            (
+                Key {
+                    name: key.name.clone(),
+                    labels: base(&key.labels, &["source", "position"]),
+                },
+                *values,
+            )
+        })
+        .collect();
     let checks = accounting(&base_map, &full, complete == total);
     Some(Acquisition {
         snapshots: total,
@@ -1537,29 +1533,42 @@ pub fn assess(requirements: &[Requirement], summary: &super::Summary) -> Assessm
             results: Vec::new(),
         };
     }
-    let Some(acquisition) = &summary.acquisition else {
-        return Assessment {
-            outcome: AssessmentOutcome::Error,
-            results: requirements
-                .iter()
-                .map(|requirement| {
+    let results: Vec<RequirementResult> = requirements
+        .iter()
+        .map(|requirement| {
+            if let Err(detail) = validate_requirement(requirement) {
+                return result(requirement, "error", Some("invalid_requirement"), detail);
+            }
+            match (&summary.config, &summary.acquisition) {
+                (super::Protocol::V1(_), _) => result(
+                    requirement,
+                    "error",
+                    Some("no_metrics2"),
+                    "required telemetry needs the explicit version-2 metrics protocol",
+                ),
+                (super::Protocol::V2(config), Some(acquisition))
+                    if acquisition.snapshots == config.max_requests =>
+                {
+                    evaluate(requirement, acquisition, &config.isolation)
+                }
+                (super::Protocol::V2(config), Some(acquisition))
+                    if acquisition.snapshots > config.max_requests =>
+                {
                     result(
                         requirement,
                         "error",
-                        Some("no_metrics2"),
-                        "required telemetry needs the explicit version-2 metrics protocol",
+                        Some("snapshot_count_exceeds_plan"),
+                        "retained snapshots exceed the prospective metrics request count",
                     )
-                })
-                .collect(),
-        };
-    };
-    let isolation = match &summary.config {
-        super::Protocol::V2(config) => config.isolation.as_str(),
-        super::Protocol::V1(_) => "",
-    };
-    let results: Vec<RequirementResult> = requirements
-        .iter()
-        .map(|requirement| evaluate(requirement, acquisition, isolation))
+                }
+                _ => result(
+                    requirement,
+                    "unavailable",
+                    Some("incomplete_required_snapshots"),
+                    "required telemetry needs every prospectively declared snapshot",
+                ),
+            }
+        })
         .collect();
     let outcome = if results.iter().any(|result| result.outcome == "error") {
         AssessmentOutcome::Error
@@ -1594,9 +1603,6 @@ fn evaluate(
     acquisition: &Acquisition,
     isolation: &str,
 ) -> RequirementResult {
-    if let Err(detail) = validate_requirement(requirement) {
-        return result(requirement, "error", Some("invalid_requirement"), detail);
-    }
     let identity = Identity {
         name: requirement.name.clone(),
         labels: requirement.labels.clone(),
@@ -2011,6 +2017,20 @@ mod tests {
         assert_eq!(cache.ratio, None);
         assert_eq!(cache.status, "unavailable");
         assert_eq!(cache.reason, Some("missing_after"));
+    }
+
+    #[test]
+    fn missing_positions_do_not_establish_zero_sum_or_monotonicity() {
+        let mut counters = fixture();
+        counters.positions.clear();
+        let summary = wave_summary(&body(&counters), &body(&counters));
+        for rule in [
+            "sum_accepted_tokens_per_pos_equals_spec_decode_num_accepted_tokens_total",
+            "accepted_tokens_per_pos_is_non_increasing_in_position",
+        ] {
+            let check = summary.accounting.iter().find(|check| check.rule == rule).unwrap();
+            assert_eq!(check.status, "unavailable");
+        }
     }
 
     #[test]

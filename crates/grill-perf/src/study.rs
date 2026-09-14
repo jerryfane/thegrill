@@ -776,6 +776,7 @@ fn collect(
                 metrics_url: None,
                 metrics_version: 1,
                 metrics_auth_env: None,
+                metrics_isolation: None,
                 auth_env: manifest.auth_env.clone(),
                 local_http: manifest.local_http,
             },

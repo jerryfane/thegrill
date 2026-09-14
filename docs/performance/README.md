@@ -432,10 +432,21 @@ remain blocking reasons rather than exclusions.
 
 The optional `lane` selector is reserved for the separately integrated schedule
 contract; this homogeneous slice rejects any provided selector, including null.
-Policy1 rejects all new metric names and lane fields. Schedule gates, required
-telemetry, streamed-tool gates, whole-conversation repetitions, larger histories,
-empirical p95/p99 and claim-profile qualification remain separate work. This
-slice does not complete issue #50 or qualify mixed-load, tail or adoption claims.
+Policy1 rejects all new metric names and lane fields.
+
+Policy2 also accepts a prospective root `required_telemetry` array. It requires
+metrics version 2 and retains a separate assessment for every A/B/A2 role.
+Missing promised observations yield INCONCLUSIVE; a candidate's refuted
+zero-counter requirement yields REGRESSION; a refuted baseline or repeat
+withholds reference qualification. Invalid required evidence yields ERROR.
+Optional diagnostics still do not alter eligibility. See
+[provider accounting](PROVIDER-ACCOUNTING.md#required-telemetry-in-policy2) for
+the exact selectors, isolation declaration and source limits.
+
+Schedule gates, streamed-tool gates, whole-conversation repetitions, larger
+histories, empirical p95/p99 and claim-profile qualification remain separate
+work. This slice does not complete issue #50 or qualify mixed-load, tail or
+adoption claims.
 
 ## Build and use
 

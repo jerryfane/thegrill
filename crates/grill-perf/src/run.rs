@@ -59,6 +59,9 @@ pub struct CommonArgs {
     /// model credential, and never retained as a value.
     #[arg(long)]
     pub metrics_auth_env: Option<String>,
+    /// Explicit operator declaration; this does not authenticate isolation.
+    #[arg(long, value_parser = [metrics::v2::ISOLATION_SHARED, metrics::v2::ISOLATION_EXCLUSIVE])]
+    pub metrics_isolation: Option<String>,
     #[arg(long)]
     pub auth_env: Option<String>,
     #[arg(long)]
@@ -198,18 +201,26 @@ fn admit(o: &CommonArgs) -> Result<Admitted> {
         .transpose()?;
     wire::credential(o.auth_env.as_deref())?;
     let waves = workload.waves();
+    if o.metrics_url.is_none()
+        && (o.metrics_version != 1 || o.metrics_auth_env.is_some() || o.metrics_isolation.is_some())
+    {
+        return Err("metrics protocol controls require --metrics-url".into());
+    }
     let metrics = o
         .metrics_url
         .as_ref()
         .map(|endpoint| {
             wire::endpoint(endpoint, o.local_http).and_then(|url| {
-                metrics::Protocol::new(
+                let config = metrics::Protocol::new(
                     url.to_string(),
                     waves.len(),
                     o.metrics_version,
                     o.metrics_auth_env.clone(),
+                    o.metrics_isolation.clone(),
                     o.auth_env.as_deref(),
-                )
+                )?;
+                config.validate(waves.len(), o.local_http, o.auth_env.as_deref())?;
+                Ok(config)
             })
         })
         .transpose()?;
@@ -244,6 +255,7 @@ fn admit(o: &CommonArgs) -> Result<Admitted> {
             &evidence::binary_digest()?,
             &source_sha256,
             &workload,
+            metrics.as_ref(),
         )
         .map_err(|e| e.as_str().to_owned())?;
     }
