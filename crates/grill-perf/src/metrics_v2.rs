@@ -82,14 +82,20 @@ const EPOCH_PAIRS: [(&str, &str); 12] = [
     (PREEMPTIONS, "vllm:num_preemptions_created"),
     (PREFIX_QUERIES, "vllm:prefix_cache_queries_created"),
     (PREFIX_HITS, "vllm:prefix_cache_hits_created"),
-    (EXTERNAL_QUERIES, "vllm:external_prefix_cache_queries_created"),
+    (
+        EXTERNAL_QUERIES,
+        "vllm:external_prefix_cache_queries_created",
+    ),
     (EXTERNAL_HITS, "vllm:external_prefix_cache_hits_created"),
     (TOKENS_TOTAL, "vllm:prompt_tokens_created"),
     (TOKENS_BY_SOURCE, "vllm:prompt_tokens_by_source_created"),
     (TOKENS_CACHED, "vllm:prompt_tokens_cached_created"),
     (DRAFTS, "vllm:spec_decode_num_drafts_created"),
     (DRAFT_TOKENS, "vllm:spec_decode_num_draft_tokens_created"),
-    (ACCEPTED_TOKENS, "vllm:spec_decode_num_accepted_tokens_created"),
+    (
+        ACCEPTED_TOKENS,
+        "vllm:spec_decode_num_accepted_tokens_created",
+    ),
     (
         ACCEPTED_POS,
         "vllm:spec_decode_num_accepted_tokens_per_pos_created",
@@ -97,11 +103,7 @@ const EPOCH_PAIRS: [(&str, &str); 12] = [
 ];
 
 // Closed selector value set of `prompt_tokens_by_source_total`.
-pub const SOURCES: [&str; 3] = [
-    "external_kv_transfer",
-    "local_cache_hit",
-    "local_compute",
-];
+pub const SOURCES: [&str; 3] = ["external_kv_transfer", "local_cache_hit", "local_compute"];
 pub const ISOLATION_EXCLUSIVE: &str = "exclusive-single-acquisition";
 pub const ISOLATION_SHARED: &str = "shared-server-unattributed";
 
@@ -578,7 +580,11 @@ pub fn parse(raw: &[u8], config: &Config) -> Result<Vec<Series>> {
             return Err("metrics selected series exceed bound".into());
         }
         let (labels, value) = if let Some(rest) = line[end..].strip_prefix('{') {
-            super::labels(rest, config.labels_per_series, config.label_bytes_per_series)?
+            super::labels(
+                rest,
+                config.labels_per_series,
+                config.label_bytes_per_series,
+            )?
         } else {
             (BTreeMap::new(), &line[end..])
         };
@@ -781,8 +787,8 @@ pub fn load(
     if evidence::digest(&bytes) != reference.sha256 {
         return Err("metrics companion hash mismatch".into());
     }
-    let receipt: Receipt =
-        serde_json::from_slice(&bytes).map_err(|error| format!("invalid metrics receipt: {error}"))?;
+    let receipt: Receipt = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("invalid metrics receipt: {error}"))?;
     if receipt.version != 2 || receipt.plan_sha256 != plan_hash || receipt.wave != wave {
         return Err("metrics companion lineage mismatch".into());
     }
@@ -895,7 +901,11 @@ fn slices(before: &[Series], after: &[Series], drop: &[&str]) -> Slices {
     map
 }
 
-fn lookup(map: &Slices, name: &str, labels: &BTreeMap<String, String>) -> (Option<f64>, Option<f64>) {
+fn lookup(
+    map: &Slices,
+    name: &str,
+    labels: &BTreeMap<String, String>,
+) -> (Option<f64>, Option<f64>) {
     map.iter()
         .find(|(key, _)| key.name == name && key.labels == *labels)
         .map(|(_, value)| *value)
@@ -956,7 +966,7 @@ fn compare(
 
 fn accounting(base_map: &Slices, full: &Slices, complete: bool) -> Vec<AccountingCheck> {
     let mut identities: Vec<BTreeMap<String, String>> = Vec::new();
-    for (key, _) in base_map.iter() {
+    for key in base_map.keys() {
         if [
             TOKENS_TOTAL,
             TOKENS_CACHED,
@@ -998,7 +1008,9 @@ fn accounting(base_map: &Slices, full: &Slices, complete: bool) -> Vec<Accountin
         ));
         let mut positions: Vec<(u32, Option<f64>)> = full
             .iter()
-            .filter(|(key, _)| key.name == ACCEPTED_POS && base(&key.labels, &["position"]) == labels)
+            .filter(|(key, _)| {
+                key.name == ACCEPTED_POS && base(&key.labels, &["position"]) == labels
+            })
             .filter_map(|(key, _)| {
                 let draft_position = position(key.labels.get("position")?)?;
                 Some((
@@ -1009,11 +1021,14 @@ fn accounting(base_map: &Slices, full: &Slices, complete: bool) -> Vec<Accountin
             .collect();
         positions.sort_by_key(|(position, _)| *position);
         let complete_positions = !positions.is_empty()
-            && positions.iter().enumerate().all(|(index, (position, value))| {
-                usize::try_from(*position).ok() == Some(index) && value.is_some()
-            });
-        let position_total = complete_positions
-            .then(|| positions.iter().filter_map(|(_, delta)| *delta).sum());
+            && positions
+                .iter()
+                .enumerate()
+                .all(|(index, (position, value))| {
+                    usize::try_from(*position).ok() == Some(index) && value.is_some()
+                });
+        let position_total =
+            complete_positions.then(|| positions.iter().filter_map(|(_, delta)| *delta).sum());
         checks.push(compare(
             &labels,
             "sum_accepted_tokens_per_pos_equals_spec_decode_num_accepted_tokens_total",
@@ -1112,7 +1127,7 @@ pub fn derive(before: &[Series], after: &[Series], complete: bool) -> Views {
         .cloned()
         .collect();
     let mut cache_labels: Vec<BTreeMap<String, String>> = Vec::new();
-    for (key, _) in base_map.iter() {
+    for key in base_map.keys() {
         if [
             PREFIX_QUERIES,
             PREFIX_HITS,
@@ -1144,7 +1159,13 @@ pub fn derive(before: &[Series], after: &[Series], complete: bool) -> Views {
             } else if hits.delta > queries.delta {
                 (None, "inconsistent", Some("hits_exceed_queries"))
             } else {
-                (hits.delta.zip(queries.delta).map(|(hits, queries)| hits / queries), "available", None)
+                (
+                    hits.delta
+                        .zip(queries.delta)
+                        .map(|(hits, queries)| hits / queries),
+                    "available",
+                    None,
+                )
             };
             CacheView {
                 labels: labels.clone(),
@@ -1164,7 +1185,7 @@ pub fn derive(before: &[Series], after: &[Series], complete: bool) -> Views {
         })
         .collect();
     let mut draft_labels: Vec<BTreeMap<String, String>> = Vec::new();
-    for (key, _) in base_map.iter() {
+    for key in base_map.keys() {
         if [DRAFTS, DRAFT_TOKENS, ACCEPTED_TOKENS].contains(&key.name.as_str())
             && !draft_labels.contains(&key.labels)
         {
@@ -1624,17 +1645,13 @@ fn evaluate(
             "required series identity is not present in the captured acquisition",
         );
     };
-    if let Some(check) = acquisition
-        .accounting
-        .iter()
-        .find(|check| {
-            check.status == "inconsistent"
-                && check.labels.iter().eq(
-                    requirement.labels.iter()
-                        .filter(|(name, _)| !matches!(name.as_str(), "source" | "position"))
-                )
-        })
-    {
+    if let Some(check) = acquisition.accounting.iter().find(|check| {
+        check.status == "inconsistent"
+            && check.labels.iter().eq(requirement
+                .labels
+                .iter()
+                .filter(|(name, _)| !matches!(name.as_str(), "source" | "position")))
+    }) {
         return result(
             requirement,
             "unavailable",
@@ -1698,7 +1715,7 @@ fn evaluate(
                 );
             }
             match entry.delta {
-                Some(delta) if delta == 0.0 => result(
+                Some(0.0) => result(
                     requirement,
                     "satisfied",
                     None,
@@ -1721,11 +1738,10 @@ fn evaluate(
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::metrics::{summarize, Budget, Protocol, WaveReport};
+    use crate::metrics::{Budget, Protocol, WaveReport, summarize};
 
     const IDENTITY: &str = r#"engine="0",model_name="m""#;
     // Must match `Config::new`'s deadline so a self-consistent snapshot passes.
@@ -1801,7 +1817,7 @@ mod tests {
     }
 
     fn summarize_with(config: Config, before: &str, after: &str) -> crate::metrics::Summary {
-        let protocol = Protocol::V2(config);
+        let protocol = Protocol::V2(Box::new(config));
         summarize(
             Some(&protocol),
             Budget::default(),
@@ -1995,14 +2011,18 @@ mod tests {
         assert_eq!(summary.positions[0].exposure_source, DRAFTS);
         assert_eq!(summary.positions[0].acceptance, Some(10.0 / 15.0));
         assert_eq!(summary.positions[1].acceptance, Some(4.0 / 15.0));
-        assert!(summary
-            .accounting
-            .iter()
-            .all(|check| check.status == "consistent"));
-        assert!(summary
-            .preemptions
-            .iter()
-            .all(|delta| delta.delta == Some(0.0)));
+        assert!(
+            summary
+                .accounting
+                .iter()
+                .all(|check| check.status == "consistent")
+        );
+        assert!(
+            summary
+                .preemptions
+                .iter()
+                .all(|delta| delta.delta == Some(0.0))
+        );
         assert_eq!(summary.caveats, CAVEATS.to_vec());
     }
 
@@ -2034,7 +2054,11 @@ mod tests {
             "sum_accepted_tokens_per_pos_equals_spec_decode_num_accepted_tokens_total",
             "accepted_tokens_per_pos_is_non_increasing_in_position",
         ] {
-            let check = summary.accounting.iter().find(|check| check.rule == rule).unwrap();
+            let check = summary
+                .accounting
+                .iter()
+                .find(|check| check.rule == rule)
+                .unwrap();
             assert_eq!(check.status, "unavailable");
         }
     }
@@ -2059,15 +2083,20 @@ mod tests {
         let preemptions = entry(&acquisition, PREEMPTIONS, &identity());
         assert_eq!(preemptions.status, "reset_observed");
         assert_eq!(preemptions.epoch.as_ref().unwrap().status, "changed");
-        assert_eq!(entry(&acquisition, PREFIX_HITS, &identity()).status, "disappeared");
+        assert_eq!(
+            entry(&acquisition, PREFIX_HITS, &identity()).status,
+            "disappeared"
+        );
         assert_eq!(
             entry(&acquisition, TOKENS_CACHED, &identity()).status,
             "appeared_later"
         );
-        assert!(acquisition
-            .accounting
-            .iter()
-            .any(|check| check.status == "unavailable"));
+        assert!(
+            acquisition
+                .accounting
+                .iter()
+                .any(|check| check.status == "unavailable")
+        );
     }
 
     #[test]
@@ -2114,7 +2143,10 @@ mod tests {
         let acquisition = summary(&body(&fixture()), &body(&advanced()))
             .acquisition
             .unwrap();
-        assert_eq!(entry(&acquisition, DRAFTS, &identity()).status, "continuous");
+        assert_eq!(
+            entry(&acquisition, DRAFTS, &identity()).status,
+            "continuous"
+        );
         assert_eq!(
             entry(&acquisition, DRAFTS, &identity())
                 .epoch
@@ -2175,10 +2207,10 @@ mod tests {
 
         // Requirements promised without the version-2 protocol are errors.
         let legacy = summarize(
-            Some(&Protocol::V1(crate::metrics::Config::new(
+            Some(&Protocol::V1(Box::new(crate::metrics::Config::new(
                 "http://127.0.0.1:9/metrics".into(),
                 1,
-            ))),
+            )))),
             Budget::default(),
             Vec::new(),
         )
@@ -2191,54 +2223,70 @@ mod tests {
 
     #[test]
     fn requirement_validation_rejects_unknown_names_and_selectors() {
-        assert!(validate_requirement(&requirement(
-            "vllm:not_a_selected_metric_total",
-            &identity(),
-            Predicate::Present
-        ))
-        .is_err());
-        assert!(validate_requirement(&requirement(
-            RUNNING,
-            &identity(),
-            Predicate::ZeroCounterDelta
-        ))
-        .is_err());
-        assert!(validate_requirement(&requirement(
-            TOKENS_BY_SOURCE,
-            &identity(),
-            Predicate::Present
-        ))
-        .is_err());
-        assert!(validate_requirement(&requirement(
-            TOKENS_BY_SOURCE,
-            &[("engine", "0"), ("source", "invented")],
-            Predicate::Present
-        ))
-        .is_err());
-        assert!(validate_requirement(&requirement(
-            ACCEPTED_POS,
-            &[("engine", "0"), ("position", "first")],
-            Predicate::Present
-        ))
-        .is_err());
-        assert!(validate_requirement(&requirement(
-            PREEMPTIONS,
-            &[("worker", "3")],
-            Predicate::Present
-        ))
-        .is_err());
-        assert!(validate_requirement(&requirement(
-            TOKENS_BY_SOURCE,
-            &[("engine", "0"), ("source", "local_compute")],
-            Predicate::ContinuousCounter
-        ))
-        .is_ok());
-        assert!(validate_requirement(&requirement(
-            ACCEPTED_POS,
-            &[("engine", "0"), ("position", "0")],
-            Predicate::ContinuousCounter
-        ))
-        .is_ok());
+        assert!(
+            validate_requirement(&requirement(
+                "vllm:not_a_selected_metric_total",
+                &identity(),
+                Predicate::Present
+            ))
+            .is_err()
+        );
+        assert!(
+            validate_requirement(&requirement(
+                RUNNING,
+                &identity(),
+                Predicate::ZeroCounterDelta
+            ))
+            .is_err()
+        );
+        assert!(
+            validate_requirement(&requirement(
+                TOKENS_BY_SOURCE,
+                &identity(),
+                Predicate::Present
+            ))
+            .is_err()
+        );
+        assert!(
+            validate_requirement(&requirement(
+                TOKENS_BY_SOURCE,
+                &[("engine", "0"), ("source", "invented")],
+                Predicate::Present
+            ))
+            .is_err()
+        );
+        assert!(
+            validate_requirement(&requirement(
+                ACCEPTED_POS,
+                &[("engine", "0"), ("position", "first")],
+                Predicate::Present
+            ))
+            .is_err()
+        );
+        assert!(
+            validate_requirement(&requirement(
+                PREEMPTIONS,
+                &[("worker", "3")],
+                Predicate::Present
+            ))
+            .is_err()
+        );
+        assert!(
+            validate_requirement(&requirement(
+                TOKENS_BY_SOURCE,
+                &[("engine", "0"), ("source", "local_compute")],
+                Predicate::ContinuousCounter
+            ))
+            .is_ok()
+        );
+        assert!(
+            validate_requirement(&requirement(
+                ACCEPTED_POS,
+                &[("engine", "0"), ("position", "0")],
+                Predicate::ContinuousCounter
+            ))
+            .is_ok()
+        );
     }
 
     #[test]
@@ -2320,7 +2368,10 @@ mod tests {
             let required = requirement(name, &selected, Predicate::ContinuousCounter);
             assert_eq!(
                 outcome(&assess(&[required], &summary)),
-                (AssessmentOutcome::Unavailable, Some("contradictory_accounting"))
+                (
+                    AssessmentOutcome::Unavailable,
+                    Some("contradictory_accounting")
+                )
             );
             selected[0].1 = "1";
             let independent = requirement(name, &selected, Predicate::ContinuousCounter);
@@ -2343,10 +2394,12 @@ mod tests {
         assert!(selected(&format!("{PREEMPTIONS}{{{IDENTITY}}} -1\n")).is_err());
         assert!(selected(&format!("{PREEMPTIONS}{{{IDENTITY}}} NaN\n")).is_err());
         assert!(selected(&format!("{PREEMPTIONS}{{{IDENTITY}}} +Inf\n")).is_err());
-        assert!(selected(&format!(
-            "{PREEMPTIONS}{{{IDENTITY}}} 1\n{PREEMPTIONS}{{{IDENTITY}}} 2\n"
-        ))
-        .is_err());
+        assert!(
+            selected(&format!(
+                "{PREEMPTIONS}{{{IDENTITY}}} 1\n{PREEMPTIONS}{{{IDENTITY}}} 2\n"
+            ))
+            .is_err()
+        );
 
         // Selector values outside the closed sets are excluded, never guessed.
         let mut odd = fixture();
@@ -2361,10 +2414,12 @@ mod tests {
             true,
         );
         assert!(views.positions.is_empty());
-        assert!(views
-            .excluded
-            .iter()
-            .any(|excluded| excluded.reason == "invalid_position_label"));
+        assert!(
+            views
+                .excluded
+                .iter()
+                .any(|excluded| excluded.reason == "invalid_position_label")
+        );
 
         let unknown = body(&fixture()).replace("source=\"local_compute\"", "source=\"invented\"");
         let views = derive(
@@ -2372,9 +2427,11 @@ mod tests {
             &parse(unknown.as_bytes(), &config).unwrap(),
             true,
         );
-        assert!(views
-            .excluded
-            .iter()
-            .any(|excluded| excluded.reason == "unsupported_source_value"));
+        assert!(
+            views
+                .excluded
+                .iter()
+                .any(|excluded| excluded.reason == "unsupported_source_value")
+        );
     }
 }

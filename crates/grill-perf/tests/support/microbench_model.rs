@@ -9,7 +9,13 @@ fn ratio(numerator: u64, denominator: u64) -> Rational {
 
 /// A sample whose raw text is the decimal in the clock's units and whose
 /// duration is the exact nanosecond rational.
-fn sample(index: u32, rank: Option<u32>, repetition: Option<u32>, raw: &str, ns: Rational) -> Sample {
+fn sample(
+    index: u32,
+    rank: Option<u32>,
+    repetition: Option<u32>,
+    raw: &str,
+    ns: Rational,
+) -> Sample {
     Sample {
         index,
         rank,
@@ -29,7 +35,10 @@ fn cpu_artifact(samples: Vec<Sample>) -> Artifact {
         version: VERSION,
         adapter: AdapterId::CpuSumU64Reference,
         revision: evidence::digest(b"cpu-fixture"),
-        acquisition: Acquisition { id: "fixture".into(), started_unix_ms: 1 },
+        acquisition: Acquisition {
+            id: "fixture".into(),
+            started_unix_ms: 1,
+        },
         operation: frozen_operation(AdapterId::CpuSumU64Reference),
         provenance: Provenance::NativeObserved,
         submitted_provenance: None,
@@ -108,7 +117,12 @@ fn device_artifact() -> Artifact {
         finite: true,
         ref_max: "2.000000000".into(),
         e2: parity("0.001000000", "0.001000000", "0.001000000", "0.010000000"),
-        e3: parity("0.003000000", "0.003000000", "0.003000000", "0.015000000"),
+        e3: Box::new(parity(
+            "0.003000000",
+            "0.003000000",
+            "0.003000000",
+            "0.015000000",
+        )),
         tolerance: E3_TOLERANCE,
         passed: true,
         outcome: CheckOutcome::Pass,
@@ -258,7 +272,10 @@ fn exact_decimal_accepts_scientific_notation_and_rejects_the_rest() {
         ("1.", ratio(1, 1)),
         ("1.234e-05", ratio(1234, 100_000_000)),
         ("1E+3", ratio(1000, 1)),
-        ("0.123456789012345", ratio(123_456_789_012_345, 1_000_000_000_000_000)),
+        (
+            "0.123456789012345",
+            ratio(123_456_789_012_345, 1_000_000_000_000_000),
+        ),
     ] {
         let actual = exact_decimal(text).unwrap();
         assert_eq!(
@@ -290,7 +307,10 @@ fn durations_keep_fractional_nanoseconds_and_never_round_to_a_resolution() {
         Ok(ratio(24_691_357_802_469, 200_000_000))
     );
     // Scientific notation from a float representation.
-    assert_eq!(duration_ns("1.234e-05", Units::Milliseconds), Ok(ratio(617, 50)));
+    assert_eq!(
+        duration_ns("1.234e-05", Units::Milliseconds),
+        Ok(ratio(617, 50))
+    );
     assert_eq!(
         duration_ns("0.0000001", Units::Milliseconds),
         Ok(ratio(1, 10))
@@ -335,7 +355,12 @@ fn samples_are_checked_against_their_own_raw_representation() {
     let mut artifact = device_artifact();
     artifact.clock.resolution_ns = 1000;
     let findings = check_artifact(None, &artifact);
-    assert!(findings.clean(), "invalid={:?}; unavailable={:?}", findings.invalid, findings.unavailable);
+    assert!(
+        findings.clean(),
+        "invalid={:?}; unavailable={:?}",
+        findings.invalid,
+        findings.unavailable
+    );
     artifact.samples[0] = sample(0, None, None, "31.2345678", ratio(156_172_839, 5));
     assert!(check_artifact(None, &artifact).clean());
 
@@ -392,7 +417,8 @@ fn mean_and_acquisition_statistics_are_exact_rationals() {
 
     // A fractional rank duration survives the maximum and the mean:
     // repetition 0 peaks at 3/2, the rest at 100 → (3/2 + 400) / 5 = 803/10.
-    let mut fractional = rank_artifact(&[[100, 100], [100, 100], [100, 100], [100, 100], [100, 100]]);
+    let mut fractional =
+        rank_artifact(&[[100, 100], [100, 100], [100, 100], [100, 100], [100, 100]]);
     fractional.samples[0].duration = ratio(3, 2);
     fractional.samples[1].duration = ratio(1, 1);
     assert_eq!(statistic(&fractional), Some(ratio(803, 10)));
@@ -429,8 +455,14 @@ fn operation_admission_and_byte_definitions_are_unchanged() {
     if let Operation::AllReduce { numel, .. } = &mut oversized {
         *numel = u32::MAX;
     }
-    assert!(derived(&oversized, &required_clock(AdapterId::NcclAllreduceSum),
-        ratio(1, u64::MAX)).is_none());
+    assert!(
+        derived(
+            &oversized,
+            &required_clock(AdapterId::NcclAllreduceSum),
+            ratio(1, u64::MAX)
+        )
+        .is_none()
+    );
 }
 
 #[test]
@@ -442,7 +474,12 @@ fn e3_parity_matches_public_binary64_boundaries() {
         finite: true,
         ref_max: "2.000000000".into(),
         e2: parity("0.001000000", "0.001000000", "0.001000000", "0.010000000"),
-        e3: parity("0.003500000", "0.003500000", "0.003500000", "0.015099999999999999"),
+        e3: Box::new(parity(
+            "0.003500000",
+            "0.003500000",
+            "0.003500000",
+            "0.015099999999999999",
+        )),
         tolerance: E3_TOLERANCE,
         passed: true,
         outcome: CheckOutcome::Pass,
@@ -456,7 +493,11 @@ fn e3_parity_matches_public_binary64_boundaries() {
         panic!("expected E3 fixture");
     };
     e3.nrmse = "0.0151".into();
-    assert!(check_artifact(None, &artifact).invalid.contains(&Reason::CorrectnessFailed));
+    assert!(
+        check_artifact(None, &artifact)
+            .invalid
+            .contains(&Reason::CorrectnessFailed)
+    );
 
     // One micro-unit beyond the maxabs bound fails.
     artifact.correctness = Correctness::E3Parity {
@@ -464,7 +505,12 @@ fn e3_parity_matches_public_binary64_boundaries() {
         finite: true,
         ref_max: "2.000000000".into(),
         e2: parity("0.001000000", "0.001000000", "0.001000000", "0.010000000"),
-        e3: parity("0.003600000", "0.003500000", "0.003500000", "0.015099999999999999"),
+        e3: Box::new(parity(
+            "0.003600000",
+            "0.003500000",
+            "0.003500000",
+            "0.015099999999999999",
+        )),
         tolerance: E3_TOLERANCE,
         passed: true,
         outcome: CheckOutcome::Pass,
@@ -482,7 +528,12 @@ fn e3_parity_matches_public_binary64_boundaries() {
         finite: true,
         ref_max: "2.000000000".into(),
         e2: parity("0.200000000", "0.001000000", "0.001000000", "0.010000000"),
-        e3: parity("0.160000000", "0.003500000", "0.003500000", "0.015099999999999999"),
+        e3: Box::new(parity(
+            "0.160000000",
+            "0.003500000",
+            "0.003500000",
+            "0.015099999999999999",
+        )),
         tolerance: E3_TOLERANCE,
         passed: true,
         outcome: CheckOutcome::Pass,
@@ -605,14 +656,8 @@ fn study_declaration_requires_complete_roles_and_observed_revision_pins() {
         started_unix_ms: 1_757_000_000_000,
     };
     assert!(check_study(&study(3, "rev-a", "rev-b", 3)).is_empty());
-    assert!(
-        check_study(&study(2, "rev-a", "rev-b", 3))
-            .contains(&Reason::RoleMinimum)
-    );
-    assert!(
-        check_study(&study(3, "rev-a", "rev-b", 2))
-            .contains(&Reason::RoleMinimum)
-    );
+    assert!(check_study(&study(2, "rev-a", "rev-b", 3)).contains(&Reason::RoleMinimum));
+    assert!(check_study(&study(3, "rev-a", "rev-b", 2)).contains(&Reason::RoleMinimum));
     assert!(check_study(&study(3, "rev-a", "rev-a", 3)).is_empty());
     let mut unobserved = study(3, "rev-a", "rev-b", 3);
     unobserved.revision_axis.candidate = "operator-label".into();

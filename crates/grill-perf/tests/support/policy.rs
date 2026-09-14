@@ -822,9 +822,14 @@ fn declaration_v2(work: &Value, metrics: &[&str]) -> Value {
     policy["version"] = json!(2);
     policy["method"] = json!("observed-envelope-v2");
     for cell in policy["cells"].as_array_mut().unwrap() {
-        cell["metrics"] = json!(metrics.iter().map(|metric| json!({
-            "metric":metric,"max_regression_bps":0,"max_reference_spread_bps":0
-        })).collect::<Vec<_>>());
+        cell["metrics"] = json!(
+            metrics
+                .iter()
+                .map(|metric| json!({
+                    "metric":metric,"max_regression_bps":0,"max_reference_spread_bps":0
+                }))
+                .collect::<Vec<_>>()
+        );
     }
     policy
 }
@@ -832,10 +837,18 @@ fn declaration_v2(work: &Value, metrics: &[&str]) -> Value {
 fn synthetic_lane_answers(root: &Path, answers: &[u64]) {
     let plan = value(root.join("plan.json"));
     for spec in plan["waves"].as_array().unwrap() {
-        let path = root.join(format!("wave-{:06}/wave.json", spec["index"].as_u64().unwrap()));
+        let path = root.join(format!(
+            "wave-{:06}/wave.json",
+            spec["index"].as_u64().unwrap()
+        ));
         let mut wave = value(&path);
         assert_eq!(wave["attempts"].as_array().unwrap().len(), answers.len());
-        for (attempt, answer) in wave["attempts"].as_array_mut().unwrap().iter_mut().zip(answers) {
+        for (attempt, answer) in wave["attempts"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .zip(answers)
+        {
             attempt["timing"]["first_generated_text_us"] = json!(answer);
             attempt["timing"]["first_answer_text_us"] = json!(answer);
             attempt["timing"]["last_generated_text_us"] = json!(answer);
@@ -847,29 +860,50 @@ fn synthetic_lane_answers(root: &Path, answers: &[u64]) {
 #[test]
 fn policy2_completion_is_client_settlement_not_first_answer() {
     let work = workload(2, 1, 3);
-    let fixture = Fixture::with_policy(work.clone(), declaration_v2(&work, &[
-        "first_generated_text_us", "first_answer_text_us", "completion_latency_us",
-    ]));
+    let fixture = Fixture::with_policy(
+        work.clone(),
+        declaration_v2(
+            &work,
+            &[
+                "first_generated_text_us",
+                "first_answer_text_us",
+                "completion_latency_us",
+            ],
+        ),
+    );
     synthetic_times(&fixture.temp.path("b"), &[(10000, 30000)]);
     let decision = report(&fixture.decide(Some("a2")), "REGRESSION", 3);
     assert_eq!(decision["version"], 2);
-    assert_eq!(gate(&decision, "first_generated_text_us")["decision"], "PASS");
+    assert_eq!(
+        gate(&decision, "first_generated_text_us")["decision"],
+        "PASS"
+    );
     assert_eq!(gate(&decision, "first_answer_text_us")["decision"], "PASS");
     let completion = gate(&decision, "completion_latency_us");
     assert_eq!(completion["decision"], "REGRESSION");
-    assert_eq!(completion["ranges"]["candidate"], json!([
-        {"numerator":30000,"denominator":1},{"numerator":30000,"denominator":1}
-    ]));
+    assert_eq!(
+        completion["ranges"]["candidate"],
+        json!([
+            {"numerator":30000,"denominator":1},{"numerator":30000,"denominator":1}
+        ])
+    );
     assert_eq!(completion["coverage"]["candidate"]["expected_waves"], 3);
-    assert_eq!(completion["coverage"]["candidate"]["expected_observations"], 6);
+    assert_eq!(
+        completion["coverage"]["candidate"]["expected_observations"],
+        6
+    );
 }
 
 #[test]
 fn policy2_fairness_counts_whole_waves_and_keeps_zero_lane_unavailable() {
     let work = workload(2, 1, 3);
-    let fixture = Fixture::with_policy(work.clone(), declaration_v2(&work, &[
-        "worst_lane_first_answer_us", "first_answer_max_min_ratio",
-    ]));
+    let fixture = Fixture::with_policy(
+        work.clone(),
+        declaration_v2(
+            &work,
+            &["worst_lane_first_answer_us", "first_answer_max_min_ratio"],
+        ),
+    );
     for role in ["a", "a2"] {
         synthetic_lane_answers(&fixture.temp.path(role), &[10000, 10000]);
     }
@@ -881,14 +915,20 @@ fn policy2_fairness_counts_whole_waves_and_keeps_zero_lane_unavailable() {
         assert_eq!(gate["coverage"]["candidate"]["expected_observations"], 3);
         assert_eq!(gate["coverage"]["candidate"]["observed_observations"], 3);
     }
-    assert_eq!(gate(&decision, "first_answer_max_min_ratio")["ranges"]["candidate"], json!([
-        {"numerator":15000,"denominator":5000},{"numerator":15000,"denominator":5000}
-    ]));
+    assert_eq!(
+        gate(&decision, "first_answer_max_min_ratio")["ranges"]["candidate"],
+        json!([
+            {"numerator":15000,"denominator":5000},{"numerator":15000,"denominator":5000}
+        ])
+    );
     synthetic_lane_answers(&fixture.temp.path("b"), &[0, 15000]);
     let unavailable = report(&fixture.decide(Some("a2")), "INCONCLUSIVE", 2);
     for metric in ["worst_lane_first_answer_us", "first_answer_max_min_ratio"] {
         reason(gate(&unavailable, metric), "metric_unavailable");
-        assert_eq!(gate(&unavailable, metric)["coverage"]["candidate"]["observed_observations"], 0);
+        assert_eq!(
+            gate(&unavailable, metric)["coverage"]["candidate"]["observed_observations"],
+            0
+        );
     }
 }
 
@@ -897,29 +937,61 @@ fn policy2_required_hits_gate_actual_latency_not_prefill() {
     let mut work = workload(1, 1, 3);
     work["request"]["profile"] = json!("vllm-fixed-v1");
     work["request"]["cache"] = json!("reported-prefix-hit");
-    let fixture = Fixture::with_policy(work.clone(), declaration_v2(&work, &[
-        "first_generated_text_us", "first_answer_text_us", "prefill_tokens_per_second",
-    ]));
+    let fixture = Fixture::with_policy(
+        work.clone(),
+        declaration_v2(
+            &work,
+            &[
+                "first_generated_text_us",
+                "first_answer_text_us",
+                "prefill_tokens_per_second",
+            ],
+        ),
+    );
     let decision = report(&fixture.decide(Some("a2")), "INCONCLUSIVE", 2);
-    assert_eq!(gate(&decision, "first_generated_text_us")["decision"], "PASS");
+    assert_eq!(
+        gate(&decision, "first_generated_text_us")["decision"],
+        "PASS"
+    );
     assert_eq!(gate(&decision, "first_answer_text_us")["decision"], "PASS");
-    reason(gate(&decision, "prefill_tokens_per_second"), "metric_unavailable");
-    assert_eq!(gate(&decision, "prefill_tokens_per_second")["ranges"]["candidate"], Value::Null);
+    reason(
+        gate(&decision, "prefill_tokens_per_second"),
+        "metric_unavailable",
+    );
+    assert_eq!(
+        gate(&decision, "prefill_tokens_per_second")["ranges"]["candidate"],
+        Value::Null
+    );
 }
 
 #[test]
 fn policy2_does_not_weaken_output_or_reference_qualification() {
     let work = workload(2, 1, 3);
-    let fixture = Fixture::with_policy(work.clone(), declaration_v2(&work, &[
-        "first_answer_text_us", "worst_lane_first_answer_us", "first_answer_max_min_ratio",
-    ]));
+    let fixture = Fixture::with_policy(
+        work.clone(),
+        declaration_v2(
+            &work,
+            &[
+                "first_answer_text_us",
+                "worst_lane_first_answer_us",
+                "first_answer_max_min_ratio",
+            ],
+        ),
+    );
     let missing = report(&fixture.decide(None), "INCONCLUSIVE", 2);
     reason(&missing, "missing_reference");
     let reused = report(&fixture.decide(Some("a")), "INCONCLUSIVE", 2);
     reason(&reused, "role_reuse");
-    synthetic_usage(&fixture.temp.path("b"), |lane| if lane == 0 { 7 } else { 8 });
+    synthetic_usage(
+        &fixture.temp.path("b"),
+        |lane| if lane == 0 { 7 } else { 8 },
+    );
     let changed = report(&fixture.decide(Some("a2")), "INCONCLUSIVE", 2);
-    for metric in ["first_answer_text_us", "worst_lane_first_answer_us", "first_answer_max_min_ratio"] {
+    for metric in [
+        "first_answer_text_us",
+        "worst_lane_first_answer_us",
+        "first_answer_max_min_ratio",
+    ] {
         reason(gate(&changed, metric), "output_amounts_mismatch");
     }
 }
@@ -946,7 +1018,12 @@ fn policy2_rejects_solo_fairness_and_unsupported_lane_selectors_before_dispatch(
     invalid.push(legacy);
     for (index, policy) in invalid.iter().enumerate() {
         save(temp.path("policy.json"), policy);
-        assert_eq!(collect(&temp, &server, &format!("invalid-{index}"), true).status.code(), Some(1));
+        assert_eq!(
+            collect(&temp, &server, &format!("invalid-{index}"), true)
+                .status
+                .code(),
+            Some(1)
+        );
     }
     assert_eq!(server.count.load(Ordering::SeqCst), 0);
 }

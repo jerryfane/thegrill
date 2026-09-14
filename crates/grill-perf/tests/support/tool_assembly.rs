@@ -15,18 +15,32 @@ fn stream(prior_ids: &[&str]) -> ToolStream {
 #[test]
 fn fragmented_fixed_call_keeps_first_delta_distinct_from_complete_call() {
     let mut tool = stream(&[]);
-    tool.delta(r#"[{"index":0,"id":"call_1","type":"function"}]"#, 10).unwrap();
+    tool.delta(r#"[{"index":0,"id":"call_1","type":"function"}]"#, 10)
+        .unwrap();
     assert_eq!(tool.first_delta_us, None);
-    tool.delta(r#"[{"index":0,"function":{"name":"look"}}]"#, 20).unwrap();
+    tool.delta(r#"[{"index":0,"function":{"name":"look"}}]"#, 20)
+        .unwrap();
     assert_eq!(tool.first_delta_us, Some(20));
     assert!(tool.validated_us().is_err());
-    tool.delta(r#"[{"index":0,"function":{"name":"up_fact","arguments":"{\"key\":"}}]"#, 30).unwrap();
+    tool.delta(
+        r#"[{"index":0,"function":{"name":"up_fact","arguments":"{\"key\":"}}]"#,
+        30,
+    )
+    .unwrap();
     assert!(tool.validated_us().is_err());
-    tool.delta(r#"[{"index":0,"function":{"arguments":"\"harbor\"}"}}]"#, 40).unwrap();
+    tool.delta(
+        r#"[{"index":0,"function":{"arguments":"\"harbor\"}"}}]"#,
+        40,
+    )
+    .unwrap();
     assert_eq!(tool.validated_us().unwrap(), 40);
-    tool.delta(r#"[{"index":0,"function":{"arguments":"\n"}}]"#, 50).unwrap();
+    tool.delta(r#"[{"index":0,"function":{"arguments":"\n"}}]"#, 50)
+        .unwrap();
     assert_eq!(tool.validated_us().unwrap(), 40);
-    assert_eq!(tool.message().unwrap()["tool_calls"][0]["function"]["arguments"], "{\"key\":\"harbor\"}\n");
+    assert_eq!(
+        tool.message().unwrap()["tool_calls"][0]["function"]["arguments"],
+        "{\"key\":\"harbor\"}\n"
+    );
 }
 
 #[test]
@@ -34,7 +48,8 @@ fn valid_json_prefix_does_not_rescue_contradictory_final_arguments() {
     let mut tool = stream(&[]);
     tool.delta(r#"[{"index":0,"id":"call_1","type":"function","function":{"name":"lookup_fact","arguments":"{\"key\":\"harbor\"}"}}]"#, 10).unwrap();
     assert_eq!(tool.validated_us().unwrap(), 10);
-    tool.delta(r#"[{"index":0,"function":{"arguments":"{}"}}]"#, 20).unwrap();
+    tool.delta(r#"[{"index":0,"function":{"arguments":"{}"}}]"#, 20)
+        .unwrap();
     assert!(tool.validated_us().is_err());
     assert!(tool.message().is_err());
 }
@@ -54,8 +69,14 @@ fn fixed_calls_reject_duplicate_ids_indices_names_and_argument_semantics() {
     let mut reused = stream(&["call_1"]);
     assert!(reused.delta(r#"[{"index":0,"id":"call_1"}]"#, 10).is_err());
     let mut duplicate = stream(&[]);
-    duplicate.delta(r#"[{"index":0,"id":"call_1"}]"#, 10).unwrap();
-    assert!(duplicate.delta(r#"[{"index":0,"id":"call_1"}]"#, 20).is_err());
+    duplicate
+        .delta(r#"[{"index":0,"id":"call_1"}]"#, 10)
+        .unwrap();
+    assert!(
+        duplicate
+            .delta(r#"[{"index":0,"id":"call_1"}]"#, 20)
+            .is_err()
+    );
     for arguments in [
         r#"{"key":"other"}"#,
         r#"{"key":"other","key":"harbor"}"#,

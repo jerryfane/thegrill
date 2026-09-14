@@ -12,7 +12,10 @@ pub struct Rational {
 
 impl From<(u64, u64)> for Rational {
     fn from((numerator, denominator): (u64, u64)) -> Self {
-        Self { numerator, denominator }
+        Self {
+            numerator,
+            denominator,
+        }
     }
 }
 
@@ -60,13 +63,26 @@ pub fn range(values: &[Rational]) -> Result<Option<[Rational; 2]>, EnvelopeReaso
     if values.iter().any(|value| value.denominator == 0) {
         return Err(EnvelopeReason::InvalidRational);
     }
-    let Some(&first) = values.first() else { return Ok(None); };
-    Ok(Some(values.iter().copied().fold([first, first], |[low, high], value| {
-        [
-            if order(value, low).is_lt() { value } else { low },
-            if order(value, high).is_gt() { value } else { high },
-        ]
-    })))
+    let Some(&first) = values.first() else {
+        return Ok(None);
+    };
+    Ok(Some(values.iter().copied().fold(
+        [first, first],
+        |[low, high], value| {
+            [
+                if order(value, low).is_lt() {
+                    value
+                } else {
+                    low
+                },
+                if order(value, high).is_gt() {
+                    value
+                } else {
+                    high
+                },
+            ]
+        },
+    )))
 }
 
 pub fn assess(
@@ -78,18 +94,25 @@ pub fn assess(
 ) -> Result<Assessment, EnvelopeReason> {
     let [low, high] = reference;
     let [c_low, c_high] = candidate;
-    if [low, high, c_low, c_high].iter().any(|v| v.denominator == 0) {
+    if [low, high, c_low, c_high]
+        .iter()
+        .any(|v| v.denominator == 0)
+    {
         return Err(EnvelopeReason::InvalidRational);
     }
-    if adverse_bps > 9999 || spread_bps > 1_000_000
-        || order(low, high).is_gt() || order(c_low, c_high).is_gt()
+    if adverse_bps > 9999
+        || spread_bps > 1_000_000
+        || order(low, high).is_gt()
+        || order(c_low, c_high).is_gt()
     {
         return Err(EnvelopeReason::InvalidBounds);
     }
     if low.numerator == 0 {
         return Err(EnvelopeReason::NonpositiveReference);
     }
-    let reference_overflow = EnvelopeReason::ArithmeticOverflow { adverse_bounds: None };
+    let reference_overflow = EnvelopeReason::ArithmeticOverflow {
+        adverse_bounds: None,
+    };
     if scaled(high, 10000, low).ok_or(reference_overflow)?
         > scaled(low, 10000 + spread_bps, high).ok_or(reference_overflow)?
     {
@@ -102,7 +125,9 @@ pub fn assess(
         Direction::LowerBetter => [ratio(c_low, high) - 1.0, ratio(c_high, low) - 1.0],
         Direction::HigherBetter => [1.0 - ratio(c_high, low), 1.0 - ratio(c_low, high)],
     };
-    let overflow = EnvelopeReason::ArithmeticOverflow { adverse_bounds: Some(adverse_bounds) };
+    let overflow = EnvelopeReason::ArithmeticOverflow {
+        adverse_bounds: Some(adverse_bounds),
+    };
     // Keep both comparisons checked, even when the first establishes PASS.
     // Legacy policy1 fails closed on an overflowing second comparison too.
     let (pass, regression) = match direction {
@@ -126,7 +151,10 @@ pub fn assess(
     } else {
         return Err(EnvelopeReason::EnvelopeStraddlesTolerance { adverse_bounds });
     };
-    Ok(Assessment { decision, adverse_bounds })
+    Ok(Assessment {
+        decision,
+        adverse_bounds,
+    })
 }
 
 #[cfg(test)]

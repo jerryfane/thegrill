@@ -4,6 +4,30 @@
 settings, downloads weights or uploads evidence. The quality CLI `grill` remains
 WIP and is not in these archives.
 
+## Expanded-coverage staging
+
+The download commands below intentionally select the published **v0.1.0**
+baseline. New mixed/accounting/acquisition/resource/lifecycle/kernel claim
+coverage belongs to **0.2.0, currently unreleased**. Use a separately reviewed
+local staged archive, checksum and build receipt for that exact version/target;
+do not invent a v0.2.0 download URL or substitute a moving branch.
+Apply the same checksum, receipt and extraction checks below to those supplied
+files. The source fallback must likewise use its separately reviewed exact
+source, not the historical v0.1.0 source pin.
+
+A 0.2.0 package additionally carries the claim map and report template under
+`docs/performance/`, public domain examples under `workloads/`, and the explicit
+startup, retention and microbench Python modules under `tools/`. Keep all of
+those bytes immutable and pin the actual executable and selected producer before
+collection. The native CLI still needs no Rust/TheGrill checkout. Python producers
+require a separate compatible Python/backend environment; CPU protocol checks
+use Python 3.12, and real runtime/source compatibility must be reviewed separately.
+No model weights, backend runtime or driver are installed by the archive.
+
+Installing files is not permission to initialize devices, submit model traffic,
+install hooks or restart a service. Source/CPU verification, native installed
+verification and real-backend qualification remain separate reported statuses.
+
 ## Obtain, verify, unpack
 
 The published prerelease is [**v0.1.0**](https://github.com/plotarmordev/thegrill/releases/tag/v0.1.0),

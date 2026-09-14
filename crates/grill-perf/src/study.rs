@@ -920,7 +920,7 @@ fn preflight(
     workload: &Workload,
     selected: Option<&selection::Manifest>,
 ) -> Result<()> {
-    if matches!(workload.version, 4 | 5 | 6) {
+    if matches!(workload.version, 4..=6) {
         return Err("workloads4..6 require native run/preflight/compare/decide; legacy selected capture is unsupported".into());
     }
     wire::endpoint(&options.endpoint, options.local_http)?;

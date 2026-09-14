@@ -1,0 +1,50 @@
+{
+  "version": 6,
+  "name": "glm-p95-stress-v6",
+  "request": {
+    "profile": "vllm-fixed-v1",
+    "stream": true,
+    "output": {
+      "tokens": 8,
+      "mode": "exact"
+    },
+    "cache": "observe",
+    "temperature_milli": 0,
+    "seed": 0,
+    "top_p_milli": 1000,
+    "thinking_control": {
+      "kind": "vllm-enable-thinking-v1",
+      "enabled": false
+    }
+  },
+  "limits": {
+    "total_ms": 360000,
+    "idle_ms": 60000,
+    "response_bytes": 65536,
+    "wave_buffer_bytes": 16777216
+  },
+  "cases": [
+    {
+      "id": "one",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Return the word sapphire."
+        }
+      ]
+    }
+  ],
+  "cells": [
+    {
+      "id": "c2",
+      "case": "one",
+      "concurrency": 2,
+      "warmup_trials": 1,
+      "trials": 200
+    }
+  ],
+  "acquisition": {
+    "kind": "flat",
+    "input_bytes": 65536
+  }
+}

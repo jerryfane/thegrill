@@ -121,9 +121,14 @@ pub fn request_body(context: &BodyContext<'_>, wave: &WaveSpec, lane: u32) -> Re
         max_tokens: r.output.tokens,
         temperature: r.temperature_milli.map(|n| f64::from(n) / 1000.0),
         top_p: r.top_p_milli.map(|n| f64::from(n) / 1000.0),
-        seed: r
-            .seed
-            .map(|seed| seed + i64::from(wave.trial) * 64 + if wave.lanes.is_some() { 0 } else { i64::from(lane) }),
+        seed: r.seed.map(|seed| {
+            seed + i64::from(wave.trial) * 64
+                + if wave.lanes.is_some() {
+                    0
+                } else {
+                    i64::from(lane)
+                }
+        }),
         chat_template_kwargs: match (r.thinking, r.thinking_control) {
             (Some(thinking), None) => Some(ChatTemplateKwargs::Legacy { thinking }),
             (None, Some(ThinkingControl::VllmEnableThinkingV1 { enabled })) => {
@@ -421,10 +426,15 @@ impl Semantic {
             }
             if let Some(tool) = &self.tool {
                 if self.finish.as_deref() != Some("tool_calls") {
-                    return Err((Status::Malformed, "fixed tool stream requires tool_calls finish"));
+                    return Err((
+                        Status::Malformed,
+                        "fixed tool stream requires tool_calls finish",
+                    ));
                 }
-                timing.first_validated_tool_call_us = Some(tool.validated_us()
-                    .map_err(|_| (Status::Malformed, "incomplete or invalid fixed tool call"))?);
+                timing.first_validated_tool_call_us =
+                    Some(tool.validated_us().map_err(|_| {
+                        (Status::Malformed, "incomplete or invalid fixed tool call")
+                    })?);
             }
             timing.terminal_us = Some(observed);
             return Ok(Flow::Stop);
@@ -494,11 +504,10 @@ impl Semantic {
             if self.tool.is_some() && generated {
                 return Err((Status::Malformed, "text in fixed tool response"));
             }
-            if tools && self.tool.is_some() {
+            if tools && let Some(tool) = self.tool.as_mut() {
                 if !stream || self.finish.is_some() {
                     return Err((Status::Malformed, "tool fragments outside active stream"));
                 }
-                let tool = self.tool.as_mut().expect("checked tool context");
                 tool.delta(delta.tool_calls.expect("present tools").get(), observed)
                     .map_err(|_| (Status::Malformed, "invalid fixed tool fragment"))?;
                 timing.first_tool_delta_us = tool.first_delta_us;
@@ -550,10 +559,10 @@ impl Semantic {
             if self.finish.is_some() {
                 return Err((Status::Malformed, "duplicate finish"));
             }
-            if let Some(tool) = &self.tool {
-                if reason != "tool_calls" || tool.validated_us().is_err() {
-                    return Err((Status::Malformed, "invalid fixed tool call at finish"));
-                }
+            if let Some(tool) = &self.tool
+                && (reason != "tool_calls" || tool.validated_us().is_err())
+            {
+                return Err((Status::Malformed, "invalid fixed tool call at finish"));
             }
             self.finish = Some(reason.into_owned());
         }
@@ -715,7 +724,10 @@ pub(crate) fn sequence_tool(
     expected: crate::sequence::ToolExpectation,
 ) -> Result<Option<serde_json::Value>> {
     attempt.timing.validate_tools(true)?;
-    let arrivals = attempt.timing.tool_stream_arrivals.as_ref()
+    let arrivals = attempt
+        .timing
+        .tool_stream_arrivals
+        .as_ref()
         .ok_or("missing tool arrival trace")?;
     if arrivals.len() > TOOL_ARRIVAL_CAP {
         return Err("tool arrival trace exceeds its finite allowance".into());
@@ -723,7 +735,8 @@ pub(crate) fn sequence_tool(
     let mut previous_offset = 0;
     let mut previous_us = attempt.timing.headers_us.unwrap_or(0);
     for arrival in arrivals {
-        if arrival.end_offset <= previous_offset || arrival.end_offset > body.len()
+        if arrival.end_offset <= previous_offset
+            || arrival.end_offset > body.len()
             || arrival.observed_us < previous_us
             || arrival.observed_us > attempt.timing.settle_us
         {
@@ -763,8 +776,11 @@ pub(crate) fn sequence_tool(
         ..Semantic::default()
     };
     let mut timing = Timing::default();
-    let mut parser = Parser::new(SseLimits { line_bytes: FRAME_CAP, event_bytes: FRAME_CAP })
-        .map_err(|_| "invalid framing limits")?;
+    let mut parser = Parser::new(SseLimits {
+        line_bytes: FRAME_CAP,
+        event_bytes: FRAME_CAP,
+    })
+    .map_err(|_| "invalid framing limits")?;
     let mut offset = 0;
     let mut terminal_offset = None;
     let mut failed = false;
@@ -796,10 +812,16 @@ pub(crate) fn sequence_tool(
         || semantic.finish != attempt.finish_reason
         || semantic.usage != attempt.usage
     {
-        return Err("tool response does not reproduce its retained semantic timing boundaries".into());
+        return Err(
+            "tool response does not reproduce its retained semantic timing boundaries".into(),
+        );
     }
     if attempt.status == Status::Complete {
-        semantic.tool.ok_or("missing fixed tool context")?.message().map(Some)
+        semantic
+            .tool
+            .ok_or("missing fixed tool context")?
+            .message()
+            .map(Some)
     } else {
         Ok(None)
     }
@@ -824,7 +846,14 @@ pub async fn collect(
     settings: RequestSettings,
     context: CollectContext,
 ) -> Collected {
-    let CollectContext { lane, origin, deadline, mut cancel, first_generated, tool_expectation } = context;
+    let CollectContext {
+        lane,
+        origin,
+        deadline,
+        mut cancel,
+        first_generated,
+        tool_expectation,
+    } = context;
     let stream = settings.stream;
     let sent = Instant::now();
     let tool_step = tool_expectation.is_some();
@@ -972,7 +1001,10 @@ pub async fn collect(
                 if let Some(arrivals) = &mut a.timing.tool_stream_arrivals
                     && retained != 0
                 {
-                    arrivals.push(ToolArrival { end_offset: body.len(), observed_us: observed });
+                    arrivals.push(ToolArrival {
+                        end_offset: body.len(),
+                        observed_us: observed,
+                    });
                 }
                 let mut done = false;
                 if parse && stream {
@@ -981,11 +1013,21 @@ pub async fn collect(
                     match parser.feed(&chunk[..retained], |event| {
                         let had_first = a.timing.first_generated_text_us.is_some();
                         let result = semantic.event(event, true, observed, &mut a.timing);
-                        if !had_first && let Some(first) = a.timing.first_generated_text_us
+                        if !had_first
+                            && let Some(first) = a.timing.first_generated_text_us
                             && let Some(sender) = &first_generated
                         {
-                            notification_failed = a.timing.dispatch_offset_us.checked_add(first)
-                                .is_none_or(|offset| sender.try_send(crate::schedule::FirstGenerated { lane, offset_us: offset }).is_err());
+                            notification_failed =
+                                a.timing.dispatch_offset_us.checked_add(first).is_none_or(
+                                    |offset| {
+                                        sender
+                                            .try_send(crate::schedule::FirstGenerated {
+                                                lane,
+                                                offset_us: offset,
+                                            })
+                                            .is_err()
+                                    },
+                                );
                         }
                         output_exceeded |= semantic
                             .usage
@@ -1033,7 +1075,11 @@ pub async fn collect(
                 if done {
                     break;
                 }
-                if a.timing.tool_stream_arrivals.as_ref().is_some_and(|arrivals| arrivals.len() == TOOL_ARRIVAL_CAP) {
+                if a.timing
+                    .tool_stream_arrivals
+                    .as_ref()
+                    .is_some_and(|arrivals| arrivals.len() == TOOL_ARRIVAL_CAP)
+                {
                     a.status = Status::ResponseLimit;
                     a.detail = "tool arrival trace reached 4096 chunks".into();
                     break;

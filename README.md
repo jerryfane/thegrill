@@ -22,10 +22,14 @@ verify a pinned artifact before unpacking, supply the actual server inputs once,
 capture a baseline, optionally capture an unchanged control, change serving state
 yourself, check, and replay the report offline.
 
-**There are no published releases yet.** The guide works with a reviewed staged
-archive and includes a source fallback; it does not assume a public download.
-The performance archive contains `bin/grill-perf` and adjacent pinned files under
-`workloads/`. Installed use needs Linux, not Rust or a source checkout.
+The published [v0.1.0 pre-release](https://github.com/plotarmordev/thegrill/releases/tag/v0.1.0)
+covers the baseline workflow. The expanded claim coverage below requires a
+separately reviewed staged artifact until its own release is approved; do not
+assume the historical binary contains newer source features.
+The performance archive contains `bin/grill-perf`, pinned `workloads/` and
+offline performance guides. The native CLI needs Linux, not Rust or a TheGrill
+checkout. Opt-in Python producers additionally require their explicitly reviewed
+Python/backend runtime; the archive does not install those dependencies.
 
 ## Speed benchmarks
 
@@ -65,12 +69,29 @@ prospectively; exhaustion is not automatically server failure. There are no
 automatic retries or replacement samples. Reports and raw evidence stay local;
 `compare` verifies saved captures without network calls.
 
+### Contributor claims beyond the default C1 check
+
+Use the **[shared claim map and recipe profiles](docs/performance/SHARED-RECIPES.md)**
+and **[single report template](docs/performance/SHARED-REPORT-TEMPLATE.md)** as the
+entrypoint for contributor performance evidence. Select the relevant routine,
+stress or domain scope before collection; do not run the entire matrix
+automatically. The map separates first-output/completion, fairness, mixed
+interference, accounting, tools/history, resources, retention/capacity,
+startup/reload and kernel/fabric evidence.
+
+The default CLI remains the bounded C1 assessment above. Advanced `run`, `pause`,
+`resume`, raw-run `compare` and captured-policy `decide` keep their separate
+meanings; domain collectors do not substitute for serving or quality checks.
+The recipes retain their [sparkDash](https://github.com/MiaAI-Lab/sparkDash)
+attribution, and historical evidence is not reinterpreted.
+
+Report source implementation, CPU-protocol verification, real-adapter exercise
+and live-backend qualification separately for the exact artifact and selected
+scope. Fixture success is not model/cache/tokenizer proof; missing evidence and
+INCONCLUSIVE results stay visible. Broader mandatory PR adoption remains subject
+to completed coverage review and explicit maintainer scope/exception agreement.
+
 [Full performance guide and measurement limits](docs/performance/README.md).
-Advanced `run`, `pause`, `resume`, raw-run `compare`, and captured-policy `decide`
-remain separate workflows. The [shared recipes](docs/performance/SHARED-RECIPES.md)
-retain their [sparkDash](https://github.com/MiaAI-Lab/sparkDash) attribution and
-original observed-envelope semantics; they are not the new default assessment,
-and historical results are not reinterpreted.
 
 ## Quality evaluation (WIP)
 

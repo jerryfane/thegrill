@@ -197,7 +197,9 @@ pub fn execute_bounded(o: &Options, deadline: Instant) -> Result<Summary> {
 pub fn execute_capacity_bounded(o: &Options, deadline: Instant) -> Result<Summary> {
     let source = evidence::read(&o.common.workload, FILE_CAP)?;
     let workload: Workload = serde_json::from_slice(&source).map_err(|e| e.to_string())?;
-    if workload.version != 6 { return Err("capacity requires workload6".into()); }
+    if workload.version != 6 {
+        return Err("capacity requires workload6".into());
+    }
     execute_inner(o, Some(deadline))
 }
 
@@ -262,7 +264,8 @@ fn admit(o: &CommonArgs) -> Result<Admitted> {
     let context = wire::BodyContext {
         workload: &workload,
         model: &o.model,
-        cache_namespace: workload.cache_namespace_required()
+        cache_namespace: workload
+            .cache_namespace_required()
             .then_some("0000000000000000000000000000000000000000000000000000000000000000"),
     };
     if matches!(workload.version, 2 | 5) {
@@ -280,12 +283,22 @@ fn admit(o: &CommonArgs) -> Result<Admitted> {
             let mut escaped_total = 0usize;
             for lane in 0..spec.concurrency {
                 let body = wire::request_body(&context, spec, lane)?;
-                request_bytes = request_bytes.checked_add(body.len() as u64).ok_or("schedule input byte ceiling overflows")?;
-                escaped_total = escaped_total.checked_add(serde_json::to_string(&body).map_err(|e| e.to_string())?.len())
+                request_bytes = request_bytes
+                    .checked_add(body.len() as u64)
+                    .ok_or("schedule input byte ceiling overflows")?;
+                escaped_total = escaped_total
+                    .checked_add(
+                        serde_json::to_string(&body)
+                            .map_err(|e| e.to_string())?
+                            .len(),
+                    )
                     .ok_or("schedule reservation size overflow")?;
             }
             if escaped_total > 32 * 1024 * 1024 {
-                return Err(format!("scenario {} exceeds the reservation receipt bound", spec.cell));
+                return Err(format!(
+                    "scenario {} exceeds the reservation receipt bound",
+                    spec.cell
+                ));
             }
         }
     }
@@ -294,17 +307,29 @@ fn admit(o: &CommonArgs) -> Result<Admitted> {
         // remaining bounded envelope plus its actual variable strings fits the
         // separately reserved 64 KiB; no source or lane data is omitted.
         let plan_bound = json_size(&(&workload, &waves))?
-            .checked_add(json_size(&(&o.model, url.as_str(), &deployment, &o.auth_env, &metrics))?)
-            .and_then(|n| n.checked_add(64 * 1024)).ok_or("schedule plan size overflows")?;
-        if plan_bound > 8 * 1024 * 1024 { return Err("schedule exceeds the 8 MiB native plan bound".into()); }
+            .checked_add(json_size(&(
+                &o.model,
+                url.as_str(),
+                &deployment,
+                &o.auth_env,
+                &metrics,
+            ))?)
+            .and_then(|n| n.checked_add(64 * 1024))
+            .ok_or("schedule plan size overflows")?;
+        if plan_bound > 8 * 1024 * 1024 {
+            return Err("schedule exceeds the 8 MiB native plan bound".into());
+        }
         let (warmup, measured, _) = crate::selection::budgets(&workload, 1)?;
         Some(ScheduleBudget {
             request_body_bytes: request_bytes,
-            response_byte_ceiling: (warmup as u64 + measured as u64) * workload.limits.response_bytes as u64,
+            response_byte_ceiling: (warmup as u64 + measured as u64)
+                * workload.limits.response_bytes as u64,
             scenario_time_ceiling_ms: waves.len() as u64 * u64::from(workload.limits.total_ms),
             maximum_admitted_lanes: waves.iter().map(|s| s.concurrency).max().unwrap_or(0),
         })
-    } else { None };
+    } else {
+        None
+    };
     if let Some(bytes) = &policy_bytes {
         crate::policy::parse(
             bytes,
@@ -318,11 +343,22 @@ fn admit(o: &CommonArgs) -> Result<Admitted> {
     let acquisition_budget = if workload.version == 6 {
         crate::acquisition::preflight(&context)?;
         let plan_bound = json_size(&(&workload, &waves))?
-            .checked_add(json_size(&(&o.model, url.as_str(), &deployment, &o.auth_env, &metrics))?)
-            .and_then(|n| n.checked_add(64 * 1024)).ok_or("acquisition plan size overflow")?;
-        if plan_bound > 8 * 1024 * 1024 { return Err("acquisition exceeds native plan bound".into()); }
+            .checked_add(json_size(&(
+                &o.model,
+                url.as_str(),
+                &deployment,
+                &o.auth_env,
+                &metrics,
+            ))?)
+            .and_then(|n| n.checked_add(64 * 1024))
+            .ok_or("acquisition plan size overflow")?;
+        if plan_bound > 8 * 1024 * 1024 {
+            return Err("acquisition exceeds native plan bound".into());
+        }
         Some(crate::acquisition::budget(&workload)?)
-    } else { None };
+    } else {
+        None
+    };
     // Seed magnitude peaks at a corner of the trial/lane range and index 1023 is
     // the widest index, but lane 0 renders one digit narrower than lanes 10..63 in
     // each of the cache salt and the text salt, so an interior body can exceed a
@@ -393,10 +429,15 @@ fn json_size(value: &impl Serialize) -> Result<usize> {
     struct Counter(usize);
     impl std::io::Write for Counter {
         fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            self.0 = self.0.checked_add(bytes.len()).ok_or_else(|| std::io::Error::other("JSON size overflow"))?;
+            self.0 = self
+                .0
+                .checked_add(bytes.len())
+                .ok_or_else(|| std::io::Error::other("JSON size overflow"))?;
             Ok(bytes.len())
         }
-        fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
     }
     let mut counter = Counter(0);
     serde_json::to_writer_pretty(&mut counter, value).map_err(|e| e.to_string())?;
@@ -405,21 +446,33 @@ fn json_size(value: &impl Serialize) -> Result<usize> {
 
 fn execute_inner(o: &Options, deadline: Option<Instant>) -> Result<Summary> {
     let admitted = admit(&o.common)?;
-    let cache_namespace =
-        if !admitted.workload.cache_namespace_required() {
-            None
-        } else {
-            let mut random = [0u8; 16];
-            std::fs::File::open("/dev/urandom")
-                .and_then(|mut f| f.read_exact(&mut random))
-                .map_err(|_| "cannot obtain cache-salt entropy")?;
-            Some(evidence::digest(&random))
-        };
-    let cache_mechanism = admitted.workload.cache_mechanism_required()
+    let cache_namespace = if !admitted.workload.cache_namespace_required() {
+        None
+    } else {
+        let mut random = [0u8; 16];
+        std::fs::File::open("/dev/urandom")
+            .and_then(|mut f| f.read_exact(&mut random))
+            .map_err(|_| "cannot obtain cache-salt entropy")?;
+        Some(evidence::digest(&random))
+    };
+    let cache_mechanism = admitted
+        .workload
+        .cache_mechanism_required()
         .then(|| "declared-vllm-prefix-cache".into());
-    let pool = admitted.waves.iter().map(|s| s.concurrency as usize).max().unwrap_or(1);
+    let pool = admitted
+        .waves
+        .iter()
+        .map(|s| s.concurrency as usize)
+        .max()
+        .unwrap_or(1);
     let plan = Plan {
-        version: if admitted.workload.version == 6 { 5 } else if matches!(admitted.workload.version, 4 | 5) { 4 } else { 3 },
+        version: if admitted.workload.version == 6 {
+            5
+        } else if matches!(admitted.workload.version, 4 | 5) {
+            4
+        } else {
+            3
+        },
         metric_contract: Some(METRIC_CONTRACT.into()),
         kind: "performance-run-v1".into(),
         tool_version: env!("CARGO_PKG_VERSION").into(),
@@ -467,7 +520,7 @@ pub fn resume(root: &std::path::Path, json: bool) -> Result<Summary> {
     if matches!(loaded.plan.workload.version, 2 | 5 | 6) {
         return Err("bounded conversation sequences cannot resume; retain the partial sequence and start a new explicitly budgeted capture".into());
     }
-    if !matches!(loaded.plan.version, 2 | 3 | 4) {
+    if !matches!(loaded.plan.version, 2..=4) {
         return Err("legacy runs cannot be resumed; no execution-session provenance".into());
     }
     if loaded.plan.collector_sha256 != evidence::binary_digest()?
@@ -775,7 +828,10 @@ async fn dispatch_schedule(
     controls: (&[RequestSettings], &Limits),
     spec: &WaveSpec,
     window: (Instant, Instant),
-    signals: (&mut tokio::signal::unix::Signal, &mut tokio::signal::unix::Signal),
+    signals: (
+        &mut tokio::signal::unix::Signal,
+        &mut tokio::signal::unix::Signal,
+    ),
     cancellation: (&watch::Sender<bool>, &watch::Receiver<bool>),
 ) -> Result<(Vec<wire::Collected>, Option<crate::schedule::Reason>)> {
     use crate::schedule::{Reason, State};
@@ -791,35 +847,80 @@ async fn dispatch_schedule(
     let mut tasks = JoinSet::<wire::Collected>::new();
     let mut task_failed = false;
     loop {
-        if interrupted() || *cancellation.borrow() { state.fail(Reason::Cancelled); }
-        if Instant::now() >= deadline { state.fail(Reason::Deadline); }
+        if interrupted() || *cancellation.borrow() {
+            state.fail(Reason::Cancelled);
+        }
+        if Instant::now() >= deadline {
+            state.fail(Reason::Deadline);
+        }
         // Notifications and already settled failures take precedence over arrivals.
-        while let Ok(event) = notifications.try_recv() { state.notify(event); }
+        while let Ok(event) = notifications.try_recv() {
+            state.notify(event);
+        }
         while let Some(result) = tasks.try_join_next() {
             match result {
                 Ok(collected) => {
-                    state.settle(&collected.attempt, &settings[collected.attempt.lane as usize], spec.phase);
+                    state.settle(
+                        &collected.attempt,
+                        &settings[collected.attempt.lane as usize],
+                        spec.phase,
+                    );
                     settled.push(collected);
                 }
-                Err(_) => { task_failed = true; state.fail(Reason::LaneFailed); }
+                Err(_) => {
+                    task_failed = true;
+                    state.fail(Reason::LaneFailed);
+                }
             }
         }
-        if interrupted() || *cancellation.borrow() { state.fail(Reason::Cancelled); }
-        if Instant::now() >= deadline { state.fail(Reason::Deadline); }
-        if state.fatal.is_some() { let _ = stop.send(true); }
+        if interrupted() || *cancellation.borrow() {
+            state.fail(Reason::Cancelled);
+        }
+        if Instant::now() >= deadline {
+            state.fail(Reason::Deadline);
+        }
+        if state.fatal.is_some() {
+            let _ = stop.send(true);
+        }
         while let Some(lane) = state.ready(wire::us(origin)) {
             // Recheck between admissions, not only at the start of this iteration.
-            if interrupted() || *cancellation.borrow() { state.fail(Reason::Cancelled); break; }
-            if Instant::now() >= deadline { state.fail(Reason::Deadline); break; }
-            let request = pending[lane].take().ok_or("scheduled lane admitted twice")?;
-            tasks.spawn(wire::collect(client.clone(), request, limits.clone(), settings[lane].clone(), wire::CollectContext {
-                lane: lane as u32, origin, deadline: Some(deadline), cancel: cancellation.clone(),
-                first_generated: Some(notify.clone()), tool_expectation: None,
-            }));
+            if interrupted() || *cancellation.borrow() {
+                state.fail(Reason::Cancelled);
+                break;
+            }
+            if Instant::now() >= deadline {
+                state.fail(Reason::Deadline);
+                break;
+            }
+            let request = pending[lane]
+                .take()
+                .ok_or("scheduled lane admitted twice")?;
+            tasks.spawn(wire::collect(
+                client.clone(),
+                request,
+                limits.clone(),
+                settings[lane].clone(),
+                wire::CollectContext {
+                    lane: lane as u32,
+                    origin,
+                    deadline: Some(deadline),
+                    cancel: cancellation.clone(),
+                    first_generated: Some(notify.clone()),
+                    tool_expectation: None,
+                },
+            ));
         }
-        if state.fatal.is_some() { let _ = stop.send(true); }
-        if tasks.is_empty() && (!state.pending() || state.fatal.is_some()) { break; }
-        let next = state.next_due().and_then(|us| origin.checked_add(Duration::from_micros(us))).unwrap_or(deadline).min(deadline);
+        if state.fatal.is_some() {
+            let _ = stop.send(true);
+        }
+        if tasks.is_empty() && (!state.pending() || state.fatal.is_some()) {
+            break;
+        }
+        let next = state
+            .next_due()
+            .and_then(|us| origin.checked_add(Duration::from_micros(us)))
+            .unwrap_or(deadline)
+            .min(deadline);
         tokio::select! {
             biased;
             _ = signal.recv(), if state.fatal.is_none() => { state.fail(Reason::Cancelled); },
@@ -845,10 +946,17 @@ async fn dispatch_schedule(
     }
     // A panicked task has unknown transport state. Drain every other admitted
     // peer before returning; reservation retains all identities without success.
-    if task_failed { return Err("collector task failed after admitted peers settled; reservation retained".into()); }
+    if task_failed {
+        return Err(
+            "collector task failed after admitted peers settled; reservation retained".into(),
+        );
+    }
     for (lane, request) in pending.into_iter().enumerate() {
         if request.is_some() {
-            settled.push(crate::schedule::undispatched(lane as u32, state.fatal.unwrap_or(Reason::Cancelled)));
+            settled.push(crate::schedule::undispatched(
+                lane as u32,
+                state.fatal.unwrap_or(Reason::Cancelled),
+            ));
         }
     }
     Ok((settled, state.fatal))

@@ -14,12 +14,12 @@ use std::time::{Duration, Instant};
 
 #[path = "support/conversation.rs"]
 mod conversation;
-#[path = "support/tool_conversation.rs"]
-mod tool_conversation;
 #[path = "support/first_run.rs"]
 mod first_run;
 #[path = "support/selection.rs"]
 mod selection;
+#[path = "support/tool_conversation.rs"]
+mod tool_conversation;
 
 static NEXT: AtomicUsize = AtomicUsize::new(0);
 struct Temp(PathBuf);

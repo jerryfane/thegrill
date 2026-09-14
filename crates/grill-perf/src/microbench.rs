@@ -391,14 +391,18 @@ impl Tolerance {
 
     fn nrmse_abs_micro(self) -> u64 {
         match self {
-            Self::E3Rel { nrmse_abs_micro, .. } => u64::from(nrmse_abs_micro),
+            Self::E3Rel {
+                nrmse_abs_micro, ..
+            } => u64::from(nrmse_abs_micro),
             _ => 0,
         }
     }
 
     fn coarse_abs_milli(self) -> u64 {
         match self {
-            Self::E3Rel { coarse_abs_milli, .. } => u64::from(coarse_abs_milli),
+            Self::E3Rel {
+                coarse_abs_milli, ..
+            } => u64::from(coarse_abs_milli),
             _ => 0,
         }
     }
@@ -406,7 +410,8 @@ impl Tolerance {
     fn coarse_factor_milli(self) -> u64 {
         match self {
             Self::E3Rel {
-                coarse_factor_milli, ..
+                coarse_factor_milli,
+                ..
             } => u64::from(coarse_factor_milli),
             _ => 0,
         }
@@ -582,7 +587,7 @@ pub enum Correctness {
         finite: bool,
         ref_max: String,
         e2: ParityStats,
-        e3: ParityStats,
+        e3: Box<ParityStats>,
         tolerance: Tolerance,
         passed: bool,
         outcome: CheckOutcome,
@@ -790,9 +795,13 @@ fn decimal_parts(text: &str) -> std::result::Result<(u128, u128), DurationError>
     {
         return Err(DurationError::Malformed);
     }
-    let digits = whole.bytes().chain(fraction.bytes()).try_fold(0u128, |value, byte| {
-        value.checked_mul(10)?.checked_add(u128::from(byte - b'0'))
-    }).ok_or(DurationError::Overflow)?;
+    let digits = whole
+        .bytes()
+        .chain(fraction.bytes())
+        .try_fold(0u128, |value, byte| {
+            value.checked_mul(10)?.checked_add(u128::from(byte - b'0'))
+        })
+        .ok_or(DurationError::Overflow)?;
     let denominator = 10u128.pow(fraction.len() as u32);
     let divisor = gcd(digits, denominator);
     let mut numerator = digits / divisor;
@@ -802,12 +811,16 @@ fn decimal_parts(text: &str) -> std::result::Result<(u128, u128), DurationError>
     // overflow merely because their unreduced intermediate fraction is large.
     if exponent >= 0 {
         let divisor = gcd(factor, denominator);
-        numerator = numerator.checked_mul(factor / divisor).ok_or(DurationError::Overflow)?;
+        numerator = numerator
+            .checked_mul(factor / divisor)
+            .ok_or(DurationError::Overflow)?;
         denominator /= divisor;
     } else {
         let divisor = gcd(numerator, factor);
         numerator /= divisor;
-        denominator = denominator.checked_mul(factor / divisor).ok_or(DurationError::Overflow)?;
+        denominator = denominator
+            .checked_mul(factor / divisor)
+            .ok_or(DurationError::Overflow)?;
     }
     Ok((numerator, denominator))
 }
@@ -823,12 +836,17 @@ pub fn duration_ns(text: &str, units: Units) -> std::result::Result<Rational, Du
     }
     let factor = u128::from(units.nanoseconds());
     let divisor = gcd(factor, denominator);
-    let scaled = numerator.checked_mul(factor / divisor).ok_or(DurationError::Overflow)?;
+    let scaled = numerator
+        .checked_mul(factor / divisor)
+        .ok_or(DurationError::Overflow)?;
     let duration = reduce(scaled, denominator / divisor).ok_or(DurationError::Overflow)?;
-    if order(duration, Rational {
-        numerator: MAX_DURATION_NS,
-        denominator: 1,
-    })
+    if order(
+        duration,
+        Rational {
+            numerator: MAX_DURATION_NS,
+            denominator: 1,
+        },
+    )
     .is_gt()
     {
         return Err(DurationError::Overflow);
@@ -863,7 +881,6 @@ fn multiply(a: Rational, b: Rational) -> Option<Rational> {
     )
 }
 
-
 fn add(a: Rational, b: Rational) -> Option<Rational> {
     reduce(
         (u128::from(a.numerator) * u128::from(b.denominator))
@@ -872,8 +889,10 @@ fn add(a: Rational, b: Rational) -> Option<Rational> {
     )
 }
 
-fn order(a: Rational, b: Rational) -> std::cmp::Ordering { (u128::from(a.numerator) * u128::from(b.denominator))
-    .cmp(&(u128::from(b.numerator) * u128::from(a.denominator))) }
+fn order(a: Rational, b: Rational) -> std::cmp::Ordering {
+    (u128::from(a.numerator) * u128::from(b.denominator))
+        .cmp(&(u128::from(b.numerator) * u128::from(a.denominator)))
+}
 
 fn larger(a: Rational, b: Rational) -> Rational {
     if order(a, b).is_lt() { b } else { a }
@@ -988,7 +1007,10 @@ pub fn operation_admitted(adapter: AdapterId, operation: &Operation) -> bool {
                 && *world >= 2
                 && *world <= MAX_RANKS
                 && ranks.len() == *world as usize
-                && ranks.iter().enumerate().all(|(index, rank)| *rank == index as u32)
+                && ranks
+                    .iter()
+                    .enumerate()
+                    .all(|(index, rank)| *rank == index as u32)
                 && input == REDUCE_INPUT_ID
                 && reference == REDUCE_REFERENCE_ID
         }
@@ -1083,18 +1105,20 @@ fn observations_admitted(
             .find(|observation| observation.name == name)
             .map(|observation| observation.value.as_str())
     };
-    let pinned = |name: ObservationName, expected: &str, reasons: &mut Vec<Reason>| match value(name) {
-        Some(observed) if observed == expected => (),
-        Some(_) => push(reasons, Reason::ObservationDrift),
-        None => push(reasons, Reason::ObservationMissing),
-    };
-    let numeric = |name: ObservationName, expected: u64, reasons: &mut Vec<Reason>| {
-        match value(name).and_then(|observed| observed.parse::<u64>().ok()) {
+    let pinned =
+        |name: ObservationName, expected: &str, reasons: &mut Vec<Reason>| match value(name) {
             Some(observed) if observed == expected => (),
             Some(_) => push(reasons, Reason::ObservationDrift),
             None => push(reasons, Reason::ObservationMissing),
-        }
-    };
+        };
+    let numeric =
+        |name: ObservationName, expected: u64, reasons: &mut Vec<Reason>| match value(name)
+            .and_then(|observed| observed.parse::<u64>().ok())
+        {
+            Some(observed) if observed == expected => (),
+            Some(_) => push(reasons, Reason::ObservationDrift),
+            None => push(reasons, Reason::ObservationMissing),
+        };
     let present = |name: ObservationName, reasons: &mut Vec<Reason>| match value(name) {
         Some(observed) if printable(observed, 256) => (),
         _ => push(reasons, Reason::ObservationMissing),
@@ -1239,7 +1263,9 @@ fn derived(operation: &Operation, clock: &Clock, duration: Rational) -> Option<D
     let normalization = bus_normalization(world)?;
     // Exact bytes per second: payload * 1e9 / duration.
     let algorithm = reduce(
-        u128::from(payload).checked_mul(1_000_000_000)?.checked_mul(u128::from(duration.denominator))?,
+        u128::from(payload)
+            .checked_mul(1_000_000_000)?
+            .checked_mul(u128::from(duration.denominator))?,
         u128::from(duration.numerator),
     )?;
     let bus = multiply(algorithm, normalization)?;
@@ -1353,15 +1379,24 @@ pub fn check_plan(plan: &Plan) -> Vec<Reason> {
         }
         AdapterId::Exl3E3Grouped => {
             if !plan.program_sha256.as_deref().is_some_and(sha256)
-                || !plan.sources.iter().any(|source| source.sha256 == E3_OPERATION_SOURCE_SHA256)
-                || !plan.sources.iter().any(|source| source.sha256 == E3_PARITY_SOURCE_SHA256)
+                || !plan
+                    .sources
+                    .iter()
+                    .any(|source| source.sha256 == E3_OPERATION_SOURCE_SHA256)
+                || !plan
+                    .sources
+                    .iter()
+                    .any(|source| source.sha256 == E3_PARITY_SOURCE_SHA256)
             {
                 push(&mut reasons, Reason::IdentityDrift);
             }
         }
         AdapterId::NcclAllreduceSum => {
             if !plan.program_sha256.as_deref().is_some_and(sha256)
-                || !plan.sources.iter().any(|source| source.sha256 == NCCL_BYTE_SOURCE_SHA256)
+                || !plan
+                    .sources
+                    .iter()
+                    .any(|source| source.sha256 == NCCL_BYTE_SOURCE_SHA256)
             {
                 push(&mut reasons, Reason::IdentityDrift);
             }
@@ -1499,7 +1534,9 @@ fn check_artifact(plan: Option<&Plan>, artifact: &Artifact) -> Findings {
         findings.withhold(Reason::SampleGridIncomplete);
     }
     if artifact.adapter == AdapterId::Exl3E3Grouped {
-        let raw_fallback = artifact.observations.iter()
+        let raw_fallback = artifact
+            .observations
+            .iter()
             .find(|observation| observation.name == ObservationName::FallbackTier)
             .map(|observation| observation.value.as_str());
         let normalized = match raw_fallback {
@@ -1585,7 +1622,10 @@ fn check_sources(pinned: Option<&[Source]>, observed: &[Source], findings: &mut 
     }
     if let Some(pinned) = pinned {
         let mut expected: Vec<&str> = pinned.iter().map(|source| source.sha256.as_str()).collect();
-        let mut found: Vec<&str> = observed.iter().map(|source| source.sha256.as_str()).collect();
+        let mut found: Vec<&str> = observed
+            .iter()
+            .map(|source| source.sha256.as_str())
+            .collect();
         expected.sort_unstable();
         found.sort_unstable();
         if expected != found {
@@ -1641,7 +1681,8 @@ fn check_grid(artifact: &Artifact, findings: &mut Findings) {
     }
     let expected = match artifact.topology.scope {
         Scope::Ranks => {
-            if world < 2 || world > MAX_RANKS || artifact.topology.ranks.len() != world as usize {
+            if !(2..=MAX_RANKS).contains(&world) || artifact.topology.ranks.len() != world as usize
+            {
                 findings.invalidate(Reason::SampleGridIncomplete);
                 return;
             }
@@ -1665,7 +1706,8 @@ fn check_correctness(artifact: &Artifact, findings: &mut Findings) {
             if reference != SUM_REFERENCE_ID {
                 findings.invalidate(Reason::IdentityDrift);
             }
-            let (Some(computed), Some(bound)) = (exact_decimal(computed), exact_decimal(bound)) else {
+            let (Some(computed), Some(bound)) = (exact_decimal(computed), exact_decimal(bound))
+            else {
                 findings.invalidate(Reason::NonFinite);
                 return;
             };
@@ -1674,11 +1716,16 @@ fn check_correctness(artifact: &Artifact, findings: &mut Findings) {
             }
             // The declared reference must be the independent closed form for
             // the declared bound, so neither value can drift independently.
-            if let Operation::SumU64 { bound: declared, .. } = &artifact.operation
-                && order(bound, Rational {
-                    numerator: reference_sum(*declared),
-                    denominator: 1,
-                })
+            if let Operation::SumU64 {
+                bound: declared, ..
+            } = &artifact.operation
+                && order(
+                    bound,
+                    Rational {
+                        numerator: reference_sum(*declared),
+                        denominator: 1,
+                    },
+                )
                 .is_ne()
             {
                 findings.invalidate(Reason::CorrectnessFailed);
@@ -1750,9 +1797,11 @@ fn parity_scalar(text: &str) -> Option<f64> {
     }
     let value = text.parse::<f64>().ok()?;
     // Refuse nonfinite values and nonzero decimal text that underflows to zero.
-    let underflow = value == 0.0 && text.bytes()
-        .take_while(|byte| !matches!(byte, b'e' | b'E'))
-        .any(|byte| matches!(byte, b'1'..=b'9'));
+    let underflow = value == 0.0
+        && text
+            .bytes()
+            .take_while(|byte| !matches!(byte, b'e' | b'E'))
+            .any(|byte| matches!(byte, b'1'..=b'9'));
     (value.is_finite() && !underflow).then_some(value)
 }
 
@@ -1775,10 +1824,12 @@ fn e3_bounds(tolerance: Tolerance, ref_max: f64, e2: &[f64; 4]) -> Option<[f64; 
         bounds[index] = factor * e2[index] + floor;
     }
     bounds[3] = factor * e2[3] + tolerance.nrmse_abs_micro() as f64 / 1_000_000.0;
-    bounds[4] = (tolerance.coarse_abs_milli() as f64 / 1000.0).max(
-        (tolerance.coarse_factor_milli() as f64 / 1000.0) * ref_max.max(1.0),
-    );
-    bounds.iter().all(|value| value.is_finite()).then_some(bounds)
+    bounds[4] = (tolerance.coarse_abs_milli() as f64 / 1000.0)
+        .max((tolerance.coarse_factor_milli() as f64 / 1000.0) * ref_max.max(1.0));
+    bounds
+        .iter()
+        .all(|value| value.is_finite())
+        .then_some(bounds)
 }
 
 fn reference_sum(bound: u32) -> u64 {
@@ -1910,7 +1961,9 @@ fn cpu_reference(plan: &Plan, bound: u32, collector_sha256: &str) -> Result<Arti
     let started = Instant::now();
     let mut warm = 0u64;
     for _ in 0..plan.warmups {
-        warm = warm.wrapping_add(std::hint::black_box(reduce_sum(std::hint::black_box(&data))));
+        warm = warm.wrapping_add(std::hint::black_box(reduce_sum(std::hint::black_box(
+            &data,
+        ))));
     }
     std::hint::black_box(warm);
     let mut samples = Vec::new();
@@ -2055,9 +2108,14 @@ mod program_signals {
 
     impl Guard {
         pub fn install() -> crate::model::Result<Self> {
-            let lock = ACTIVE.try_lock().map_err(|_| "external capture already active")?;
+            let lock = ACTIVE
+                .try_lock()
+                .map_err(|_| "external capture already active")?;
             CANCELLED.store(false, Ordering::SeqCst);
-            let mut guard = Self { previous: Vec::new(), _lock: lock };
+            let mut guard = Self {
+                previous: Vec::new(),
+                _lock: lock,
+            };
             // Auto-reaping or a competing SIGCHLD handler can release the PID/PGID.
             let mut chld: libc::sigaction = unsafe { std::mem::zeroed() };
             if unsafe { libc::sigaction(libc::SIGCHLD, std::ptr::null(), &mut chld) } != 0
@@ -2072,7 +2130,10 @@ mod program_signals {
                 unsafe { libc::sigemptyset(&mut action.sa_mask) };
                 let mut previous = unsafe { std::mem::zeroed() };
                 if unsafe { libc::sigaction(signal, &action, &mut previous) } != 0 {
-                    return Err(format!("install capture signal handler: {}", std::io::Error::last_os_error()));
+                    return Err(format!(
+                        "install capture signal handler: {}",
+                        std::io::Error::last_os_error()
+                    ));
                 }
                 guard.previous.push((signal, previous));
             }
@@ -2140,7 +2201,12 @@ fn drain(
 fn leader_exited(pid: u32) -> std::io::Result<bool> {
     let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
     let result = unsafe {
-        libc::waitid(libc::P_PID, pid, &mut info, libc::WEXITED | libc::WNOHANG | libc::WNOWAIT)
+        libc::waitid(
+            libc::P_PID,
+            pid,
+            &mut info,
+            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+        )
     };
     if result != 0 {
         return Err(std::io::Error::last_os_error());
@@ -2151,7 +2217,12 @@ fn leader_exited(pid: u32) -> std::io::Result<bool> {
 /// Launch only PROGRAM [extra..] --plan PLAN. No shell interpretation.
 /// No wait/reader joins: cleanup has its own finite drain/reap allowance.
 #[cfg(target_os = "linux")]
-fn run_program(program: &Path, extra: &[String], plan_path: &Path, deadline: Duration) -> ProgramRun {
+fn run_program(
+    program: &Path,
+    extra: &[String],
+    plan_path: &Path,
+    deadline: Duration,
+) -> ProgramRun {
     use std::os::unix::process::CommandExt;
     let started = Instant::now();
     let mut run = ProgramRun::default();
@@ -2160,9 +2231,14 @@ fn run_program(program: &Path, extra: &[String], plan_path: &Path, deadline: Dur
         return run;
     }
     let mut child = match Command::new(program)
-        .args(extra).arg("--plan").arg(plan_path)
-        .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped())
-        .process_group(0).spawn()
+        .args(extra)
+        .arg("--plan")
+        .arg(plan_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .process_group(0)
+        .spawn()
     {
         Ok(child) => child,
         Err(error) => {
@@ -2190,10 +2266,22 @@ fn run_program(program: &Path, extra: &[String], plan_path: &Path, deadline: Dur
     let mut reaped = false;
     let mut cancellation_recorded = false;
     loop {
-        if let Err(error) = drain(&mut stdout, &mut run.stdout, OUTPUT_CAP, &mut run.stdout_truncated, &mut out_done) {
+        if let Err(error) = drain(
+            &mut stdout,
+            &mut run.stdout,
+            OUTPUT_CAP,
+            &mut run.stdout_truncated,
+            &mut out_done,
+        ) {
             run.fail(format!("stdout read failed: {error}"));
         }
-        if let Err(error) = drain(&mut stderr, &mut run.stderr, STDERR_CAP, &mut run.stderr_truncated, &mut err_done) {
+        if let Err(error) = drain(
+            &mut stderr,
+            &mut run.stderr,
+            STDERR_CAP,
+            &mut run.stderr_truncated,
+            &mut err_done,
+        ) {
             run.fail(format!("stderr read failed: {error}"));
         }
         if program_signals::cancelled() && !cancellation_recorded {
@@ -2205,7 +2293,10 @@ fn run_program(program: &Path, extra: &[String], plan_path: &Path, deadline: Dur
                 run.fail("program stdout/stderr capture truncated (cap or read/setup failure)");
             }
             if started.elapsed() >= deadline {
-                run.fail(format!("program exceeded the declared {} ms deadline", deadline.as_millis()));
+                run.fail(format!(
+                    "program exceeded the declared {} ms deadline",
+                    deadline.as_millis()
+                ));
             }
             let exited = match leader_exited(pid) {
                 Ok(exited) => exited,
@@ -2213,7 +2304,9 @@ fn run_program(program: &Path, extra: &[String], plan_path: &Path, deadline: Dur
                 Err(error) => {
                     // In particular ECHILD means identity is no longer reserved.
                     // Never signal a numeric PID/PGID after that loss of ownership.
-                    run.fail(format!("observe owned leader failed; group not signalled: {error}"));
+                    run.fail(format!(
+                        "observe owned leader failed; group not signalled: {error}"
+                    ));
                     break;
                 }
             };
@@ -2221,7 +2314,10 @@ fn run_program(program: &Path, extra: &[String], plan_path: &Path, deadline: Dur
                 // This is the ONLY group signal. WNOWAIT above kept the leader
                 // unreaped even on normal exit; no try_wait occurs before it.
                 if unsafe { libc::kill(-(pid as libc::pid_t), libc::SIGKILL) } != 0 {
-                    run.fail(format!("owned group cleanup signal failed: {}", std::io::Error::last_os_error()));
+                    run.fail(format!(
+                        "owned group cleanup signal failed: {}",
+                        std::io::Error::last_os_error()
+                    ));
                 }
                 cleanup_started = Some(Instant::now());
             }
@@ -2274,7 +2370,9 @@ fn run_program(program: &Path, extra: &[String], plan_path: &Path, deadline: Dur
 #[cfg(not(target_os = "linux"))]
 fn run_program(_: &Path, _: &[String], _: &Path, _: Duration) -> ProgramRun {
     ProgramRun {
-        failure: Some("native external capture requires Linux owned-process-group containment".into()),
+        failure: Some(
+            "native external capture requires Linux owned-process-group containment".into(),
+        ),
         ..ProgramRun::default()
     }
 }
@@ -2283,8 +2381,8 @@ fn run_program(_: &Path, _: &[String], _: &Path, _: Duration) -> ProgramRun {
 /// because interpreters and launchers are commonly symlinked; the digest is of
 /// the resolved bytes.
 fn hash_program(path: &Path) -> Result<String> {
-    let resolved =
-        std::fs::canonicalize(path).map_err(|e| format!("resolve program {}: {e}", path.display()))?;
+    let resolved = std::fs::canonicalize(path)
+        .map_err(|e| format!("resolve program {}: {e}", path.display()))?;
     let metadata = std::fs::metadata(&resolved).map_err(|e| e.to_string())?;
     if !metadata.is_file() || metadata.len() > FILE_CAP as u64 {
         return Err(format!(
@@ -2672,7 +2770,10 @@ pub fn capture(options: &CaptureOptions) -> Result<CaptureReport> {
     )];
     evidence::fresh(&options.out)?;
     #[cfg(target_os = "linux")]
-    let signal_guard = plan.adapter.external().then(program_signals::Guard::install);
+    let signal_guard = plan
+        .adapter
+        .external()
+        .then(program_signals::Guard::install);
     let (artifact, mut receipt, mut failure) = if plan.adapter.external() {
         let program = options.program.as_deref();
         let mut program_sha256 = None;
@@ -2699,10 +2800,15 @@ pub fn capture(options: &CaptureOptions) -> Result<CaptureReport> {
         evidence::write(&plan_path, &plan_bytes)?;
         let mut run = match setup {
             Ok(()) => run_program(
-                program.expect("admitted program"), &options.args, &plan_path,
+                program.expect("admitted program"),
+                &options.args,
+                &plan_path,
                 Duration::from_millis(plan.allowance.deadline_ms),
             ),
-            Err(error) => ProgramRun { failure: Some(error), ..ProgramRun::default() },
+            Err(error) => ProgramRun {
+                failure: Some(error),
+                ..ProgramRun::default()
+            },
         };
         // Raw bytes are authoritative even when JSON parsing, spawn or setup fails.
         evidence::write(&options.out.join("stdout.bin"), &run.stdout)?;
@@ -2728,14 +2834,19 @@ pub fn capture(options: &CaptureOptions) -> Result<CaptureReport> {
         let mut receipt = ReceiptSeed {
             adapter: plan.adapter,
             provenance: Provenance::NativeObserved,
-            status: if run.failure.is_some() { ReceiptStatus::Failed } else { ReceiptStatus::Captured },
+            status: if run.failure.is_some() {
+                ReceiptStatus::Failed
+            } else {
+                ReceiptStatus::Captured
+            },
             claim: "observed-producer-not-authenticated-execution",
             plan_sha256: plan_sha256.clone(),
             collector_sha256: collector_sha256.clone(),
             started_unix_ms,
             observation_unix_ms: unix_ms()?,
             duration_ms: run.elapsed_ms,
-        }.build();
+        }
+        .build();
         let output = run.output();
         receipt.program = program.map(|path| path.display().to_string());
         receipt.program_sha256 = program_sha256;
@@ -2759,7 +2870,9 @@ pub fn capture(options: &CaptureOptions) -> Result<CaptureReport> {
         let failed = artifact.failures.iter().any(|failure| {
             matches!(
                 failure.kind,
-                FailureKind::CorrectnessFailed | FailureKind::NonFinite | FailureKind::DeadlineExceeded
+                FailureKind::CorrectnessFailed
+                    | FailureKind::NonFinite
+                    | FailureKind::DeadlineExceeded
             )
         });
         let mut receipt = ReceiptSeed {
@@ -2816,7 +2929,9 @@ pub fn capture(options: &CaptureOptions) -> Result<CaptureReport> {
         out: options.out.display().to_string(),
         program: receipt.program.clone(),
         program_sha256: receipt.program_sha256.clone(),
-        samples: artifact.as_ref().map_or(0, |artifact| artifact.samples.len()),
+        samples: artifact
+            .as_ref()
+            .map_or(0, |artifact| artifact.samples.len()),
         statistic: artifact.as_ref().and_then(statistic),
         invalid: findings.invalid,
         unavailable: findings.unavailable,
@@ -2912,7 +3027,8 @@ fn read_receipt(path: &Path) -> std::result::Result<Option<Receipt>, LoadError> 
         Ok(_) => {
             let bytes = evidence::read(&path, FILE_CAP)
                 .map_err(|_| LoadError::Invalid(Reason::InvalidArtifact))?;
-            serde_json::from_slice(&bytes).map(Some)
+            serde_json::from_slice(&bytes)
+                .map(Some)
                 .map_err(|_| LoadError::Invalid(Reason::InvalidArtifact))
         }
     }
@@ -2920,13 +3036,19 @@ fn read_receipt(path: &Path) -> std::result::Result<Option<Receipt>, LoadError> 
 
 /// Verify every present raw-output manifest, including failed acquisitions.
 /// Missing manifests are admitted by the archival reader, not by native eligibility.
-fn check_program_output(path: &Path, receipt: &Receipt) -> std::result::Result<Option<Vec<u8>>, LoadError> {
+fn check_program_output(
+    path: &Path,
+    receipt: &Receipt,
+) -> std::result::Result<Option<Vec<u8>>, LoadError> {
     let Some(output) = &receipt.program_output else {
         return Ok(None);
     };
-    if !sha256(&output.stdout_sha256) || !sha256(&output.stderr_sha256)
-        || output.stdout_bytes > OUTPUT_CAP as u64 || output.stderr_bytes > STDERR_CAP as u64
-        || receipt.provenance != Provenance::NativeObserved || !receipt.adapter.external()
+    if !sha256(&output.stdout_sha256)
+        || !sha256(&output.stderr_sha256)
+        || output.stdout_bytes > OUTPUT_CAP as u64
+        || output.stderr_bytes > STDERR_CAP as u64
+        || receipt.provenance != Provenance::NativeObserved
+        || !receipt.adapter.external()
         || receipt.source_sha256.as_deref() != Some(output.stdout_sha256.as_str())
     {
         return Err(LoadError::Invalid(Reason::IdentityDrift));
@@ -2935,7 +3057,8 @@ fn check_program_output(path: &Path, receipt: &Receipt) -> std::result::Result<O
         .map_err(|_| LoadError::Invalid(Reason::InvalidArtifact))?;
     let stderr = evidence::read(&path.join("stderr.bin"), STDERR_CAP)
         .map_err(|_| LoadError::Invalid(Reason::InvalidArtifact))?;
-    if stdout.len() as u64 != output.stdout_bytes || stderr.len() as u64 != output.stderr_bytes
+    if stdout.len() as u64 != output.stdout_bytes
+        || stderr.len() as u64 != output.stderr_bytes
         || evidence::digest(&stdout) != output.stdout_sha256
         || evidence::digest(&stderr) != output.stderr_sha256
     {
@@ -2950,7 +3073,11 @@ fn load_dir(path: &Path) -> std::result::Result<Loaded, LoadError> {
         .map_err(|_| LoadError::Unavailable(Reason::MissingArtifact))?;
     let plan = parse_plan(&plan_bytes).map_err(|_| LoadError::Invalid(Reason::InvalidPlan))?;
     let receipt = read_receipt(path)?;
-    let raw_stdout = receipt.as_ref().map(|receipt| check_program_output(path, receipt)).transpose()?.flatten();
+    let raw_stdout = receipt
+        .as_ref()
+        .map(|receipt| check_program_output(path, receipt))
+        .transpose()?
+        .flatten();
     let artifact_bytes = evidence::read(&path.join("artifact.json"), FILE_CAP)
         .map_err(|_| LoadError::Unavailable(Reason::MissingArtifact))?;
     let artifact =
@@ -2961,10 +3088,12 @@ fn load_dir(path: &Path) -> std::result::Result<Loaded, LoadError> {
     match &receipt {
         None => findings.withhold(Reason::MissingArtifact),
         Some(receipt) => {
-            if receipt.kind != RECEIPT_KIND || receipt.version != VERSION
+            if receipt.kind != RECEIPT_KIND
+                || receipt.version != VERSION
                 || receipt.plan_sha256 != plan_sha256
                 || receipt.artifact_sha256.as_deref() != Some(artifact_sha256.as_str())
-                || receipt.adapter != artifact.adapter || receipt.provenance != artifact.provenance
+                || receipt.adapter != artifact.adapter
+                || receipt.provenance != artifact.provenance
                 || receipt.program_sha256 != artifact.program_sha256
                 || !sha256(&receipt.collector_sha256)
             {
@@ -2985,7 +3114,10 @@ fn load_dir(path: &Path) -> std::result::Result<Loaded, LoadError> {
                     findings.invalidate(Reason::ObservedStartsOutOfOrder);
                 }
                 if !artifact.adapter.external() {
-                    let kernel = format!("cpu-sum-u64-reference-v1;collector:{}", receipt.collector_sha256);
+                    let kernel = format!(
+                        "cpu-sum-u64-reference-v1;collector:{}",
+                        receipt.collector_sha256
+                    );
                     if artifact.kernel_revision.as_deref() != Some(kernel.as_str()) {
                         findings.invalidate(Reason::IdentityDrift);
                     }
@@ -3136,10 +3268,16 @@ fn inspection_of(
 fn load_view(slot: &str, path: &Path) -> AcquisitionView {
     match load_dir(path) {
         Ok(loaded) => {
-            let observed_interval = loaded.receipt.as_ref()
+            let observed_interval = loaded
+                .receipt
+                .as_ref()
                 .filter(|receipt| receipt.provenance == Provenance::NativeObserved)
                 .map(|receipt| [receipt.started_unix_ms, receipt.observation_unix_ms]);
-            let statistic = loaded.findings.clean().then(|| statistic(&loaded.artifact)).flatten();
+            let statistic = loaded
+                .findings
+                .clean()
+                .then(|| statistic(&loaded.artifact))
+                .flatten();
             AcquisitionView {
                 slot: slot.to_string(),
                 plan_sha256: Some(loaded.plan_sha256),
@@ -3153,7 +3291,10 @@ fn load_view(slot: &str, path: &Path) -> AcquisitionView {
                 unavailable: loaded.findings.unavailable,
                 observed_interval_unix_ms: observed_interval,
                 plan: Some(loaded.plan),
-                collector_sha256: loaded.receipt.as_ref().map(|receipt| receipt.collector_sha256.clone()),
+                collector_sha256: loaded
+                    .receipt
+                    .as_ref()
+                    .map(|receipt| receipt.collector_sha256.clone()),
             }
         }
         Err(LoadError::Invalid(reason)) => {
@@ -3162,7 +3303,9 @@ fn load_view(slot: &str, path: &Path) -> AcquisitionView {
             view.invalid = vec![reason];
             view
         }
-        Err(LoadError::Unavailable(_)) => AcquisitionView::missing(slot, Reason::MissingAcquisition),
+        Err(LoadError::Unavailable(_)) => {
+            AcquisitionView::missing(slot, Reason::MissingAcquisition)
+        }
     }
 }
 
@@ -3429,7 +3572,9 @@ pub fn compare(options: &CompareOptions) -> Decision {
         }
     }
     let overlaps = |left: &[[u64; 2]], right: &[[u64; 2]]| {
-        left.iter().map(|interval| interval[1]).max()
+        left.iter()
+            .map(|interval| interval[1])
+            .max()
             .zip(right.iter().map(|interval| interval[0]).min())
             .is_some_and(|(last, first)| last >= first)
     };
@@ -3456,8 +3601,7 @@ pub fn compare(options: &CompareOptions) -> Decision {
             .filter_map(|view| view.statistic)
             .collect();
         match (
-            envelope::range(&pooled)
-                .and_then(|range| range.ok_or(EnvelopeReason::InvalidRational)),
+            envelope::range(&pooled).and_then(|range| range.ok_or(EnvelopeReason::InvalidRational)),
             envelope::range(&candidate_values)
                 .and_then(|range| range.ok_or(EnvelopeReason::InvalidRational)),
         ) {
@@ -3578,17 +3722,19 @@ fn finish(verdict: Verdict) -> Decision {
         .find_map(|view| view.provenance);
     let scope = if reason_codes.contains(&Reason::ProvenanceMismatch) {
         "Mixed-provenance evidence: no uniform native or imported comparison scope exists.".into()
-    } else { match (provenance, adapter) {
+    } else {
+        match (provenance, adapter) {
         (Some(Provenance::NativeObserved), Some(adapter)) => {
             scope_sentence(Provenance::NativeObserved, adapter)
         }
         (Some(Provenance::Imported), Some(adapter)) => scope_sentence(Provenance::Imported, adapter),
         (Some(Provenance::Declared), Some(adapter)) => scope_sentence(Provenance::Declared, adapter),
         _ => "Unavailable evidence: the study declaration or the baseline acquisitions could not be loaded, so no comparison scope exists.".into(),
-    }};
-    let minimum = study
-        .as_ref()
-        .map_or(MIN_ROLE_ACQUISITIONS, |summary| summary.minimum_acquisitions);
+    }
+    };
+    let minimum = study.as_ref().map_or(MIN_ROLE_ACQUISITIONS, |summary| {
+        summary.minimum_acquisitions
+    });
     Decision {
         version: VERSION,
         claim: "observed-microbench-group-comparison-not-serving-speed",
@@ -3598,7 +3744,9 @@ fn finish(verdict: Verdict) -> Decision {
         statistic: "mean-duration-ns",
         statistic_definition: "exact arithmetic mean within one acquisition (rank scope: mean of complete per-repetition maxima); roles compare acquisition statistics, and the reference envelope pools the A and A2 roles",
         direction: "lower_better",
-        axis: if groups.baseline.revision.is_some() && groups.baseline.revision == groups.candidate.revision {
+        axis: if groups.baseline.revision.is_some()
+            && groups.baseline.revision == groups.candidate.revision
+        {
             "same-implementation-control"
         } else {
             "observed-kernel-revision"
@@ -3674,7 +3822,10 @@ pub fn human_inspection(inspection: &Inspection) -> String {
         ));
     }
     for observation in &inspection.observations {
-        text.push_str(&format!("  observed {:?} = {}\n", observation.name, observation.value));
+        text.push_str(&format!(
+            "  observed {:?} = {}\n",
+            observation.name, observation.value
+        ));
     }
     if let Some(derived) = &inspection.derived {
         text.push_str(&format!(
@@ -3759,4 +3910,3 @@ pub fn human_decision(decision: &Decision) -> String {
 #[cfg(test)]
 #[path = "../tests/support/microbench_model.rs"]
 mod microbench_model;
-

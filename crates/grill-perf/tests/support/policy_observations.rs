@@ -11,7 +11,8 @@ fn attempt(lane: u32) -> Attempt {
         usage: serde_json::from_value(serde_json::json!({
             "prompt_tokens":4,"completion_tokens":8,"total_tokens":12,
             "cached_prompt_tokens":1,"reasoning_tokens":null
-        })).unwrap(),
+        }))
+        .unwrap(),
         timing: Timing {
             dispatch_offset_us: u64::MAX,
             headers_us: Some(1),
@@ -39,14 +40,36 @@ fn attempt(lane: u32) -> Attempt {
 #[test]
 fn distinct_service_events_do_not_borrow_dispatch_or_terminal_clocks() {
     let mut attempt = attempt(0);
-    assert_eq!(latency_sample(&attempt, Metric::FirstGeneratedTextUs).unwrap().numerator, 3);
-    assert_eq!(latency_sample(&attempt, Metric::FirstAnswerTextUs).unwrap().numerator, 5);
-    assert_eq!(latency_sample(&attempt, Metric::CompletionLatencyUs).unwrap().numerator, 13);
+    assert_eq!(
+        latency_sample(&attempt, Metric::FirstGeneratedTextUs)
+            .unwrap()
+            .numerator,
+        3
+    );
+    assert_eq!(
+        latency_sample(&attempt, Metric::FirstAnswerTextUs)
+            .unwrap()
+            .numerator,
+        5
+    );
+    assert_eq!(
+        latency_sample(&attempt, Metric::CompletionLatencyUs)
+            .unwrap()
+            .numerator,
+        13
+    );
     assert!(evidence::prefill_sample(&attempt).is_none());
     attempt.timing.first_answer_text_us = None;
     assert!(latency_sample(&attempt, Metric::FirstAnswerTextUs).is_none());
-    assert_eq!(latency_sample(&attempt, Metric::CompletionLatencyUs).unwrap().numerator, 13);
-    attempt.eligibility_errors.push("required_hit_unavailable".into());
+    assert_eq!(
+        latency_sample(&attempt, Metric::CompletionLatencyUs)
+            .unwrap()
+            .numerator,
+        13
+    );
+    attempt
+        .eligibility_errors
+        .push("required_hit_unavailable".into());
     assert!(latency_sample(&attempt, Metric::CompletionLatencyUs).is_none());
     attempt.eligibility_errors.clear();
     attempt.dispatched = false;
@@ -60,8 +83,13 @@ fn fairness_requires_the_whole_admitted_population() {
         plan_sha256: String::new(),
         reservation_sha256: String::new(),
         spec: WaveSpec {
-            index: 0, phase: Phase::Measured, cell: "cell".into(), case: Some("case".into()),
-            trial: 0, concurrency: 2, lanes: None,
+            index: 0,
+            phase: Phase::Measured,
+            cell: "cell".into(),
+            case: Some("case".into()),
+            trial: 0,
+            concurrency: 2,
+            lanes: None,
             acquisition: None,
         },
         attempts: vec![attempt(0), attempt(1)],
@@ -79,8 +107,14 @@ fn fairness_requires_the_whole_admitted_population() {
     };
     wave.attempts[1].timing.first_answer_text_us = Some(10);
     wave.attempts[1].timing.last_generated_text_us = Some(10);
-    assert_eq!(fairness_sample(&wave, Metric::FirstAnswerMaxMinRatio), Some((10, 5).into()));
-    assert_eq!(fairness_sample(&wave, Metric::WorstLaneFirstAnswerUs), Some((10, 1).into()));
+    assert_eq!(
+        fairness_sample(&wave, Metric::FirstAnswerMaxMinRatio),
+        Some((10, 5).into())
+    );
+    assert_eq!(
+        fairness_sample(&wave, Metric::WorstLaneFirstAnswerUs),
+        Some((10, 1).into())
+    );
     wave.attempts[1].status = Status::Incomplete;
     assert!(fairness_sample(&wave, Metric::FirstAnswerMaxMinRatio).is_none());
     assert!(fairness_sample(&wave, Metric::WorstLaneFirstAnswerUs).is_none());

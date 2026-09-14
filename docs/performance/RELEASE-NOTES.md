@@ -1,6 +1,6 @@
 # Performance release notes
 
-## Unreleased — extended serving evidence
+## Version 0.2.0 — unreleased claim-coverage expansion
 
 - Add explicit policy2 first-generated, first-answer and client-completion
   latency gates on homogeneous flat workloads, plus complete-wave worst-lane
@@ -25,13 +25,50 @@
   are not attributed to one request, and an isolation declaration is not proof.
   Source/position selectors cannot bypass contradictory engine accounting;
   unrelated engine identities remain independent.
-- Add small GLM/DeepSeek routine and mixed profiles from the existing prompts,
-  with explicit controls and traffic ceilings. Native CPU captures and replay
-  were exercised; no real-backend qualification follows from fixture success.
-- Named mixed-schedule policy gates, repeated conversations, larger histories,
-  tails and resource/startup/kernel domains remain separate integration gates.
-  Independent review and live qualification are still required. Released v0.1.0
-  artifacts and frozen workload examples are unchanged.
+- Add fourteen explicit GLM/DeepSeek profiles: routine decode/prefill, mixed
+  interference, tools, history branches, long context and p95 stress. Controls,
+  source-byte pins and warmup/measured traffic ceilings are documented. The eight
+  version-6 profiles completed 2,820 CPU-fixture requests and offline replay;
+  their performance decisions stayed INCONCLUSIVE. Fixture usage/cache counters
+  are scripted, not tokenizer, cache or model qualification.
+- Add complete workload6 acquisition populations, actual parent/tool history,
+  bounded larger encoded inputs and retained history, whole-conversation gates
+  and explicit p95/p99 completion populations. Missing members cannot disappear
+  into successful-only means or tails. Existing random namespaces and frozen
+  workload meanings remain unchanged.
+- Add bounded native host and opt-in NVML resource observation, retained raw
+  replay and prospective domain comparisons. Multi-source windows are bracketed
+  by every source; unsupported CPU-integral boundaries stay unavailable.
+  Sampled maxima are not peaks, energy integration is an estimate, and
+  source ownership is not model attribution.
+- Add finite capacity/retention runs with successful, failed and undispatched
+  cells, actual workload history and explicit source journals. Two closed public
+  vLLM source sets reject mixed/unknown files. Required retention needs declared
+  and executed exclusive accounting; misses, preemptions, resets and unrelated
+  invalidations are not allocation-driven eviction.
+- Add common startup/readiness/first-inference and store/restart/reload evidence,
+  controlled-process/cache fixtures, and source-pinned vLLM/Uvicorn lifecycle
+  bridges. Operators still own every lifecycle action. Supported lifecycle
+  observations do not establish persisted model-KV reload, hidden-warmup
+  suppression or unavailable communication substages.
+- Add native CPU, E3 kernel and NCCL collective evidence with exact duration/rate
+  arithmetic, source-accurate binary64 E3 parity, explicit fallback tiers and
+  complete per-rank repetitions. Linux external capture retains bounded raw
+  stdout/stderr and cleans its owned process group before reaping the leader;
+  missing or corrupt raw evidence cannot support a favorable native comparison.
+  Forced collector death and descendants escaping the group remain outside
+  graceful-cleanup guarantees.
+- Expand the explicit archive allowlist with domain examples, offline guides and
+  four opt-in Python producer modules. Installed verification shares the staging
+  payload contract and checks executable permissions as well as bytes.
+  Optional backend runtimes are not bundled or installed automatically.
+- Preserve all published v0.1.0 artifacts, notices and frozen examples. The
+  dependency lock entries and feature declarations are unchanged; the notice
+  ledger was re-reviewed for the two workspace package-version changes.
+
+This version is not published. Exact-head packaging/installation, independent
+review and real-adapter/live qualification are separate gates. Source or fixture
+success does not close them, and mandatory maintainer adoption is not implied.
 
 ## Version 0.1.0 — published prerelease
 

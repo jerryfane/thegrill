@@ -94,11 +94,15 @@ impl RequestSettings {
             return Err("invalid output budget or sampling controls".into());
         }
         if r.thinking.is_some() && r.thinking_control.is_some() {
-            return Err("request.thinking and request.thinking_control are mutually exclusive".into());
+            return Err(
+                "request.thinking and request.thinking_control are mutually exclusive".into(),
+            );
         }
         if r.profile == Profile::PortableChatV1
             && (r.output.mode == OutputMode::Exact
-                || r.warmup_output.as_ref().is_some_and(|output| output.mode == OutputMode::Exact)
+                || r.warmup_output
+                    .as_ref()
+                    .is_some_and(|output| output.mode == OutputMode::Exact)
                 || r.cache != Cache::Observe
                 || r.thinking_control.is_some()
                 || r.thinking.is_some())
@@ -106,7 +110,8 @@ impl RequestSettings {
             return Err("exact output, required prefix evidence, and thinking controls need the explicit vllm-fixed-v1 request profile".into());
         }
         if let Some(seed) = r.seed {
-            seed.checked_add(100 * 64 + 63).ok_or("seed range overflows i64")?;
+            seed.checked_add(100 * 64 + 63)
+                .ok_or("seed range overflows i64")?;
         }
         Ok(())
     }
@@ -159,11 +164,23 @@ pub struct Workload {
     pub limits: Limits,
     pub cases: Vec<Case>,
     pub cells: Vec<Cell>,
-    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "present")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present"
+    )]
     pub schedule: Option<Vec<crate::schedule::Scenario>>,
-    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "present")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present"
+    )]
     pub acquisition: Option<crate::acquisition::Protocol>,
-    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "present")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present"
+    )]
     pub resources: Option<crate::serving_resources::Config>,
 }
 pub(crate) fn identifier(s: &str) -> bool {
@@ -183,14 +200,31 @@ impl Workload {
         crate::acquisition::conversation(self) || self.cases.iter().any(|case| case.fill.is_some())
     }
     pub fn cache_namespace_required(&self) -> bool {
-        self.request.cache != Cache::Observe || self.salted()
-            || self.schedule.iter().flatten().flat_map(|s| &s.lanes)
-                .any(|l| l.request.as_ref().is_some_and(|r| r.cache != Cache::Observe))
+        self.request.cache != Cache::Observe
+            || self.salted()
+            || self
+                .schedule
+                .iter()
+                .flatten()
+                .flat_map(|s| &s.lanes)
+                .any(|l| {
+                    l.request
+                        .as_ref()
+                        .is_some_and(|r| r.cache != Cache::Observe)
+                })
     }
     pub fn cache_mechanism_required(&self) -> bool {
         self.request.profile != Profile::PortableChatV1
-            || self.schedule.iter().flatten().flat_map(|s| &s.lanes)
-                .any(|l| l.request.as_ref().is_some_and(|r| r.profile != Profile::PortableChatV1))
+            || self
+                .schedule
+                .iter()
+                .flatten()
+                .flat_map(|s| &s.lanes)
+                .any(|l| {
+                    l.request
+                        .as_ref()
+                        .is_some_and(|r| r.profile != Profile::PortableChatV1)
+                })
     }
     pub fn validate(&self) -> Result<()> {
         if !matches!(self.version, 1..=6) || !identifier(&self.name) {
@@ -206,7 +240,9 @@ impl Workload {
             return Err("schedule requires workload version 4".into());
         }
         crate::acquisition::validate(self)?;
-        if self.version != 6 && self.resources.is_some() { return Err("resources require workload6".into()); }
+        if self.version != 6 && self.resources.is_some() {
+            return Err("resources require workload6".into());
+        }
         crate::sequence::validate(self)?;
         if self.cases.is_empty()
             || self.cases.len() > 128
@@ -222,7 +258,11 @@ impl Workload {
             }
             if case.messages.is_empty()
                 || case.messages.len() > 64
-                || case.messages.iter().map(|m| m.content.len()).sum::<usize>() > self.acquisition.as_ref().map_or(128 * 1024, crate::acquisition::Protocol::input_bytes)
+                || case.messages.iter().map(|m| m.content.len()).sum::<usize>()
+                    > self
+                        .acquisition
+                        .as_ref()
+                        .map_or(128 * 1024, crate::acquisition::Protocol::input_bytes)
             {
                 return Err(format!("case {} exceeds message bounds", case.id));
             }
@@ -328,41 +368,67 @@ impl Workload {
             } else {
                 6 * l.response_bytes + 512 * 1024
             } + fill_bytes
-                + if matches!(self.version, 5 | 6) && case.step.as_ref().is_some_and(|step| matches!(step.expect, crate::sequence::Expected::Tool { .. })) {
+                + if matches!(self.version, 5 | 6)
+                    && case.step.as_ref().is_some_and(|step| {
+                        matches!(step.expect, crate::sequence::Expected::Tool { .. })
+                    })
+                {
                     TOOL_TRACE_ALLOWANCE
                 } else {
                     0
                 };
             let required = if let Some(protocol) = &self.acquisition {
-                per_request.checked_add(protocol.input_bytes())
+                per_request
+                    .checked_add(protocol.input_bytes())
                     .and_then(|n| n.checked_mul(cell.concurrency as usize))
                     .and_then(|n| n.checked_add(protocol.history_bytes()))
                     .ok_or("acquisition buffer budget overflow")?
-            } else { per_request * cell.concurrency as usize };
+            } else {
+                per_request * cell.concurrency as usize
+            };
             if required > l.wave_buffer_bytes {
                 return Err(format!(
                     "cell {} requires limits.wave_buffer_bytes >= {required}, supplied {}; concurrency={}, stream={}, response_bytes={}, fill_bytes={fill_bytes}",
                     cell.id, l.wave_buffer_bytes, cell.concurrency, r.stream, l.response_bytes
                 ));
             }
-            let (trials, warmups) = self.acquisition.as_ref().map_or((cell.trials, cell.warmup_trials), |p| p.counts(cell));
-            if self.version == 6 && let Some(seed) = r.seed {
+            let (trials, warmups) = self
+                .acquisition
+                .as_ref()
+                .map_or((cell.trials, cell.warmup_trials), |p| p.counts(cell));
+            if self.version == 6
+                && let Some(seed) = r.seed
+            {
                 let max_trial = trials.max(warmups).saturating_sub(1);
                 seed.checked_add(i64::from(max_trial) * 64 + i64::from(cell.concurrency - 1))
                     .ok_or("acquisition seed range overflows i64")?;
             }
             let n = u64::from(trials) + u64::from(warmups);
             waves = waves.checked_add(n).ok_or("wave budget overflow")?;
-            attempts = n.checked_mul(u64::from(cell.concurrency)).and_then(|n| attempts.checked_add(n)).ok_or("attempt budget overflow")?;
+            attempts = n
+                .checked_mul(u64::from(cell.concurrency))
+                .and_then(|n| attempts.checked_add(n))
+                .ok_or("attempt budget overflow")?;
         }
-        if attempts > MAX_ATTEMPTS || waves > if self.version == 6 { crate::acquisition::WAVE_CAP as u64 } else { 1024 } {
+        if attempts > MAX_ATTEMPTS
+            || waves
+                > if self.version == 6 {
+                    crate::acquisition::WAVE_CAP as u64
+                } else {
+                    1024
+                }
+        {
             return Err("workload exceeds attempt or versioned wave limit".into());
         }
-        if let Some(resources) = &self.resources { resources.validate(self)?; }
+        if let Some(resources) = &self.resources {
+            resources.validate(self)?;
+        }
         Ok(())
     }
     pub fn waves(&self) -> Vec<WaveSpec> {
-        if self.version == 6 { return crate::acquisition::waves(self); }
+        if self.version == 6 {
+            return crate::acquisition::waves(self);
+        }
         if self.version == 4 {
             return crate::schedule::waves(self);
         }
@@ -403,13 +469,25 @@ pub struct WaveSpec {
     pub index: u32,
     pub phase: Phase,
     pub cell: String,
-    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "present")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present"
+    )]
     pub case: Option<String>,
     pub trial: u32,
     pub concurrency: u32,
-    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "present")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present"
+    )]
     pub lanes: Option<Vec<crate::schedule::ResolvedLane>>,
-    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "present")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present"
+    )]
     pub acquisition: Option<crate::acquisition::AcquisitionIdentity>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -513,11 +591,16 @@ fn tool_arrivals<'de, D: serde::Deserializer<'de>>(
         fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
             f.write_str("at most 4096 tool response chunk arrivals")
         }
-        fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(
+            self,
+            mut seq: A,
+        ) -> Result<Self::Value, A::Error> {
             let mut values = Vec::new();
             while let Some(value) = seq.next_element()? {
                 if values.len() == TOOL_ARRIVAL_CAP {
-                    return Err(serde::de::Error::custom("tool arrival trace exceeds 4096 chunks"));
+                    return Err(serde::de::Error::custom(
+                        "tool arrival trace exceeds 4096 chunks",
+                    ));
                 }
                 values.push(value);
             }
@@ -540,11 +623,23 @@ pub struct Timing {
     pub last_generated_text_us: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub terminal_us: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "present_option")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_option"
+    )]
     pub first_tool_delta_us: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "present_option")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_option"
+    )]
     pub first_validated_tool_call_us: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "tool_arrivals")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "tool_arrivals"
+    )]
     pub tool_stream_arrivals: Option<Vec<ToolArrival>>,
     pub settle_us: u64,
     pub capture_parse_us: u64,
@@ -573,9 +668,16 @@ impl Timing {
             return Err("inconsistent fixed tool timing presence".into());
         }
         let mut previous = 0;
-        for value in [self.headers_us, self.first_body_us, self.first_tool_delta_us,
-            self.first_validated_tool_call_us, self.terminal_us, Some(self.settle_us)]
-            .into_iter().flatten()
+        for value in [
+            self.headers_us,
+            self.first_body_us,
+            self.first_tool_delta_us,
+            self.first_validated_tool_call_us,
+            self.terminal_us,
+            Some(self.settle_us),
+        ]
+        .into_iter()
+        .flatten()
         {
             if value < previous {
                 return Err("fixed tool timing observations are out of order".into());
@@ -692,9 +794,17 @@ pub struct Wave {
     pub eligible: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metrics: Option<crate::metrics::Reference>,
-    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "present")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present"
+    )]
     pub schedule: Option<crate::schedule::Observation>,
-    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "present")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present"
+    )]
     pub acquisition_clock: Option<crate::acquisition::StepClock>,
 }
 pub fn eligibility(a: &Attempt, r: &RequestSettings, phase: Phase) -> Vec<String> {

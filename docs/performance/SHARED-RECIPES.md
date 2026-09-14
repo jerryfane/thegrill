@@ -96,35 +96,177 @@ cache-accounting or other claim needs the corresponding evidence and gates.
 establish semantic/JSON/code quality; retain the applicable recipe quality checks
 and use the [single shared report](SHARED-REPORT-TEMPLATE.md).
 
-### Explicit stress and other claim scopes
+### Repeated conversation and explicit stress profiles
 
-These routine profiles do not stand in for the rest of the claim map:
+The following version-6 files have separate `glm-` and `deepseek-` variants with
+the same single, explicit thinking-key mappings described above. They are
+prospective workload declarations, not evidence of backend qualification.
+Do not automatically add stress rows to routine PR traffic.
 
-- C4/C8 concurrency is an explicit additional scope in the existing full decode
-  workloads, not hidden extra traffic in the routine profile.
-- The existing `prefill-ladder-v1.json` declares a separate strict-cold
-  approximately 2K–128K ladder. Count actual encoded request bytes and actual
-  provider/tokenizer tokens before making a context-length claim: a filename or
-  a 128 KiB limit is not evidence of 128K tokens.
-- Ordered reuse, alternating histories, edits/restores and tool follow-ups reuse
-  `conversation-v2.json` data. One ordered acquisition is descriptive, not a
-  population of independent conversation trials. Whole-conversation and tail
-  claims require their separately declared repeated-acquisition protocol and
-  full history/time/attempt bounds. Do not infer eviction pressure from this
-  small fixture.
-- Retention/capacity, host/device resources, startup/reload and kernel/fabric
-  claims require their corresponding source evidence and domain comparisons.
-  No ordinary serving throughput result substitutes for those observations.
-  Separate device, pressure and lifecycle authorization is mandatory.
-- Required-hit and deliberately cache-disabled operation are incompatible.
-  Inspect suitable existing receipts before requesting traffic or configuration
-  changes. Missing historical fields do not prove that a current backend lacks
-  them; zero hits do not demonstrate warm reuse; missing counters are not zero.
+| Profile suffix | Scope and output | Warmup / measured requests per run | Output-token ceiling per run | A/B/A2 requests / output-token ceiling |
+|---|---|---:|---:|---:|
+| `tools-v6` | Actual streamed tool call, locally supplied result and actual follow-up; capped128 | 2 / 6 | 1,024 | 24 / 3,072 |
+| `history-branches-v6` | Prime/reuse, alternate histories, edit/restore and tool follow-up; capped128 | 11 / 33 | 5,632 | 132 / 16,896 |
+| `long-context-v6` — stress | Four strict-cold C1 sizes, including a 520,000-byte filler; capped1 | 4 / 12 | 16 | 48 / 48 |
+| `p95-stress-v6` — stress | C2, 200 measured waves, exact8 per lane; completion tail and first-output/fairness means | 2 / 400 | 3,216 | 1,206 / 9,648 |
+
+Conversation profiles retain one complete warmup acquisition and three complete
+measured acquisitions. Every required step remains part of completeness and
+whole-conversation wall time. The history profile excludes its two priming steps
+from per-step performance means, not from execution or eligibility. It reuses
+the eleven long-prefix branch cases from `conversation-v2.json`; the separate
+`short-prime`/`short-reuse` probe remains in that unchanged legacy file and is
+**not qualified by this profile**. Required reported-zero/hit checks on the
+selected history cases remain required. The tool-only profile observes cache
+state without claiming reuse.
+
+Tools have a 1 MiB encoded-input allowance and 1 MiB retained-history allowance;
+history branches have 1 MiB and 16 MiB respectively. Their wave-buffer allowances
+are 16 MiB and 32 MiB. Long context has a 2 MiB encoded-input allowance and
+16 MiB wave buffer; p95 has 64 KiB and 16 MiB. All responses are bounded to
+64 KiB. All four profiles use a 360-second wave deadline, with a 60-second idle
+deadline except long context, whose idle deadline is also 360 seconds.
+These are declared serialization/collection bounds, not process-RSS guarantees.
+
+The long-context profile reuses `prefill-ladder-v1.json` prompt data. Its final
+case is explicitly renamed `prefill-large` and declares 130,000 repetitions of
+`" the"` rather than the legacy 131,072, reserving prospective context headroom.
+That is 520,000 filler bytes, **not a measured token count**. Count the actual
+encoded body and use the actual tokenizer/context allowance before dispatch;
+retain provider prompt-token usage before making any context-length claim.
+Neither this case name nor a 128 KiB limit establishes 128K tokens. The frozen
+legacy ladder is unchanged. Never shorten an already declared acquisition after
+a context rejection.
+
+The p95 population is 200 complete measured **waves**, each containing two lanes:
+it is not 400 independent tail observations. The tail sample is the maximum
+completion latency across both eligible lanes. One missing lane or acquisition
+withholds the required tail gate. This profile does not qualify p99; p99 requires
+its separately declared population of at least 1,000 complete observations.
+First-output and fairness means remain distinct from completion-tail statistics.
+
+| File | SHA256 |
+|---|---|
+| `glm-tools-v6.json` | `a2cbebeb24f0ef6cc74dada8ab17c662d6dd54d0f064456be327d1ed6a7d55ce` |
+| `glm-history-branches-v6.json` | `dd461c1c89c0fca5b003d40b205abab35576f83f02547ff924bf142c6e11134c` |
+| `glm-long-context-v6.json` | `ef0a6f381ad5158f73b7756f6e637789cd8c948a81827cdddf4c57176a33402b` |
+| `glm-p95-stress-v6.json` | `b18bccca830672d5dba62c50e252d9730d50d436d7bb362b3c18c8862ed41315` |
+| `deepseek-tools-v6.json` | `609e8d45f9b42b6f990172a2426e2bdc9399803945e38efcc71253f0e453a126` |
+| `deepseek-history-branches-v6.json` | `4849036ee09ecf2cee85745e12be3b6a79da8d64ba8afb77013982dd9d8d9d40` |
+| `deepseek-long-context-v6.json` | `75a15591dadd2a672d6fe37f98c9d12035e36a8efaf48a5c0b14d222620eb844` |
+| `deepseek-p95-stress-v6.json` | `7705bfb554fe39f40e50ea0f7cbbb555f37aa90222e57400a29393de352c946b` |
+
+### Prospective policy3 for the version-6 profiles
+
+After installation, set `GRILL_PERF`, `WORKLOAD` and a fresh `POLICY` path as in
+the workflow below. Explicitly select `CLAIM=conversation`, `long-context` or
+`p95`; set the two approved threshold environment variables
+`MAX_REGRESSION_BPS` and `MAX_REFERENCE_SPREAD_BPS`. The following local authoring
+step hashes actual bytes, dispatches no requests and refuses to replace a policy.
+Thresholds must be approved before collection, not selected from candidate data.
+
+```python
+import hashlib
+import json
+import os
+from pathlib import Path
+
+binary = Path(os.environ["GRILL_PERF"])
+workload_path = Path(os.environ["WORKLOAD"])
+source = workload_path.read_bytes()
+workload = json.loads(source)
+claim = os.environ["CLAIM"]
+threshold = {
+    "max_regression_bps": int(os.environ["MAX_REGRESSION_BPS"]),
+    "max_reference_spread_bps": int(os.environ["MAX_REFERENCE_SPREAD_BPS"]),
+}
+assert workload["version"] == 6
+assert claim in {"conversation", "long-context", "p95"}
+conversation = workload["acquisition"]["kind"] == "conversation"
+assert conversation == (claim == "conversation")
+measured = set(workload["acquisition"].get("measured_steps", []))
+cases = {case["id"]: case for case in workload["cases"]}
+cells = []
+tails = []
+for cell in workload["cells"]:
+    if conversation and cell["case"] not in measured:
+        continue
+    expected = cases[cell["case"]].get("step", {}).get("expect", {}).get("kind")
+    if expected == "tool":
+        metrics = ["first_tool_delta_us", "first_validated_tool_call_us",
+                   "completion_latency_us"]
+    elif claim == "long-context":
+        assert workload["request"]["cache"] == "reported-prefix-zero"
+        metrics = ["prefill_tokens_per_second", "first_generated_text_us",
+                   "completion_latency_us"]
+    else:
+        metrics = ["first_generated_text_us", "first_answer_text_us",
+                   "completion_latency_us"]
+    if claim == "p95":
+        assert cell["trials"] >= 200 and cell["concurrency"] >= 2
+        metrics += ["worst_lane_first_answer_us", "first_answer_max_min_ratio"]
+        tails.append({"target": {"kind": "completion", "cell": cell["id"]},
+                      "percentile": "p95", **threshold})
+    cells.append({"cell": cell["id"],
+                  "metrics": [{"metric": metric, **threshold} for metric in metrics]})
+policy = {
+    "version": 3,
+    "method": "observed-envelope-v3",
+    "id": workload["name"] + "-policy",
+    "collector_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
+    "workload_source_sha256": hashlib.sha256(source).hexdigest(),
+    "min_trials": 3,
+    "cells": cells,
+}
+if conversation:
+    policy["whole_conversation"] = threshold
+if tails:
+    policy["tail"] = tails
+with Path(os.environ["POLICY"]).open("x") as output:
+    json.dump(policy, output, indent=2)
+    output.write("\n")
+```
+
+Retain native `preflight` output with the actual endpoint/model and this policy
+before using the existing A/B/A2 run/decide workflow. Preflight is offline schema
+and budget admission, not tokenizer, cache, thinking-control or backend proof.
+For tools, the two tool-time selectors require actual streamed deltas and a
+validated complete call; text timing cannot substitute for either.
+
+### Remaining claim entrypoints and non-substitution rules
+
+Both recipe families use the same explicit domain workflows; no backend-name
+registry or automatic tuning/collection is introduced.
+
+| Claim | Required evidence path |
+|---|---|
+| First generated/answer output, completion, C2 fairness | Relevant routine decode cells with prospective policy2 latency/fairness selectors, or the explicit policy3 scope above |
+| Mixed interference | Declared solo controls and actual required overlap in `mixed-prefill-decode-v4`; [schedule and policy contract](README.md) |
+| Cache/speculative/preemption accounting | [Bounded provider accounting](PROVIDER-ACCOUNTING.md), selected metrics2 source and exclusive acquisition declaration where required |
+| Whole conversation, branches, actual tools | Version-6 profiles above and [conversation evidence](CONVERSATIONS.md) |
+| Host/device memory and power | [Native resource capture/inspect/compare](RESOURCES.md); `resource-acquisitions-v6.json` for review-only serving attachment |
+| Finite capacity and actual retention eviction/recovery | [Capacity preflight/run/inspect](CAPACITY.md); explicitly selected real source set, native counters and journal, never inference from the small history fixture |
+| Startup and restart-cache lifecycle | [Startup observe/store/reload/inspect/compare](STARTUP.md); actual lifecycle/source/cache identity evidence |
+| E3 kernel and collective/fabric | [Native microbench capture/inspect/compare](KERNEL-FABRIC.md); explicit producer, runtime/source pins and device window |
+
+C4/C8 remains an explicit scope in the existing full decode workloads, not hidden
+routine traffic. Resource/capacity/lifecycle/kernel plans need private actual
+source, process/device and collector identities frozen before collection.
+Examples are not permission to discover processes, reset caches, start services,
+allocate to OOM or initialize devices. Separate authorization is mandatory.
+Telemetry adds its own bounded requests and overhead beyond the model-request
+counts above. Required-hit and deliberately cache-disabled operation are
+incompatible. Inspect suitable existing receipts before changing serving state;
+missing historical fields do not prove a current backend lacks them, zero hits
+do not prove warm reuse, and missing counters are not zero.
 
 Record implemented, CPU-protocol verified, real-adapter exercised and
-live-backend qualified separately for every selected claim. An unavailable domain
-or unsupported required observation is a reported gap, not PASS. Broader mandatory
-adoption still requires complete coverage reconciliation and maintainer agreement.
+live-backend qualified separately for every selected claim in the
+[single report template](SHARED-REPORT-TEMPLATE.md). Preserve every failed,
+unsupported and inconclusive result. Reuse #45 only for its frozen qualified
+scope. Serving throughput cannot substitute for resources, retention, lifecycle,
+kernel, semantic quality or tokenizer evidence. Broader mandatory adoption still
+requires complete coverage reconciliation and explicit maintainer agreement.
 
 ## Install and pin the actual artifact
 

@@ -97,9 +97,7 @@ impl ToolStream {
             return Err("fixed tool stream requires call index zero".into());
         }
         if let Some(id) = &delta.id
-            && (!identifier(id)
-                || self.id.is_some()
-                || self.expected.prior_ids.contains(id))
+            && (!identifier(id) || self.id.is_some() || self.expected.prior_ids.contains(id))
         {
             return Err("invalid, duplicate or reused tool call ID".into());
         }
@@ -109,7 +107,10 @@ impl ToolStream {
             return Err("invalid or duplicate tool call type".into());
         }
         let (name, arguments) = delta.function.as_ref().map_or(("", ""), |f| {
-            (f.name.as_deref().unwrap_or(""), f.arguments.as_deref().unwrap_or(""))
+            (
+                f.name.as_deref().unwrap_or(""),
+                f.arguments.as_deref().unwrap_or(""),
+            )
         });
         if self.name.len() + name.len() > "lookup_fact".len()
             || !("lookup_fact"[self.name.len()..]).starts_with(name)
@@ -148,18 +149,25 @@ impl ToolStream {
         let appended = json!([self.message_value(), {
             "role":"tool","tool_call_id":self.id,"content":self.expected.result
         }]);
-        let appended_bytes = serde_json::to_vec(&appended).map_err(|e| e.to_string())?.len();
+        let appended_bytes = serde_json::to_vec(&appended)
+            .map_err(|e| e.to_string())?
+            .len();
         let retained_bytes = if self.expected.history_messages == 0 {
             appended_bytes
         } else {
-            self.expected.history_bytes.checked_add(appended_bytes)
+            self.expected
+                .history_bytes
+                .checked_add(appended_bytes)
                 .and_then(|bytes| bytes.checked_sub(1))
                 .ok_or("tool retained history size overflow")?
         };
-        if self.expected.history_messages > self.expected.message_cap.saturating_sub(2) || retained_bytes > self.expected.history_cap {
+        if self.expected.history_messages > self.expected.message_cap.saturating_sub(2)
+            || retained_bytes > self.expected.history_cap
+        {
             return Err("fixed tool call exceeds retained history bounds".into());
         }
-        self.candidate_us.ok_or_else(|| "missing valid tool call boundary".into())
+        self.candidate_us
+            .ok_or_else(|| "missing valid tool call boundary".into())
     }
 
     pub fn message(&self) -> Result<Value> {
@@ -195,7 +203,10 @@ pub fn validate(workload: &Workload) -> Result<()> {
     let sequence = crate::acquisition::conversation(workload);
     if !sequence {
         if workload.cases.iter().any(|case| case.step.is_some())
-            || matches!(workload.request.profile, Profile::VllmConversationV2 | Profile::VllmConversationV3)
+            || matches!(
+                workload.request.profile,
+                Profile::VllmConversationV2 | Profile::VllmConversationV3
+            )
         {
             return Err(
                 "sequence steps and conversation profiles require workload version 2 or 5".into(),
@@ -219,7 +230,10 @@ pub fn validate(workload: &Workload) -> Result<()> {
         return Err("conversation workload requires its exact versioned profile, streaming, capped output, per-step cache declarations and at most 16 ordered C1 steps".into());
     }
     for (index, (case, cell)) in workload.cases.iter().zip(&workload.cells).enumerate() {
-        let step = case.step.as_ref().ok_or("every conversation case requires a step")?;
+        let step = case
+            .step
+            .as_ref()
+            .ok_or("every conversation case requires a step")?;
         if !identifier(&step.history)
             || cell.case != case.id
             || cell.concurrency != 1
@@ -299,7 +313,8 @@ pub fn settings(workload: &Workload, spec: &WaveSpec) -> RequestSettings {
         .and_then(|c| c.step.as_ref())
     {
         settings.cache = step.cache;
-        settings.stream = matches!(workload.version, 5 | 6) || matches!(step.expect, Expected::Json { .. });
+        settings.stream =
+            matches!(workload.version, 5 | 6) || matches!(step.expect, Expected::Json { .. });
     }
     settings
 }
@@ -341,17 +356,27 @@ impl State {
         if !matches!(workload.version, 5 | 6) || !crate::acquisition::conversation(workload) {
             return Ok(None);
         }
-        let case = workload.cases.iter().find(|case| Some(case.id.as_str()) == spec.case.as_deref())
+        let case = workload
+            .cases
+            .iter()
+            .find(|case| Some(case.id.as_str()) == spec.case.as_deref())
             .ok_or("unknown sequence case")?;
-        let Some(Step { expect: Expected::Tool { key, result }, .. }) = &case.step else {
+        let Some(Step {
+            expect: Expected::Tool { key, result },
+            ..
+        }) = &case.step
+        else {
             return Ok(None);
         };
-        let (pending_case, messages) = self.pending.as_ref()
+        let (pending_case, messages) = self
+            .pending
+            .as_ref()
             .ok_or("tool expectation requires admitted history")?;
         if pending_case != &case.id || spec.index != self.next_wave {
             return Err("tool expectation differs from admitted step".into());
         }
-        let prior_ids = messages.iter()
+        let prior_ids = messages
+            .iter()
             .filter_map(|message| message.get("tool_calls").and_then(Value::as_array))
             .flatten()
             .filter_map(|call| call.get("id").and_then(Value::as_str))
@@ -361,7 +386,9 @@ impl State {
             key: key.clone(),
             prior_ids,
             result: result.clone(),
-            history_bytes: serde_json::to_vec(&Messages(messages)).map_err(|e| e.to_string())?.len(),
+            history_bytes: serde_json::to_vec(&Messages(messages))
+                .map_err(|e| e.to_string())?
+                .len(),
             history_messages: messages.len(),
             history_cap: history_cap(workload),
             message_cap: message_cap(workload),
@@ -422,12 +449,19 @@ impl State {
         };
         messages.extend(inputs.into_iter().map(Rc::new));
         if messages.len() > message_cap(context.workload) {
-            return Err(if context.workload.version == 6 { "sequence accumulated history exceeds declared message bound" } else { "sequence accumulated history exceeds 64 messages" }.into());
+            return Err(if context.workload.version == 6 {
+                "sequence accumulated history exceeds declared message bound"
+            } else {
+                "sequence accumulated history exceeds 64 messages"
+            }
+            .into());
         }
         let namespace = context
             .cache_namespace
             .ok_or("sequence needs a private cache namespace")?;
-        let acquired_namespace = spec.acquisition.map(|id| crate::acquisition::namespace(namespace, id));
+        let acquired_namespace = spec
+            .acquisition
+            .map(|id| crate::acquisition::namespace(namespace, id));
         let namespace = acquired_namespace.as_deref().unwrap_or(namespace);
         body["cache_salt"] = Value::String(format!("{namespace}-{}", step.history));
         if let Expected::Tool { .. } = step.expect {
@@ -440,7 +474,12 @@ impl State {
         })
         .map_err(|e| e.to_string())?;
         if encoded.len() > input_cap(context.workload) {
-            return Err(if context.workload.version == 6 { "sequence accumulated input exceeds declared encoded input cap" } else { "sequence accumulated input exceeds 128 KiB" }.into());
+            return Err(if context.workload.version == 6 {
+                "sequence accumulated input exceeds declared encoded input cap"
+            } else {
+                "sequence accumulated input exceeds 128 KiB"
+            }
+            .into());
         }
         self.check_retention(context.workload, &messages)?;
         self.pending = Some((case.id.clone(), messages));
@@ -464,7 +503,8 @@ impl State {
             .find(|c| Some(c.id.as_str()) == spec.case.as_deref())
             .ok_or("unknown sequence case")?;
         let step = case.step.as_ref().ok_or("missing step")?;
-        let streamed_tool = self.tool_expectation(&plan.workload, spec)?
+        let streamed_tool = self
+            .tool_expectation(&plan.workload, spec)?
             .map(|expected| crate::wire::sequence_tool(attempt, body, expected))
             .transpose()?
             .flatten();
@@ -491,7 +531,8 @@ impl State {
             let message = if let Some(message) = streamed_tool {
                 message
             } else if settings(&plan.workload, spec).stream {
-                let content = crate::wire::sequence_answer(attempt, body, matches!(plan.version, 3 | 4 | 5))?;
+                let content =
+                    crate::wire::sequence_answer(attempt, body, matches!(plan.version, 3..=5))?;
                 json!({"role":"assistant","content":content})
             } else {
                 let mut response: Value =
@@ -597,7 +638,12 @@ impl State {
                     .len()
                     > history_cap(&plan.workload)
             {
-                return Err(if plan.workload.version == 6 { "retained sequence history exceeds declared history cap" } else { "retained sequence history exceeds 128 KiB" }.into());
+                return Err(if plan.workload.version == 6 {
+                    "retained sequence history exceeds declared history cap"
+                } else {
+                    "retained sequence history exceeds 128 KiB"
+                }
+                .into());
             }
             self.check_retention(&plan.workload, &messages)?;
             Ok(messages)
@@ -605,10 +651,17 @@ impl State {
         match observed {
             Ok(history) => {
                 check.correct = true;
-                if eligibility(attempt, &settings(&plan.workload, spec), crate::acquisition::eligibility_phase(&plan.workload, spec.phase)).is_empty() {
+                if eligibility(
+                    attempt,
+                    &settings(&plan.workload, spec),
+                    crate::acquisition::eligibility_phase(&plan.workload, spec.phase),
+                )
+                .is_empty()
+                {
                     if plan.workload.version == 6 {
                         self.retained_bytes = self.retention_size(&history)?;
-                        self.retained_messages.extend(history.iter().map(Rc::as_ptr));
+                        self.retained_messages
+                            .extend(history.iter().map(Rc::as_ptr));
                     }
                     self.histories.push((case.id.clone(), history));
                 } else {
@@ -624,27 +677,46 @@ impl State {
     }
 
     fn check_retention(&self, workload: &Workload, active: &[Rc<Value>]) -> Result<()> {
-        if workload.version != 6 { return Ok(()); }
-        if self.retention_size(active)? > history_cap(workload) { return Err("shared retained history exceeds declared budget".into()); }
+        if workload.version != 6 {
+            return Ok(());
+        }
+        if self.retention_size(active)? > history_cap(workload) {
+            return Err("shared retained history exceeds declared budget".into());
+        }
         Ok(())
     }
     fn retention_size(&self, active: &[Rc<Value>]) -> Result<usize> {
         // Each retained Rc payload is charged once across branches, plus every
         // pointer array. Do not reserialize previously retained prefixes.
-        let mut bytes = self.retained_bytes.checked_add(std::mem::size_of_val(active)).ok_or("history budget overflow")?;
+        let mut bytes = self
+            .retained_bytes
+            .checked_add(std::mem::size_of_val(active))
+            .ok_or("history budget overflow")?;
         for message in active {
             if !self.retained_messages.contains(&Rc::as_ptr(message)) {
-                bytes = bytes.checked_add(serde_json::to_vec(message.as_ref()).map_err(|e| e.to_string())?.len()).ok_or("history budget overflow")?;
+                bytes = bytes
+                    .checked_add(
+                        serde_json::to_vec(message.as_ref())
+                            .map_err(|e| e.to_string())?
+                            .len(),
+                    )
+                    .ok_or("history budget overflow")?;
             }
         }
         Ok(bytes)
     }
 }
 fn input_cap(workload: &Workload) -> usize {
-    workload.acquisition.as_ref().map_or(128 * 1024, crate::acquisition::Protocol::input_bytes)
+    workload
+        .acquisition
+        .as_ref()
+        .map_or(128 * 1024, crate::acquisition::Protocol::input_bytes)
 }
 fn history_cap(workload: &Workload) -> usize {
-    workload.acquisition.as_ref().map_or(128 * 1024, crate::acquisition::Protocol::history_bytes)
+    workload
+        .acquisition
+        .as_ref()
+        .map_or(128 * 1024, crate::acquisition::Protocol::history_bytes)
 }
 fn message_cap(workload: &Workload) -> usize {
     if workload.version == 6 { 128 * 67 } else { 64 }

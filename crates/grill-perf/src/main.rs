@@ -1,7 +1,6 @@
 mod acquisition;
 mod bundle;
 mod capacity;
-mod retention;
 mod envelope;
 mod evidence;
 mod lifecycle;
@@ -10,13 +9,14 @@ mod microbench;
 mod model;
 mod policy;
 mod resources;
+mod retention;
 mod run;
-mod serving_resources;
 mod schedule;
 mod selection;
 mod sequence;
-mod study;
+mod serving_resources;
 mod startup;
+mod study;
 mod wire;
 
 use clap::{Parser, Subcommand};
@@ -273,17 +273,33 @@ fn execute(cli: Cli) -> model::Result<u8> {
             }
             let comparison = evidence::compare(&baseline, &candidate, reference.as_deref())?;
             if let Some(schedule) = &comparison.schedule {
-                if !json { println!("Named-lane schedule observations; descriptive only, not a mixed-load or fairness verdict."); }
+                if !json {
+                    println!(
+                        "Named-lane schedule observations; descriptive only, not a mixed-load or fairness verdict."
+                    );
+                }
                 print_json(&comparison)?;
                 return Ok(if schedule.complete_eligible { 0 } else { 2 });
             }
             if let Some(acquisition) = &comparison.acquisition {
-                if !json { println!("Declared acquisition observations; descriptive only, use decide for prospective gates."); }
+                if !json {
+                    println!(
+                        "Declared acquisition observations; descriptive only, use decide for prospective gates."
+                    );
+                }
                 print_json(&comparison)?;
-                let complete = [&acquisition.baseline, &acquisition.candidate].into_iter()
+                let complete = [&acquisition.baseline, &acquisition.candidate]
+                    .into_iter()
                     .chain(acquisition.reference.iter())
-                    .all(|report| !report.records.is_empty() && report.records.iter().all(|r| r.complete_eligible));
-                return Ok(if complete && acquisition.baseline.resources.is_none() { 0 } else { 2 });
+                    .all(|report| {
+                        !report.records.is_empty()
+                            && report.records.iter().all(|r| r.complete_eligible)
+                    });
+                return Ok(if complete && acquisition.baseline.resources.is_none() {
+                    0
+                } else {
+                    2
+                });
             }
             if json {
                 print_json(&comparison)?;

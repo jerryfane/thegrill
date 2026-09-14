@@ -4,11 +4,31 @@ use serde_json::json;
 fn spec() -> WaveSpec {
     let request: RequestSettings = serde_json::from_value(json!({"profile":"portable-chat-v1","stream":true,"output":{"tokens":8,"mode":"cap"},"cache":"observe"})).unwrap();
     WaveSpec {
-        index: 0, phase: Phase::Measured, cell: "mixed".into(), case: None, trial: 0, concurrency: 2,
+        index: 0,
+        phase: Phase::Measured,
+        cell: "mixed".into(),
+        case: None,
+        trial: 0,
+        concurrency: 2,
         acquisition: None,
         lanes: Some(vec![
-            ResolvedLane { id: "a".into(), case: "a".into(), arrival: Arrival::FixedOffset { offset_us: 0 }, request: request.clone(), control: None },
-            ResolvedLane { id: "b".into(), case: "b".into(), arrival: Arrival::AfterFirstGenerated { lane: "a".into(), offset_us: 3 }, request, control: None },
+            ResolvedLane {
+                id: "a".into(),
+                case: "a".into(),
+                arrival: Arrival::FixedOffset { offset_us: 0 },
+                request: request.clone(),
+                control: None,
+            },
+            ResolvedLane {
+                id: "b".into(),
+                case: "b".into(),
+                arrival: Arrival::AfterFirstGenerated {
+                    lane: "a".into(),
+                    offset_us: 3,
+                },
+                request,
+                control: None,
+            },
         ]),
     }
 }
@@ -18,7 +38,10 @@ fn attempt(lane: u32, dispatch: u64, first: u64, last: u64, settle: u64) -> Atte
     a.dispatched = true;
     a.status = Status::Complete;
     a.timing = Timing {
-        dispatch_offset_us: dispatch, first_generated_text_us: Some(first), last_generated_text_us: Some(last), settle_us: settle,
+        dispatch_offset_us: dispatch,
+        first_generated_text_us: Some(first),
+        last_generated_text_us: Some(last),
+        settle_us: settle,
         ..Timing::default()
     };
     a.usage.completion_tokens = Some(8);
@@ -55,15 +78,24 @@ fn finite_admission_requires_one_real_notification_and_stops_after_failure() {
     let mut state = State::new(lanes);
     assert_eq!(state.ready(0), Some(0));
     assert_eq!(state.ready(100), None);
-    state.notify(FirstGenerated { lane: 0, offset_us: 7 });
+    state.notify(FirstGenerated {
+        lane: 0,
+        offset_us: 7,
+    });
     assert_eq!(state.ready(9), None);
     assert_eq!(state.ready(10), Some(1));
     assert_eq!(state.ready(100), None);
-    state.notify(FirstGenerated { lane: 0, offset_us: 8 });
+    state.notify(FirstGenerated {
+        lane: 0,
+        offset_us: 8,
+    });
     assert_eq!(state.fatal, Some(Reason::NotificationFailed));
     assert_eq!(state.ready(u64::MAX), None);
     let mut state = State::new(lanes);
-    state.notify(FirstGenerated { lane: 5, offset_us: 0 });
+    state.notify(FirstGenerated {
+        lane: 5,
+        offset_us: 0,
+    });
     assert_eq!(state.fatal, Some(Reason::NotificationFailed));
     assert_eq!(state.ready(u64::MAX), None);
 }
@@ -87,7 +119,10 @@ fn replay_rejects_dispatch_before_trigger_and_missing_admitted_positions() {
 fn barrier_counts_initial_waits_but_never_fabricates_undispatched_service() {
     let a = attempt(0, 100, 5, 10, 20);
     let missing = undispatched(1, Reason::Deadline).attempt;
-    assert_eq!(bounds([&a, &missing].into_iter(), Some(200)).unwrap(), (200, 0));
+    assert_eq!(
+        bounds([&a, &missing].into_iter(), Some(200)).unwrap(),
+        (200, 0)
+    );
     assert!(bounds([&a].into_iter(), Some(119)).is_err());
     assert_eq!(bounds([&missing].into_iter(), Some(200)).unwrap(), (200, 0));
     // Legacy makespan stays first-dispatch to last-settlement.

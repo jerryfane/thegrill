@@ -197,9 +197,9 @@ impl Budget {
                         .deadline_us
                         .min(config.run_budget_us.saturating_sub(self.charged_us))
                 }
-            || snapshot.overhead_us
-                != snapshot.duration_us.saturating_sub(snapshot.scrape_us)
-            || (snapshot.status == v2::Status::Deadline && snapshot.scrape_us < snapshot.allowance_us)
+            || snapshot.overhead_us != snapshot.duration_us.saturating_sub(snapshot.scrape_us)
+            || (snapshot.status == v2::Status::Deadline
+                && snapshot.scrape_us < snapshot.allowance_us)
             || snapshot.scrape_us > snapshot.duration_us
             || snapshot
                 .http_status
@@ -380,7 +380,11 @@ fn identifier(text: &str, metric: bool) -> bool {
         .is_some_and(|b| b.is_ascii_alphabetic() || b == b'_' || (metric && b == b':'))
         && bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_' || (metric && b == b':'))
 }
-fn labels<'a>(mut text: &'a str, max_labels: usize, max_bytes: usize) -> Result<(BTreeMap<String, String>, &'a str)> {
+fn labels(
+    mut text: &str,
+    max_labels: usize,
+    max_bytes: usize,
+) -> Result<(BTreeMap<String, String>, &str)> {
     let original = text.len();
     let mut labels = BTreeMap::new();
     loop {
@@ -454,7 +458,11 @@ pub fn parse(raw: &[u8], config: &Config) -> Result<Vec<Series>> {
             return Err("metrics selected series exceed bound".into());
         }
         let (labels, value) = if let Some(rest) = line[end..].strip_prefix('{') {
-            labels(rest, config.labels_per_series, config.label_bytes_per_series)?
+            labels(
+                rest,
+                config.labels_per_series,
+                config.label_bytes_per_series,
+            )?
         } else {
             (BTreeMap::new(), &line[end..])
         };
@@ -537,8 +545,8 @@ pub struct Summary {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(untagged)]
 pub enum Protocol {
-    V1(Config),
-    V2(v2::Config),
+    V1(Box<Config>),
+    V2(Box<v2::Config>),
 }
 impl Protocol {
     pub fn new(
@@ -550,21 +558,20 @@ impl Protocol {
         model_auth_env: Option<&str>,
     ) -> Result<Self> {
         match version {
-            1 if auth_env.is_some() => Err(
-                "metrics diagnostics version 1 does not accept a metrics credential".into(),
-            ),
-            1 if isolation.is_some() => Err(
-                "metrics isolation requires the explicit version-2 protocol".into(),
-            ),
-            1 => Ok(Self::V1(Config::new(endpoint, waves))),
+            1 if auth_env.is_some() => {
+                Err("metrics diagnostics version 1 does not accept a metrics credential".into())
+            }
+            1 if isolation.is_some() => {
+                Err("metrics isolation requires the explicit version-2 protocol".into())
+            }
+            1 => Ok(Self::V1(Box::new(Config::new(endpoint, waves)))),
             2 => {
-                if let (Some(name), Some(model)) = (auth_env.as_deref(), model_auth_env) {
-                    if name == model {
-                        return Err(
-                            "metrics diagnostics must not reuse the model credential variable"
-                                .into(),
-                        );
-                    }
+                if let (Some(name), Some(model)) = (auth_env.as_deref(), model_auth_env)
+                    && name == model
+                {
+                    return Err(
+                        "metrics diagnostics must not reuse the model credential variable".into(),
+                    );
                 }
                 if auth_env.is_some() {
                     // Fail before dispatch; only the name is retained, never the value.
@@ -574,7 +581,7 @@ impl Protocol {
                 if let Some(isolation) = isolation {
                     config.isolation = isolation;
                 }
-                Ok(Self::V2(config))
+                Ok(Self::V2(Box::new(config)))
             }
             _ => Err("unsupported metrics protocol version".into()),
         }
@@ -740,7 +747,11 @@ pub fn load_wave(
 /// Assemble the retained metrics summary. Version 1 produces the frozen shape
 /// with no acquisition view; version 2 adds acquisition-wide continuity and
 /// accounting.
-pub fn summarize(config: Option<&Protocol>, budget: Budget, waves: Vec<WaveReport>) -> Option<Summary> {
+pub fn summarize(
+    config: Option<&Protocol>,
+    budget: Budget,
+    waves: Vec<WaveReport>,
+) -> Option<Summary> {
     let config = config?;
     Some(Summary {
         acquisition: v2::acquisition(&waves),

@@ -23,7 +23,8 @@ const COLLECTOR: &str = "ccccccccccccccccccccccccccccccccccccccccccccccccccccccc
 const COLLECTOR_OTHER: &str = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
 const CPU_BOUND_REFERENCE: &str = "8386560";
 const CPU_FIXTURE_KERNEL: &str = "cpu-sum-u64-reference-v1;collector:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
-const CPU_FIXTURE_REVISION: &str = "188b240187fb83628d7a32f34da598ec6d305dce66ca251ca300dae47d0ddbf3";
+const CPU_FIXTURE_REVISION: &str =
+    "188b240187fb83628d7a32f34da598ec6d305dce66ca251ca300dae47d0ddbf3";
 
 fn mb_native_cpu_plan(id: &str, started: u64) -> Value {
     let binary_sha = mb_sha(&fs::read(cli().get_program()).unwrap());
@@ -34,7 +35,10 @@ fn mb_native_cpu_plan(id: &str, started: u64) -> Value {
 fn mb_sha(bytes: &[u8]) -> String {
     let mut hash = Sha256::new();
     hash.update(bytes);
-    hash.finalize().iter().map(|byte| format!("{byte:02x}")).collect()
+    hash.finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 fn mb_write(path: &Path, value: &Value) {
@@ -178,7 +182,14 @@ fn mb_e3_plan(id: &str, started: u64) -> Value {
 }
 
 /// One retained sample: the timer's own text plus the exact nanosecond rational.
-fn mb_sample(index: u32, rank: Option<u32>, repetition: Option<u32>, raw: &str, num: u64, den: u64) -> Value {
+fn mb_sample(
+    index: u32,
+    rank: Option<u32>,
+    repetition: Option<u32>,
+    raw: &str,
+    num: u64,
+    den: u64,
+) -> Value {
     json!({
         "index": index,
         "rank": rank,
@@ -410,7 +421,8 @@ fn mb_member(role: &Path, slot: &str, plan: &Value, artifact: &Value, collector:
     receipt["adapter"] = artifact["adapter"].clone();
     receipt["provenance"] = artifact["provenance"].clone();
     receipt["program_sha256"] = artifact["program_sha256"].clone();
-    if artifact["provenance"] == "native_observed" && artifact["adapter"] != "cpu-sum-u64-reference" {
+    if artifact["provenance"] == "native_observed" && artifact["adapter"] != "cpu-sum-u64-reference"
+    {
         let stdout = fs::read(dir.join("artifact.json")).unwrap();
         mb_write_bytes(&dir.join("stdout.bin"), &stdout);
         mb_write_bytes(&dir.join("stderr.bin"), b"");
@@ -462,12 +474,6 @@ fn mb_study(baseline: &str, candidate: &str, slots: usize, minimum: usize) -> Va
     })
 }
 
-fn mb_study_file(temp: &Temp, study: &Value) -> PathBuf {
-    let path = temp.path("study.json");
-    mb_write(&path, study);
-    path
-}
-
 fn mb_stdout(output: &Output) -> Value {
     serde_json::from_slice(&output.stdout).unwrap_or(Value::Null)
 }
@@ -505,7 +511,12 @@ fn mb_inspect(temp: &Temp, name: &str, plan: &Value, artifact: &Value) -> (i32, 
     (mb_code(&output), mb_stdout(&output))
 }
 
-fn mb_capture(temp: &Temp, name: &str, adapter: &str, plan: &Value) -> (i32, Value, String, PathBuf) {
+fn mb_capture(
+    temp: &Temp,
+    name: &str,
+    adapter: &str,
+    plan: &Value,
+) -> (i32, Value, String, PathBuf) {
     let dir = temp.path(name);
     let plan_path = temp.path(&format!("{name}-plan.json"));
     mb_write(&plan_path, plan);
@@ -566,7 +577,8 @@ fn cpu_reference_capture_records_exact_rational_samples() {
     assert_eq!(report["samples"], 5);
     assert_eq!(report["invalid"], json!([]));
 
-    let artifact: Value = serde_json::from_slice(&fs::read(dir.join("artifact.json")).unwrap()).unwrap();
+    let artifact: Value =
+        serde_json::from_slice(&fs::read(dir.join("artifact.json")).unwrap()).unwrap();
     assert_eq!(artifact["observations"], json!([]));
     assert_eq!(artifact["sources"], json!([]));
     assert_eq!(artifact["correctness"]["computed"], CPU_BOUND_REFERENCE);
@@ -577,7 +589,12 @@ fn cpu_reference_capture_records_exact_rational_samples() {
     // Integer nanosecond readings are retained as the exact rational value/1.
     assert_eq!(sample["duration"]["numerator"], json!(raw));
     assert_eq!(sample["duration"]["denominator"], json!(1));
-    assert!(report["scope"].as_str().unwrap().contains("never sets a serving-speed claim"));
+    assert!(
+        report["scope"]
+            .as_str()
+            .unwrap()
+            .contains("never sets a serving-speed claim")
+    );
 
     let inspected = cli()
         .args(["microbench", "inspect"])
@@ -595,11 +612,16 @@ fn cpu_reference_capture_records_exact_rational_samples() {
 #[test]
 fn capture_rejects_drifted_declarations_before_running() {
     let temp = Temp::new();
-    let mutations: [(&str, fn(&mut Value)); 4] = [
-        ("clock", |plan| plan["clock"]["units"] = json!("milliseconds")),
+    type MutatePlan = fn(&mut Value);
+    let mutations: [(&str, MutatePlan); 4] = [
+        ("clock", |plan| {
+            plan["clock"]["units"] = json!("milliseconds")
+        }),
         ("warmups", |plan| plan["warmups"] = json!(3)),
         ("bound", |plan| plan["operation"]["bound"] = json!(1024)),
-        ("allowance", |plan| plan["allowance"]["work_units"] = json!(64)),
+        ("allowance", |plan| {
+            plan["allowance"]["work_units"] = json!(64)
+        }),
     ];
     for (name, mutate) in mutations {
         let mut plan = mb_cpu_plan("a01", START, CPU_FIXTURE_REVISION);
@@ -612,7 +634,8 @@ fn capture_rejects_drifted_declarations_before_running() {
 
     // A plan declared for another adapter cannot be captured as the CPU reference.
     let reduce = mb_reduce_plan("a01", START, 2);
-    let (code, _report, stderr, _) = mb_capture(&temp, "mismatch", "cpu-sum-u64-reference", &reduce);
+    let (code, _report, stderr, _) =
+        mb_capture(&temp, "mismatch", "cpu-sum-u64-reference", &reduce);
     assert_eq!(code, 1);
     assert!(stderr.contains("adapter"), "{stderr}");
 
@@ -620,7 +643,12 @@ fn capture_rejects_drifted_declarations_before_running() {
     let plan_path = temp.path("cpu-inproc-plan.json");
     mb_write(&plan_path, &mb_native_cpu_plan("a01", START));
     let output = cli()
-        .args(["microbench", "capture", "--adapter", "cpu-sum-u64-reference"])
+        .args([
+            "microbench",
+            "capture",
+            "--adapter",
+            "cpu-sum-u64-reference",
+        ])
         .arg("--plan")
         .arg(&plan_path)
         .arg("--out")
@@ -646,8 +674,20 @@ fn inspect_accepts_fractional_and_scientific_durations() {
 
     // The acceptance case: 0.123456789012345 ms is not a whole nanosecond.
     let mut artifact = mb_e3_artifact(&plan, "e3-grouped", "0.003000000");
-    for (index, sample) in artifact["samples"].as_array_mut().unwrap().iter_mut().enumerate() {
-        *sample = mb_sample(index as u32, None, None, "0.123456789012345", 24_691_357_802_469, 200_000_000);
+    for (index, sample) in artifact["samples"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .enumerate()
+    {
+        *sample = mb_sample(
+            index as u32,
+            None,
+            None,
+            "0.123456789012345",
+            24_691_357_802_469,
+            200_000_000,
+        );
     }
     let (code, report) = mb_inspect(&temp, "long-decimal", &plan, &artifact);
     assert_eq!(code, 0, "{report}");
@@ -655,7 +695,12 @@ fn inspect_accepts_fractional_and_scientific_durations() {
 
     // Scientific notation and a sub-resolution digit are both preserved.
     let mut scientific = mb_e3_artifact(&plan, "e3-grouped", "0.003000000");
-    for (index, sample) in scientific["samples"].as_array_mut().unwrap().iter_mut().enumerate() {
+    for (index, sample) in scientific["samples"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .enumerate()
+    {
         *sample = mb_sample(index as u32, None, None, "1.234e-05", 617, 50);
     }
     let (code, report) = mb_inspect(&temp, "scientific", &plan, &scientific);
@@ -664,7 +709,12 @@ fn inspect_accepts_fractional_and_scientific_durations() {
     // 31.2345678 ms is 156172839/5 ns: finer than the declared 1000 ns
     // resolution and still retained exactly.
     let mut fractional = mb_e3_artifact(&plan, "e3-grouped", "0.003000000");
-    for (index, sample) in fractional["samples"].as_array_mut().unwrap().iter_mut().enumerate() {
+    for (index, sample) in fractional["samples"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .enumerate()
+    {
         *sample = mb_sample(index as u32, None, None, "31.2345678", 156_172_839, 5);
     }
     let (code, report) = mb_inspect(&temp, "fractional", &plan, &fractional);
@@ -683,7 +733,10 @@ fn inspect_accepts_fractional_and_scientific_durations() {
     zero["samples"][0] = mb_sample(0, None, None, "0.0", 0, 1);
     let (code, report) = mb_inspect(&temp, "zero", &plan, &zero);
     assert_eq!(code, 1);
-    assert!(mb_has(&report, "invalid", "DURATION_OUT_OF_RANGE"), "{report}");
+    assert!(
+        mb_has(&report, "invalid", "DURATION_OUT_OF_RANGE"),
+        "{report}"
+    );
 
     // Negative, non-finite and out-of-range values stay fail-closed.
     for (name, raw, num, den, reason) in [
@@ -711,19 +764,28 @@ fn inspect_rejects_iteration_clock_units_and_correctness_drift() {
     missing["samples"].as_array_mut().unwrap().pop();
     let (code, report) = mb_inspect(&temp, "missing-iteration", &plan, &missing);
     assert_eq!(code, 1);
-    assert!(mb_has(&report, "invalid", "SAMPLE_GRID_INCOMPLETE"), "{report}");
+    assert!(
+        mb_has(&report, "invalid", "SAMPLE_GRID_INCOMPLETE"),
+        "{report}"
+    );
 
     let mut warmups = base.clone();
     warmups["execution"]["warmups"] = json!(0);
     let (code, report) = mb_inspect(&temp, "warmups", &plan, &warmups);
     assert_eq!(code, 1);
-    assert!(mb_has(&report, "invalid", "WARMUP_COUNT_MISMATCH"), "{report}");
+    assert!(
+        mb_has(&report, "invalid", "WARMUP_COUNT_MISMATCH"),
+        "{report}"
+    );
 
     let mut iterations = base.clone();
     iterations["execution"]["iterations"] = json!(4);
     let (code, report) = mb_inspect(&temp, "iterations", &plan, &iterations);
     assert_eq!(code, 1);
-    assert!(mb_has(&report, "invalid", "ITERATION_COUNT_MISMATCH"), "{report}");
+    assert!(
+        mb_has(&report, "invalid", "ITERATION_COUNT_MISMATCH"),
+        "{report}"
+    );
 
     let mut units = base.clone();
     units["clock"]["units"] = json!("milliseconds");
@@ -741,7 +803,10 @@ fn inspect_rejects_iteration_clock_units_and_correctness_drift() {
     inverted["samples"][2]["rank"] = json!(0);
     let (code, report) = mb_inspect(&temp, "grid", &plan, &inverted);
     assert_eq!(code, 1);
-    assert!(mb_has(&report, "invalid", "SAMPLE_GRID_INCOMPLETE"), "{report}");
+    assert!(
+        mb_has(&report, "invalid", "SAMPLE_GRID_INCOMPLETE"),
+        "{report}"
+    );
 
     let mut incorrect = base.clone();
     incorrect["correctness"]["computed"] = json!("8386561");
@@ -761,14 +826,23 @@ fn inspect_rejects_iteration_clock_units_and_correctness_drift() {
     partial["execution"]["timed_out"] = json!(true);
     let (code, report) = mb_inspect(&temp, "timeout", &plan, &partial);
     assert_eq!(code, 2);
-    assert!(mb_has(&report, "unavailable", "DEADLINE_EXCEEDED"), "{report}");
-    assert!(mb_has(&report, "unavailable", "SAMPLE_GRID_INCOMPLETE"), "{report}");
+    assert!(
+        mb_has(&report, "unavailable", "DEADLINE_EXCEEDED"),
+        "{report}"
+    );
+    assert!(
+        mb_has(&report, "unavailable", "SAMPLE_GRID_INCOMPLETE"),
+        "{report}"
+    );
 
     let mut retained = base.clone();
     retained["failures"] = json!([{"kind": "adapter-error", "detail": "fixture retained failure"}]);
     let (code, report) = mb_inspect(&temp, "retained", &plan, &retained);
     assert_eq!(code, 2);
-    assert!(mb_has(&report, "unavailable", "RETAINED_FAILURE"), "{report}");
+    assert!(
+        mb_has(&report, "unavailable", "RETAINED_FAILURE"),
+        "{report}"
+    );
 }
 
 #[test]
@@ -814,7 +888,10 @@ fn inspect_checks_observed_sources_and_runtime_observations() {
     );
     let (code, report) = mb_inspect(&temp, "missing-observation", &plan, &missing);
     assert_eq!(code, 1);
-    assert!(mb_has(&report, "invalid", "OBSERVATION_MISSING"), "{report}");
+    assert!(
+        mb_has(&report, "invalid", "OBSERVATION_MISSING"),
+        "{report}"
+    );
 
     let mut drifted = base.clone();
     for observation in drifted["observations"].as_array_mut().unwrap() {
@@ -871,15 +948,22 @@ fn import_never_upgrades_a_native_provenance_claim() {
         .arg("--json")
         .output()
         .unwrap();
-    assert_eq!(mb_code(&output), 0, "stderr={}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(
+        mb_code(&output),
+        0,
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let report = mb_stdout(&output);
     assert_eq!(report["provenance"], "imported");
     assert_eq!(report["exerciser"], "imported-bytes");
     assert!(report["scope"].as_str().unwrap().contains("never upgraded"));
-    let stored: Value = serde_json::from_slice(&fs::read(out.join("artifact.json")).unwrap()).unwrap();
+    let stored: Value =
+        serde_json::from_slice(&fs::read(out.join("artifact.json")).unwrap()).unwrap();
     assert_eq!(stored["provenance"], "imported");
     assert_eq!(stored["submitted_provenance"], "native_observed");
-    let receipt: Value = serde_json::from_slice(&fs::read(out.join("receipt.json")).unwrap()).unwrap();
+    let receipt: Value =
+        serde_json::from_slice(&fs::read(out.join("receipt.json")).unwrap()).unwrap();
     assert_eq!(receipt["status"], "imported");
     assert_eq!(receipt["source_sha256"], json!(mb_sha(&artifact_bytes)));
 }
@@ -892,22 +976,35 @@ fn group_compare_requires_three_complete_acquisitions_per_role() {
         &temp,
         "baseline",
         "baseline",
-        &[(CPU_FIXTURE_REVISION, START, 1000), (CPU_FIXTURE_REVISION, START + 1_000, 1000), (CPU_FIXTURE_REVISION, START + 2_000, 1000)],
+        &[
+            (CPU_FIXTURE_REVISION, START, 1000),
+            (CPU_FIXTURE_REVISION, START + 1_000, 1000),
+            (CPU_FIXTURE_REVISION, START + 2_000, 1000),
+        ],
     );
     let candidate = mb_cpu_role(
         &temp,
         "candidate",
         "candidate",
-        &[(CPU_FIXTURE_REVISION, START + 60_000, 1000), (CPU_FIXTURE_REVISION, START + 61_000, 1000), (CPU_FIXTURE_REVISION, START + 62_000, 1000)],
+        &[
+            (CPU_FIXTURE_REVISION, START + 60_000, 1000),
+            (CPU_FIXTURE_REVISION, START + 61_000, 1000),
+            (CPU_FIXTURE_REVISION, START + 62_000, 1000),
+        ],
     );
     let reference = mb_cpu_role(
         &temp,
         "reference",
         "reference",
-        &[(CPU_FIXTURE_REVISION, START + 120_000, 1000), (CPU_FIXTURE_REVISION, START + 121_000, 1000), (CPU_FIXTURE_REVISION, START + 122_000, 1000)],
+        &[
+            (CPU_FIXTURE_REVISION, START + 120_000, 1000),
+            (CPU_FIXTURE_REVISION, START + 121_000, 1000),
+            (CPU_FIXTURE_REVISION, START + 122_000, 1000),
+        ],
     );
 
-    let (code, report, stderr) = mb_compare(&temp, "complete", &study, &baseline, &candidate, &reference);
+    let (code, report, stderr) =
+        mb_compare(&temp, "complete", &study, &baseline, &candidate, &reference);
     assert_eq!(code, 0, "stderr={stderr} {report}");
     assert_eq!(report["decision"], "PASS");
     assert_eq!(report["study"]["declared_acquisitions"], 9);
@@ -921,31 +1018,57 @@ fn group_compare_requires_three_complete_acquisitions_per_role() {
 
     // A role that declares fewer than the minimum is rejected outright.
     let short_study = mb_study(CPU_FIXTURE_REVISION, CPU_FIXTURE_REVISION, 2, 2);
-    let (code, report, _) = mb_compare(&temp, "short", &short_study, &baseline, &candidate, &reference);
+    let (code, report, _) = mb_compare(
+        &temp,
+        "short",
+        &short_study,
+        &baseline,
+        &candidate,
+        &reference,
+    );
     assert_eq!(code, 1);
     assert!(mb_has(&report, "reason_codes", "ROLE_MINIMUM"), "{report}");
 
     // A declared acquisition that is not present withholds the verdict; it is
     // never replaced or filtered into a survivor set.
     let missing_study = mb_study(CPU_FIXTURE_REVISION, CPU_FIXTURE_REVISION, 4, 3);
-    let (code, report, _) = mb_compare(&temp, "missing", &missing_study, &baseline, &candidate, &reference);
+    let (code, report, _) = mb_compare(
+        &temp,
+        "missing",
+        &missing_study,
+        &baseline,
+        &candidate,
+        &reference,
+    );
     assert_eq!(code, 2);
     assert_eq!(report["decision"], "INCONCLUSIVE");
-    assert!(mb_has(&report, "reason_codes", "MISSING_ACQUISITION"), "{report}");
+    assert!(
+        mb_has(&report, "reason_codes", "MISSING_ACQUISITION"),
+        "{report}"
+    );
 
     // An unexpected acquisition directory is rejected, not ignored.
     let extra_plan = mb_cpu_plan("candidate99", START + 90_000, CPU_FIXTURE_REVISION);
     let extra = mb_dir(&candidate.join("candidate99"));
     mb_write(&extra.join("plan.json"), &extra_plan);
-    mb_write(&extra.join("artifact.json"), &mb_cpu_uniform(&extra_plan, 1000));
+    mb_write(
+        &extra.join("artifact.json"),
+        &mb_cpu_uniform(&extra_plan, 1000),
+    );
     let (code, report, _) = mb_compare(&temp, "extra", &study, &baseline, &candidate, &reference);
     assert_eq!(code, 1);
-    assert!(mb_has(&report, "reason_codes", "UNEXPECTED_ACQUISITION"), "{report}");
+    assert!(
+        mb_has(&report, "reason_codes", "UNEXPECTED_ACQUISITION"),
+        "{report}"
+    );
     fs::remove_dir_all(&extra).unwrap();
 
     // A member that did not finish is unavailable, not a smaller sample.
     let partial_role = mb_dir(&temp.path("partial"));
-    for (index, started) in [START + 60_000u64, START + 61_000, START + 62_000].into_iter().enumerate() {
+    for (index, started) in [START + 60_000u64, START + 61_000, START + 62_000]
+        .into_iter()
+        .enumerate()
+    {
         let id = format!("candidate{index:02}");
         let plan = mb_cpu_plan(&id, started, CPU_FIXTURE_REVISION);
         let mut artifact = mb_cpu_uniform(&plan, 1000);
@@ -955,15 +1078,28 @@ fn group_compare_requires_three_complete_acquisitions_per_role() {
         }
         mb_member(&partial_role, &id, &plan, &artifact, COLLECTOR);
     }
-    let (code, report, _) = mb_compare(&temp, "partial", &study, &baseline, &partial_role, &reference);
+    let (code, report, _) = mb_compare(
+        &temp,
+        "partial",
+        &study,
+        &baseline,
+        &partial_role,
+        &reference,
+    );
     assert_eq!(code, 2);
     assert_eq!(report["roles"]["candidate"]["eligible"], false);
-    assert!(mb_has(&report, "reason_codes", "DEADLINE_EXCEEDED"), "{report}");
+    assert!(
+        mb_has(&report, "reason_codes", "DEADLINE_EXCEEDED"),
+        "{report}"
+    );
 
     // A rejected member (failed numerical correctness) is an error, and a
     // faster candidate can never outweigh it.
     let broken_role = mb_dir(&temp.path("broken"));
-    for (index, started) in [START + 60_000u64, START + 61_000, START + 62_000].into_iter().enumerate() {
+    for (index, started) in [START + 60_000u64, START + 61_000, START + 62_000]
+        .into_iter()
+        .enumerate()
+    {
         let id = format!("candidate{index:02}");
         let plan = mb_cpu_plan(&id, started, CPU_FIXTURE_REVISION);
         let mut artifact = mb_cpu_uniform(&plan, 1);
@@ -973,10 +1109,14 @@ fn group_compare_requires_three_complete_acquisitions_per_role() {
         }
         mb_member(&broken_role, &id, &plan, &artifact, COLLECTOR);
     }
-    let (code, report, _) = mb_compare(&temp, "broken", &study, &baseline, &broken_role, &reference);
+    let (code, report, _) =
+        mb_compare(&temp, "broken", &study, &baseline, &broken_role, &reference);
     assert_eq!(code, 1);
     assert_ne!(report["decision"], "PASS");
-    assert!(mb_has(&report, "reason_codes", "CORRECTNESS_FAILED"), "{report}");
+    assert!(
+        mb_has(&report, "reason_codes", "CORRECTNESS_FAILED"),
+        "{report}"
+    );
 }
 
 #[test]
@@ -987,25 +1127,41 @@ fn group_compare_envelope_boundaries_and_pooled_reference() {
         &temp,
         "baseline",
         "baseline",
-        &[(CPU_FIXTURE_REVISION, START, 1000), (CPU_FIXTURE_REVISION, START + 1_000, 1000), (CPU_FIXTURE_REVISION, START + 2_000, 1000)],
+        &[
+            (CPU_FIXTURE_REVISION, START, 1000),
+            (CPU_FIXTURE_REVISION, START + 1_000, 1000),
+            (CPU_FIXTURE_REVISION, START + 2_000, 1000),
+        ],
     );
     let reference = mb_cpu_role(
         &temp,
         "reference",
         "reference",
-        &[(CPU_FIXTURE_REVISION, START + 120_000, 1010), (CPU_FIXTURE_REVISION, START + 121_000, 1010), (CPU_FIXTURE_REVISION, START + 122_000, 1010)],
+        &[
+            (CPU_FIXTURE_REVISION, START + 120_000, 1010),
+            (CPU_FIXTURE_REVISION, START + 121_000, 1010),
+            (CPU_FIXTURE_REVISION, START + 122_000, 1010),
+        ],
     );
     let edge = mb_cpu_role(
         &temp,
         "edge",
         "candidate",
-        &[(CPU_FIXTURE_REVISION, START + 60_000, 1050), (CPU_FIXTURE_REVISION, START + 61_000, 1050), (CPU_FIXTURE_REVISION, START + 62_000, 1050)],
+        &[
+            (CPU_FIXTURE_REVISION, START + 60_000, 1050),
+            (CPU_FIXTURE_REVISION, START + 61_000, 1050),
+            (CPU_FIXTURE_REVISION, START + 62_000, 1050),
+        ],
     );
     let worse = mb_cpu_role(
         &temp,
         "worse",
         "candidate",
-        &[(CPU_FIXTURE_REVISION, START + 60_000, 1061), (CPU_FIXTURE_REVISION, START + 61_000, 1061), (CPU_FIXTURE_REVISION, START + 62_000, 1061)],
+        &[
+            (CPU_FIXTURE_REVISION, START + 60_000, 1061),
+            (CPU_FIXTURE_REVISION, START + 61_000, 1061),
+            (CPU_FIXTURE_REVISION, START + 62_000, 1061),
+        ],
     );
 
     // The pooled A/A2 envelope is [1000, 1010]. 1050 is exactly the
@@ -1026,12 +1182,19 @@ fn group_compare_envelope_boundaries_and_pooled_reference() {
         &temp,
         "wide",
         "reference",
-        &[(CPU_FIXTURE_REVISION, START + 120_000, 1300), (CPU_FIXTURE_REVISION, START + 121_000, 1300), (CPU_FIXTURE_REVISION, START + 122_000, 1300)],
+        &[
+            (CPU_FIXTURE_REVISION, START + 120_000, 1300),
+            (CPU_FIXTURE_REVISION, START + 121_000, 1300),
+            (CPU_FIXTURE_REVISION, START + 122_000, 1300),
+        ],
     );
     let (code, report, _) = mb_compare(&temp, "spread", &study, &baseline, &edge, &wide);
     assert_eq!(code, 2);
     assert_eq!(report["decision"], "INCONCLUSIVE");
-    assert!(mb_has(&report, "reason_codes", "REFERENCE_SPREAD_EXCEEDED"), "{report}");
+    assert!(
+        mb_has(&report, "reason_codes", "REFERENCE_SPREAD_EXCEEDED"),
+        "{report}"
+    );
 }
 
 #[test]
@@ -1045,45 +1208,96 @@ fn group_compare_rejects_membership_axis_and_collector_drift() {
             (revision, started + 2000, 1000),
         ]
     };
-    let baseline = mb_cpu_role(&temp, "baseline", "baseline", &revisions(CPU_FIXTURE_REVISION, START));
-    let candidate = mb_cpu_role(&temp, "candidate", "candidate", &revisions(CPU_FIXTURE_REVISION, START + 60_000));
-    let reference = mb_cpu_role(&temp, "reference", "reference", &revisions(CPU_FIXTURE_REVISION, START + 120_000));
+    let baseline = mb_cpu_role(
+        &temp,
+        "baseline",
+        "baseline",
+        &revisions(CPU_FIXTURE_REVISION, START),
+    );
+    let candidate = mb_cpu_role(
+        &temp,
+        "candidate",
+        "candidate",
+        &revisions(CPU_FIXTURE_REVISION, START + 60_000),
+    );
+    let reference = mb_cpu_role(
+        &temp,
+        "reference",
+        "reference",
+        &revisions(CPU_FIXTURE_REVISION, START + 120_000),
+    );
 
     // A declaration cannot claim a different implementation than was observed.
     let mut wrong_study = study.clone();
     wrong_study["revision_axis"]["candidate"] = json!(mb_sha(b"different-implementation"));
-    let (code, report, _) = mb_compare(&temp, "axis", &wrong_study, &baseline, &candidate, &reference);
+    let (code, report, _) = mb_compare(
+        &temp,
+        "axis",
+        &wrong_study,
+        &baseline,
+        &candidate,
+        &reference,
+    );
     assert_eq!(code, 1);
-    assert!(mb_has(&report, "reason_codes", "OBSERVATION_DRIFT"), "{report}");
+    assert!(
+        mb_has(&report, "reason_codes", "OBSERVATION_DRIFT"),
+        "{report}"
+    );
 
     // Role starts must be strictly ordered A < B < A2.
-    let early = mb_cpu_role(&temp, "early", "reference", &revisions(CPU_FIXTURE_REVISION, START + 1_000));
+    let early = mb_cpu_role(
+        &temp,
+        "early",
+        "reference",
+        &revisions(CPU_FIXTURE_REVISION, START + 1_000),
+    );
     let (code, report, _) = mb_compare(&temp, "order", &study, &baseline, &candidate, &early);
     assert_eq!(code, 1);
-    assert!(mb_has(&report, "reason_codes", "OBSERVED_STARTS_OUT_OF_ORDER"), "{report}");
+    assert!(
+        mb_has(&report, "reason_codes", "OBSERVED_STARTS_OUT_OF_ORDER"),
+        "{report}"
+    );
 
     // Within one role the observed order must also be strictly increasing.
     let shuffled = mb_cpu_role(
         &temp,
         "shuffled",
         "baseline",
-        &[(CPU_FIXTURE_REVISION, START, 1000), (CPU_FIXTURE_REVISION, START, 1000), (CPU_FIXTURE_REVISION, START + 2000, 1000)],
+        &[
+            (CPU_FIXTURE_REVISION, START, 1000),
+            (CPU_FIXTURE_REVISION, START, 1000),
+            (CPU_FIXTURE_REVISION, START + 2000, 1000),
+        ],
     );
-    let (code, report, _) = mb_compare(&temp, "shuffled", &study, &shuffled, &candidate, &reference);
+    let (code, report, _) =
+        mb_compare(&temp, "shuffled", &study, &shuffled, &candidate, &reference);
     assert_eq!(code, 1);
-    assert!(mb_has(&report, "reason_codes", "OBSERVED_STARTS_OUT_OF_ORDER"), "{report}");
+    assert!(
+        mb_has(&report, "reason_codes", "OBSERVED_STARTS_OUT_OF_ORDER"),
+        "{report}"
+    );
 
     // A different collector for one member breaks the collector contract.
     let mixed = mb_dir(&temp.path("mixed"));
-    for (index, started) in [START + 60_000u64, START + 61_000, START + 62_000].into_iter().enumerate() {
+    for (index, started) in [START + 60_000u64, START + 61_000, START + 62_000]
+        .into_iter()
+        .enumerate()
+    {
         let id = format!("candidate{index:02}");
         let plan = mb_cpu_plan(&id, started, CPU_FIXTURE_REVISION);
-        let collector = if index == 1 { COLLECTOR_OTHER } else { COLLECTOR };
+        let collector = if index == 1 {
+            COLLECTOR_OTHER
+        } else {
+            COLLECTOR
+        };
         mb_member(&mixed, &id, &plan, &mb_cpu_uniform(&plan, 1000), collector);
     }
     let (code, report, _) = mb_compare(&temp, "collector", &study, &baseline, &mixed, &reference);
     assert_eq!(code, 1);
-    assert!(mb_has(&report, "reason_codes", "COLLECTOR_MISMATCH"), "{report}");
+    assert!(
+        mb_has(&report, "reason_codes", "COLLECTOR_MISMATCH"),
+        "{report}"
+    );
 
     // The same acquisition reused in two roles is role reuse.
     let reused = mb_dir(&temp.path("reused"));
@@ -1098,7 +1312,10 @@ fn group_compare_rejects_membership_axis_and_collector_drift() {
 
     // A member whose pins differ from the rest of the study is identity drift.
     let drifted = mb_dir(&temp.path("drifted"));
-    for (index, started) in [START + 60_000u64, START + 61_000, START + 62_000].into_iter().enumerate() {
+    for (index, started) in [START + 60_000u64, START + 61_000, START + 62_000]
+        .into_iter()
+        .enumerate()
+    {
         let id = format!("candidate{index:02}");
         let mut plan = mb_cpu_plan(&id, started, CPU_FIXTURE_REVISION);
         let artifact = if index == 0 {
@@ -1111,7 +1328,10 @@ fn group_compare_rejects_membership_axis_and_collector_drift() {
     }
     let (code, report, _) = mb_compare(&temp, "pins", &study, &baseline, &drifted, &reference);
     assert_eq!(code, 1);
-    assert!(mb_has(&report, "reason_codes", "IDENTITY_DRIFT"), "{report}");
+    assert!(
+        mb_has(&report, "reason_codes", "IDENTITY_DRIFT"),
+        "{report}"
+    );
 
     // An invalid study declaration is rejected before any comparison.
     let (code, report, _) = mb_compare(
@@ -1135,12 +1355,19 @@ fn group_compare_uses_observed_chronology_and_rejects_mixed_provenance() {
         .enumerate()
         .map(|(role_index, role)| {
             let revisions: Vec<_> = (0..3)
-                .map(|index| (CPU_FIXTURE_REVISION, START + role_index as u64 * 60_000 + index * 1000, 1000))
+                .map(|index| {
+                    (
+                        CPU_FIXTURE_REVISION,
+                        START + role_index as u64 * 60_000 + index * 1000,
+                        1000,
+                    )
+                })
                 .collect();
             let path = mb_cpu_role(&temp, role, role, &revisions);
             for index in 0..3 {
                 let receipt_path = path.join(format!("{role}{index:02}/receipt.json"));
-                let mut receipt: Value = serde_json::from_slice(&fs::read(&receipt_path).unwrap()).unwrap();
+                let mut receipt: Value =
+                    serde_json::from_slice(&fs::read(&receipt_path).unwrap()).unwrap();
                 let started = receipt["started_unix_ms"].as_u64().unwrap() + 1_000_000;
                 receipt["started_unix_ms"] = json!(started);
                 receipt["observation_unix_ms"] = json!(started + 100);
@@ -1150,7 +1377,14 @@ fn group_compare_uses_observed_chronology_and_rejects_mixed_provenance() {
             path
         })
         .collect();
-    let (code, report, _) = mb_compare(&temp, "ordered-observation", &study, &roles[0], &roles[1], &roles[2]);
+    let (code, report, _) = mb_compare(
+        &temp,
+        "ordered-observation",
+        &study,
+        &roles[0],
+        &roles[1],
+        &roles[2],
+    );
     assert_eq!(code, 0, "{report}");
 
     // Declarations remain grouped and precede every observation. Only the actual
@@ -1161,9 +1395,19 @@ fn group_compare_uses_observed_chronology_and_rejects_mixed_provenance() {
     receipt["started_unix_ms"] = json!(START + 1_001_500);
     receipt["observation_unix_ms"] = json!(START + 1_001_600);
     mb_write(&receipt_path, &receipt);
-    let (code, report, _) = mb_compare(&temp, "interleaved-observation", &study, &roles[0], &roles[1], &roles[2]);
+    let (code, report, _) = mb_compare(
+        &temp,
+        "interleaved-observation",
+        &study,
+        &roles[0],
+        &roles[1],
+        &roles[2],
+    );
     assert_eq!(code, 1, "{report}");
-    assert!(mb_has(&report, "reason_codes", "OBSERVED_STARTS_OUT_OF_ORDER"), "{report}");
+    assert!(
+        mb_has(&report, "reason_codes", "OBSERVED_STARTS_OUT_OF_ORDER"),
+        "{report}"
+    );
     fs::write(&receipt_path, receipt_bytes).unwrap();
 
     // One honestly imported member cannot inherit the other members' native claim.
@@ -1175,16 +1419,28 @@ fn group_compare_uses_observed_chronology_and_rejects_mixed_provenance() {
     receipt["provenance"] = json!("imported");
     receipt["artifact_sha256"] = json!(mb_sha(&fs::read(&artifact_path).unwrap()));
     mb_write(&receipt_path, &receipt);
-    let (code, report, _) = mb_compare(&temp, "mixed-provenance", &study, &roles[0], &roles[1], &roles[2]);
+    let (code, report, _) = mb_compare(
+        &temp,
+        "mixed-provenance",
+        &study,
+        &roles[0],
+        &roles[1],
+        &roles[2],
+    );
     assert_eq!(code, 1, "{report}");
-    assert!(mb_has(&report, "reason_codes", "PROVENANCE_MISMATCH"), "{report}");
+    assert!(
+        mb_has(&report, "reason_codes", "PROVENANCE_MISMATCH"),
+        "{report}"
+    );
 }
 
 #[test]
 fn collective_world_samples_use_per_repetition_maxima() {
     let temp = Temp::new();
     let plan = mb_reduce_plan("a01", START, 2);
-    let per_repetition: Vec<Vec<u64>> = (0..5).map(|index| vec![1000 + index, 2000 + index]).collect();
+    let per_repetition: Vec<Vec<u64>> = (0..5)
+        .map(|index| vec![1000 + index, 2000 + index])
+        .collect();
     let artifact = mb_reduce_artifact(&plan, &per_repetition, 0);
     let (code, report) = mb_inspect(&temp, "collective", &plan, &artifact);
     assert_eq!(code, 0, "{report}");
@@ -1207,7 +1463,9 @@ fn collective_world_samples_use_per_repetition_maxima() {
     let three = mb_reduce_plan("a01", START, 3);
     let wide = mb_reduce_artifact(
         &three,
-        &(0..5).map(|_| vec![1000, 1000, 1000]).collect::<Vec<Vec<u64>>>(),
+        &(0..5)
+            .map(|_| vec![1000, 1000, 1000])
+            .collect::<Vec<Vec<u64>>>(),
         0,
     );
     let (code, report) = mb_inspect(&temp, "collective-3", &three, &wide);
@@ -1229,7 +1487,10 @@ fn collective_world_samples_use_per_repetition_maxima() {
     missing["samples"] = json!(kept);
     let (code, report) = mb_inspect(&temp, "missing-rank", &plan, &missing);
     assert_eq!(code, 1);
-    assert!(mb_has(&report, "invalid", "SAMPLE_GRID_INCOMPLETE"), "{report}");
+    assert!(
+        mb_has(&report, "invalid", "SAMPLE_GRID_INCOMPLETE"),
+        "{report}"
+    );
 
     // A world observation that disagrees with the topology is rejected.
     let mut world_drift = artifact.clone();
@@ -1251,7 +1512,10 @@ fn collective_world_samples_use_per_repetition_maxima() {
     }
     let (code, report) = mb_inspect(&temp, "unverified", &plan, &unverified);
     assert_eq!(code, 1);
-    assert!(mb_has(&report, "invalid", "OBSERVATION_MISSING"), "{report}");
+    assert!(
+        mb_has(&report, "invalid", "OBSERVATION_MISSING"),
+        "{report}"
+    );
 
     let mismatched = mb_reduce_artifact(&plan, &per_repetition, 3);
     let (code, report) = mb_inspect(&temp, "mismatch", &plan, &mismatched);
@@ -1325,7 +1589,10 @@ fn external_program_launch_pins_the_program_and_retains_failures() {
     let body_path = temp.path("body.json");
     fs::write(
         &fixture,
-        format!("#!/bin/sh\n# fixture: prints a prepared body, no device work\nexec cat '{}'\n", body_path.display()),
+        format!(
+            "#!/bin/sh\n# fixture: prints a prepared body, no device work\nexec cat '{}'\n",
+            body_path.display()
+        ),
     )
     .unwrap();
     fs::set_permissions(&fixture, fs::Permissions::from_mode(0o755)).unwrap();
@@ -1337,7 +1604,11 @@ fn external_program_launch_pins_the_program_and_retains_failures() {
         {"path": "tools/microbench/nccl_allreduce_sum.py", "sha256": program_sha},
         {"path": "doc/PERFORMANCE.md", "sha256": NCCL_BYTE_SOURCE_SHA256}
     ]);
-    let body = mb_reduce_artifact(&plan, &std::array::from_fn::<_, 5, _>(|_| vec![1000, 1000]), 0);
+    let body = mb_reduce_artifact(
+        &plan,
+        &std::array::from_fn::<_, 5, _>(|_| vec![1000, 1000]),
+        0,
+    );
     mb_write(&body_path, &body);
     let plan_path = temp.path("launch-plan.json");
     mb_write(&plan_path, &plan);
@@ -1354,21 +1625,46 @@ fn external_program_launch_pins_the_program_and_retains_failures() {
         .arg("--json")
         .output()
         .unwrap();
-    assert_eq!(mb_code(&output), 0, "stdout={} stderr={}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    assert_eq!(
+        mb_code(&output),
+        0,
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
     let report = mb_stdout(&output);
     assert_eq!(report["provenance"], "native_observed");
     assert_eq!(report["exerciser"], "native-collective-program-observation");
     assert_eq!(report["program_sha256"], program_sha);
-    assert!(report["scope"].as_str().unwrap().contains("not authenticated execution"));
-    let receipt: Value = serde_json::from_slice(&fs::read(out.join("receipt.json")).unwrap()).unwrap();
+    assert!(
+        report["scope"]
+            .as_str()
+            .unwrap()
+            .contains("not authenticated execution")
+    );
+    let receipt: Value =
+        serde_json::from_slice(&fs::read(out.join("receipt.json")).unwrap()).unwrap();
     assert_eq!(receipt["program_sha256"], program_sha);
     assert_eq!(receipt["status"], "captured");
-    assert_eq!(fs::read(out.join("stdout.bin")).unwrap(), fs::read(&body_path).unwrap());
+    assert_eq!(
+        fs::read(out.join("stdout.bin")).unwrap(),
+        fs::read(&body_path).unwrap()
+    );
     assert_eq!(fs::read(out.join("stderr.bin")).unwrap(), b"");
-    let inspected = cli().args(["microbench", "inspect"]).arg(&out).arg("--json").output().unwrap();
+    let inspected = cli()
+        .args(["microbench", "inspect"])
+        .arg(&out)
+        .arg("--json")
+        .output()
+        .unwrap();
     assert_eq!(mb_code(&inspected), 0);
     assert_eq!(mb_stdout(&inspected)["acquisition_checked"], true);
-    let structural = cli().args(["microbench", "inspect"]).arg(out.join("artifact.json")).arg("--json").output().unwrap();
+    let structural = cli()
+        .args(["microbench", "inspect"])
+        .arg(out.join("artifact.json"))
+        .arg("--json")
+        .output()
+        .unwrap();
     assert_eq!(mb_code(&structural), 0);
     assert_eq!(mb_stdout(&structural)["acquisition_checked"], false);
 
@@ -1390,17 +1686,28 @@ fn external_program_launch_pins_the_program_and_retains_failures() {
         .unwrap();
     assert_eq!(mb_code(&rejected), 1);
     let wrong_receipt: Value =
-        serde_json::from_slice(&fs::read(temp.path("wrong").join("receipt.json")).unwrap()).unwrap();
+        serde_json::from_slice(&fs::read(temp.path("wrong").join("receipt.json")).unwrap())
+            .unwrap();
     assert_eq!(wrong_receipt["status"], "failed");
-    assert_eq!(fs::read(temp.path("wrong").join("stdout.bin")).unwrap(), b"");
-    assert_eq!(fs::read(temp.path("wrong").join("stderr.bin")).unwrap(), b"");
+    assert_eq!(
+        fs::read(temp.path("wrong").join("stdout.bin")).unwrap(),
+        b""
+    );
+    assert_eq!(
+        fs::read(temp.path("wrong").join("stderr.bin")).unwrap(),
+        b""
+    );
     assert!(!temp.path("wrong").join("artifact.json").exists());
 
     // Nonzero exit, malformed output and a missed deadline are retained as
     // failed receipts with no artifact, never as empty successful evidence.
     for (name, script, deadline) in [
         ("exit", "#!/bin/sh\nexit 1\n".to_string(), 120000),
-        ("malformed", "#!/bin/sh\necho not-json\n".to_string(), 120000),
+        (
+            "malformed",
+            "#!/bin/sh\necho not-json\n".to_string(),
+            120000,
+        ),
         ("timeout", "#!/bin/sh\nsleep 5\n".to_string(), 400),
     ] {
         let path = temp.path(&format!("{name}.sh"));
@@ -1431,7 +1738,10 @@ fn external_program_launch_pins_the_program_and_retains_failures() {
         assert_eq!(receipt["status"], "failed", "{name}");
         assert!(receipt["failure"].is_string(), "{name}");
         if name == "timeout" {
-            assert!(receipt["duration_ms"].as_u64().unwrap() >= deadline, "{name}: {receipt}");
+            assert!(
+                receipt["duration_ms"].as_u64().unwrap() >= deadline,
+                "{name}: {receipt}"
+            );
         }
         let inspected = cli()
             .args(["microbench", "inspect"])
@@ -1458,34 +1768,57 @@ fn mb_program_command(temp: &Temp, name: &str, script: &str, deadline: u64) -> (
     mb_write(&plan_path, &plan);
     let out = temp.path(name);
     let mut command = cli();
-    command.args(["microbench", "capture", "--adapter", "nccl-allreduce-sum"])
-        .arg("--plan").arg(plan_path).arg("--out").arg(&out)
-        .arg("--program").arg(program).args(["--authorize-device-window", "--json"])
-        .stdout(Stdio::piped()).stderr(Stdio::piped());
+    command
+        .args(["microbench", "capture", "--adapter", "nccl-allreduce-sum"])
+        .arg("--plan")
+        .arg(plan_path)
+        .arg("--out")
+        .arg(&out)
+        .arg("--program")
+        .arg(program)
+        .args(["--authorize-device-window", "--json"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     (command, out)
 }
 
 #[cfg(target_os = "linux")]
 fn mb_raw_receipt(out: &Path) -> Value {
-    let receipt: Value = serde_json::from_slice(&fs::read(out.join("receipt.json")).unwrap()).unwrap();
+    let receipt: Value =
+        serde_json::from_slice(&fs::read(out.join("receipt.json")).unwrap()).unwrap();
     for stream in ["stdout", "stderr"] {
         let bytes = fs::read(out.join(format!("{stream}.bin"))).unwrap();
-        assert_eq!(receipt["program_output"][format!("{stream}_sha256")], mb_sha(&bytes));
-        assert_eq!(receipt["program_output"][format!("{stream}_bytes")], bytes.len());
+        assert_eq!(
+            receipt["program_output"][format!("{stream}_sha256")],
+            mb_sha(&bytes)
+        );
+        assert_eq!(
+            receipt["program_output"][format!("{stream}_bytes")],
+            bytes.len()
+        );
     }
-    assert_eq!(receipt["source_sha256"], receipt["program_output"]["stdout_sha256"]);
+    assert_eq!(
+        receipt["source_sha256"],
+        receipt["program_output"]["stdout_sha256"]
+    );
     receipt
 }
 
 #[cfg(target_os = "linux")]
 fn mb_assert_child_stopped(pid_file: &Path) {
-    let pid: u32 = fs::read_to_string(pid_file).unwrap().trim().parse().unwrap();
+    let pid: u32 = fs::read_to_string(pid_file)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
     // Read only: never signal an already-reaped descendant by its numeric PID.
     let limit = Instant::now() + Duration::from_secs(1);
     loop {
         match fs::read_to_string(format!("/proc/{pid}/stat")) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
-            Ok(stat) if matches!(stat.rsplit_once(") ").unwrap().1.as_bytes()[0], b'Z' | b'X') => return,
+            Ok(stat) if matches!(stat.rsplit_once(") ").unwrap().1.as_bytes()[0], b'Z' | b'X') => {
+                return;
+            }
             Ok(_) if Instant::now() < limit => thread::sleep(Duration::from_millis(2)),
             state => panic!("owned finite descendant still running: {state:?}"),
         }
@@ -1498,7 +1831,8 @@ fn external_program_deadline_does_not_join_inherited_pipes() {
     let temp = Temp::new();
     let pid = temp.path("descendant.pid");
     let script = format!(
-        "#!/bin/sh\nprintf diagnostic >&2\nsleep 2 &\nprintf '%s\\n' \"$!\" > '{}'\nwait\n", pid.display()
+        "#!/bin/sh\nprintf diagnostic >&2\nsleep 2 &\nprintf '%s\\n' \"$!\" > '{}'\nwait\n",
+        pid.display()
     );
     let (mut command, out) = mb_program_command(&temp, "deadline", &script, 50);
     let output = command.output().unwrap();
@@ -1517,7 +1851,8 @@ fn external_program_cancellation_cleans_only_owned_group() {
     for (name, signal) in [("interrupt", libc::SIGINT), ("terminate", libc::SIGTERM)] {
         let pid = temp.path(&format!("{name}.pid"));
         let script = format!(
-            "#!/bin/sh\nprintf cancellation-diagnostic >&2\nsleep 2 &\nprintf '%s\\n' \"$!\" > '{}'\nwait\n", pid.display()
+            "#!/bin/sh\nprintf cancellation-diagnostic >&2\nsleep 2 &\nprintf '%s\\n' \"$!\" > '{}'\nwait\n",
+            pid.display()
         );
         let (mut command, out) = mb_program_command(&temp, name, &script, 10000);
         let collector = command.spawn().unwrap();
@@ -1525,11 +1860,17 @@ fn external_program_cancellation_cleans_only_owned_group() {
         while !pid.exists() && Instant::now() < ready_limit {
             thread::sleep(Duration::from_millis(2));
         }
-        assert!(pid.exists(), "producer did not reach cancellation handshake");
+        assert!(
+            pid.exists(),
+            "producer did not reach cancellation handshake"
+        );
         // A separately owned finite child is outside the collector's new group.
         let mut unrelated = Command::new("sleep").arg("2").spawn().unwrap();
         // Collector has not been reaped, so its PID remains reserved.
-        assert_eq!(unsafe { libc::kill(collector.id() as libc::pid_t, signal) }, 0);
+        assert_eq!(
+            unsafe { libc::kill(collector.id() as libc::pid_t, signal) },
+            0
+        );
         let started = Instant::now();
         let output = collector.wait_with_output().unwrap();
         assert_eq!(mb_code(&output), 1);
@@ -1537,9 +1878,15 @@ fn external_program_cancellation_cleans_only_owned_group() {
         let receipt = mb_raw_receipt(&out);
         assert_eq!(receipt["status"], "failed");
         assert!(receipt["failure"].as_str().unwrap().contains("cancelled"));
-        assert_eq!(fs::read(out.join("stderr.bin")).unwrap(), b"cancellation-diagnostic");
+        assert_eq!(
+            fs::read(out.join("stderr.bin")).unwrap(),
+            b"cancellation-diagnostic"
+        );
         mb_assert_child_stopped(&pid);
-        assert!(unrelated.try_wait().unwrap().is_none(), "unrelated child was signalled");
+        assert!(
+            unrelated.try_wait().unwrap().is_none(),
+            "unrelated child was signalled"
+        );
         unrelated.kill().unwrap();
         unrelated.wait().unwrap();
     }
@@ -1550,9 +1897,24 @@ fn external_program_cancellation_cleans_only_owned_group() {
 fn external_program_retains_failed_raw_bytes_and_output_caps() {
     let temp = Temp::new();
     for (name, script, stdout, stderr) in [
-        ("malformed-raw", "#!/bin/sh\nprintf not-json\nprintf diagnostic >&2\n", b"not-json".as_slice(), b"diagnostic".as_slice()),
-        ("nonzero-raw", "#!/bin/sh\nprintf partial\nprintf failed >&2\nexit 7\n", b"partial".as_slice(), b"failed".as_slice()),
-        ("spawn-raw", "#!/nonexistent-grill-fixture-interpreter\n", b"".as_slice(), b"".as_slice()),
+        (
+            "malformed-raw",
+            "#!/bin/sh\nprintf not-json\nprintf diagnostic >&2\n",
+            b"not-json".as_slice(),
+            b"diagnostic".as_slice(),
+        ),
+        (
+            "nonzero-raw",
+            "#!/bin/sh\nprintf partial\nprintf failed >&2\nexit 7\n",
+            b"partial".as_slice(),
+            b"failed".as_slice(),
+        ),
+        (
+            "spawn-raw",
+            "#!/nonexistent-grill-fixture-interpreter\n",
+            b"".as_slice(),
+            b"".as_slice(),
+        ),
     ] {
         let (mut command, out) = mb_program_command(&temp, name, script, 10000);
         assert_eq!(mb_code(&command.output().unwrap()), 1);
@@ -1562,20 +1924,37 @@ fn external_program_retains_failed_raw_bytes_and_output_caps() {
         assert_eq!(fs::read(out.join("stderr.bin")).unwrap(), stderr);
         // Corruption is checked even though failed captures have no artifact.json.
         fs::write(out.join("stderr.bin"), b"tampered").unwrap();
-        let inspected = cli().args(["microbench", "inspect"]).arg(&out).output().unwrap();
+        let inspected = cli()
+            .args(["microbench", "inspect"])
+            .arg(&out)
+            .output()
+            .unwrap();
         assert_eq!(mb_code(&inspected), 1);
         assert!(String::from_utf8_lossy(&inspected.stderr).contains("IdentityDrift"));
     }
     for (name, script, stream, cap) in [
-        ("stdout-cap", "#!/bin/sh\nhead -c 1048577 /dev/zero\n", "stdout", 1048576),
-        ("stderr-cap", "#!/bin/sh\nhead -c 65537 /dev/zero >&2\n", "stderr", 65536),
+        (
+            "stdout-cap",
+            "#!/bin/sh\nhead -c 1048577 /dev/zero\n",
+            "stdout",
+            1048576,
+        ),
+        (
+            "stderr-cap",
+            "#!/bin/sh\nhead -c 65537 /dev/zero >&2\n",
+            "stderr",
+            65536,
+        ),
     ] {
         let (mut command, out) = mb_program_command(&temp, name, script, 10000);
         assert_eq!(mb_code(&command.output().unwrap()), 1);
         let receipt = mb_raw_receipt(&out);
         assert_eq!(receipt["status"], "failed");
         assert_eq!(receipt["program_output"][format!("{stream}_bytes")], cap);
-        assert_eq!(receipt["program_output"][format!("{stream}_truncated")], true);
+        assert_eq!(
+            receipt["program_output"][format!("{stream}_truncated")],
+            true
+        );
     }
 }
 
@@ -1583,8 +1962,14 @@ fn external_program_retains_failed_raw_bytes_and_output_caps() {
 fn external_raw_evidence_integrity_gates_native_comparison() {
     let temp = Temp::new();
     let mut roles = Vec::new();
-    let revision = mb_reduce_plan("unused", START, 2)["revision"].as_str().unwrap().to_string();
-    for (role_index, role) in ["baseline", "candidate", "reference"].into_iter().enumerate() {
+    let revision = mb_reduce_plan("unused", START, 2)["revision"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    for (role_index, role) in ["baseline", "candidate", "reference"]
+        .into_iter()
+        .enumerate()
+    {
         let dir = mb_dir(&temp.path(role));
         for index in 0..3 {
             let slot = format!("{role}{index:02}");
@@ -1603,22 +1988,40 @@ fn external_raw_evidence_integrity_gates_native_comparison() {
     let receipt_path = member.join("receipt.json");
     let original = fs::read(&receipt_path).unwrap();
     let receipt: Value = serde_json::from_slice(&original).unwrap();
-    for mode in ["missing-manifest", "missing-stdout", "changed-stderr", "source-drift", "truncation", "changed-artifact"] {
+    for mode in [
+        "missing-manifest",
+        "missing-stdout",
+        "changed-stderr",
+        "source-drift",
+        "truncation",
+        "changed-artifact",
+    ] {
         let mut changed = receipt.clone();
         let stdout = fs::read(member.join("stdout.bin")).unwrap();
         let artifact = fs::read(member.join("artifact.json")).unwrap();
         match mode {
-            "missing-manifest" => { changed.as_object_mut().unwrap().remove("program_output"); }
-            "missing-stdout" => { fs::remove_file(member.join("stdout.bin")).unwrap(); }
-            "changed-stderr" => { fs::write(member.join("stderr.bin"), b"changed").unwrap(); }
-            "source-drift" => { changed["source_sha256"] = json!("0".repeat(64)); }
-            "truncation" => { changed["program_output"]["stdout_truncated"] = json!(true); }
+            "missing-manifest" => {
+                changed.as_object_mut().unwrap().remove("program_output");
+            }
+            "missing-stdout" => {
+                fs::remove_file(member.join("stdout.bin")).unwrap();
+            }
+            "changed-stderr" => {
+                fs::write(member.join("stderr.bin"), b"changed").unwrap();
+            }
+            "source-drift" => {
+                changed["source_sha256"] = json!("0".repeat(64));
+            }
+            "truncation" => {
+                changed["program_output"]["stdout_truncated"] = json!(true);
+            }
             "changed-artifact" => {
                 let mut value: Value = serde_json::from_slice(&artifact).unwrap();
                 value["samples"][0]["raw"] = json!("900");
                 value["samples"][0]["duration"]["numerator"] = json!(900);
                 mb_write(&member.join("artifact.json"), &value);
-                changed["artifact_sha256"] = json!(mb_sha(&fs::read(member.join("artifact.json")).unwrap()));
+                changed["artifact_sha256"] =
+                    json!(mb_sha(&fs::read(member.join("artifact.json")).unwrap()));
             }
             _ => unreachable!(),
         }
@@ -1640,20 +2043,32 @@ fn external_program_normal_exit_cleans_inherited_pipe_descendants() {
     let pid = temp.path("normal-child.pid");
     let body = temp.path("normal-body.json");
     let script = format!(
-        "#!/bin/sh\nsleep 2 &\nprintf '%s\\n' \"$!\" > '{}'\nhead -c 65536 /dev/zero >&2\ncat '{}'\n", pid.display(), body.display()
+        "#!/bin/sh\nsleep 2 &\nprintf '%s\\n' \"$!\" > '{}'\nhead -c 65536 /dev/zero >&2\ncat '{}'\n",
+        pid.display(),
+        body.display()
     );
     let (mut command, out) = mb_program_command(&temp, "normal", &script, 10000);
     let plan: Value = serde_json::from_slice(&fs::read(temp.path("normal.json")).unwrap()).unwrap();
-    mb_write(&body, &mb_reduce_artifact(&plan, &vec![vec![1000, 1000]; 5], 0));
+    mb_write(
+        &body,
+        &mb_reduce_artifact(&plan, &vec![vec![1000, 1000]; 5], 0),
+    );
     // Exact caps remain complete evidence; only excess bytes imply truncation.
     let mut bytes = fs::read(&body).unwrap();
     bytes.resize(1048576, b' ');
     fs::write(&body, &bytes).unwrap();
     let output = command.output().unwrap();
-    assert_eq!(mb_code(&output), 0, "{}", String::from_utf8_lossy(&output.stdout));
+    assert_eq!(
+        mb_code(&output),
+        0,
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
     let receipt = mb_raw_receipt(&out);
-    assert!(receipt["duration_ms"].as_u64().unwrap() < 1000,
-        "waited for a descendant's inherited pipe");
+    assert!(
+        receipt["duration_ms"].as_u64().unwrap() < 1000,
+        "waited for a descendant's inherited pipe"
+    );
     assert_eq!(receipt["status"], "captured");
     assert_eq!(receipt["program_output"]["stdout_bytes"], 1048576);
     assert_eq!(receipt["program_output"]["stderr_bytes"], 65536);

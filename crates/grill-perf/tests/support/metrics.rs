@@ -955,12 +955,7 @@ fn v2_body(state: &V2) -> Vec<u8> {
         V2_IDENTITY,
         state.epoch,
     );
-    v2_line(
-        &mut text,
-        V2_PREFIX_QUERIES,
-        V2_IDENTITY,
-        state.queries,
-    );
+    v2_line(&mut text, V2_PREFIX_QUERIES, V2_IDENTITY, state.queries);
     v2_marker(
         &mut text,
         "vllm:prefix_cache_queries_created",
@@ -974,7 +969,12 @@ fn v2_body(state: &V2) -> Vec<u8> {
         V2_IDENTITY,
         1_700_000_000,
     );
-    v2_line(&mut text, "vllm:prompt_tokens_total", V2_IDENTITY, state.total);
+    v2_line(
+        &mut text,
+        "vllm:prompt_tokens_total",
+        V2_IDENTITY,
+        state.total,
+    );
     v2_marker(
         &mut text,
         "vllm:prompt_tokens_created",
@@ -987,7 +987,12 @@ fn v2_body(state: &V2) -> Vec<u8> {
         ("external_kv_transfer", state.external),
     ] {
         let labels = format!("{V2_IDENTITY},source=\"{source}\"");
-        v2_line(&mut text, "vllm:prompt_tokens_by_source_total", &labels, value);
+        v2_line(
+            &mut text,
+            "vllm:prompt_tokens_by_source_total",
+            &labels,
+            value,
+        );
         v2_marker(
             &mut text,
             "vllm:prompt_tokens_by_source_created",
@@ -1100,9 +1105,7 @@ fn metrics_version_two_replays_cache_preemption_and_position_accounting_offline(
     assert_eq!(telemetry["config"]["version"], 2);
     assert_eq!(telemetry["budget"]["v2"]["snapshots"], 2);
     let summary = &telemetry["waves"][0];
-    assert_eq!(
-        summary["receipt"]["before"]["status"], "complete"
-    );
+    assert_eq!(summary["receipt"]["before"]["status"], "complete");
     assert_eq!(summary["cache"][0]["ratio"], 0.75);
     assert_eq!(summary["cache"][0]["queries"]["delta"], 40.0);
     assert_eq!(summary["cache"][0]["hits"]["delta"], 30.0);
@@ -1117,11 +1120,13 @@ fn metrics_version_two_replays_cache_preemption_and_position_accounting_offline(
     assert_eq!(summary["positions"][0]["exposure"]["delta"], 15.0);
     assert_eq!(summary["positions"][0]["acceptance"], 10.0 / 15.0);
     assert_eq!(summary["positions"][1]["acceptance"], 4.0 / 15.0);
-    assert!(summary["accounting"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .all(|check| check["status"] == "consistent"));
+    assert!(
+        summary["accounting"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|check| check["status"] == "consistent")
+    );
     assert_eq!(
         summary["caveats"][0],
         "server_wide_counters_are_not_attributed_to_this_workload"
@@ -1158,13 +1163,22 @@ fn metrics_version_two_reset_and_epoch_change_withhold_zero_preemption_evidence(
         }
     });
     successful(
-        &command_v2(&temp, &server, &metrics.endpoint, "reset", workload(1, 0, 1))
-            .output()
-            .unwrap(),
+        &command_v2(
+            &temp,
+            &server,
+            &metrics.endpoint,
+            "reset",
+            workload(1, 0, 1),
+        )
+        .output()
+        .unwrap(),
     );
     let output = report(&temp.path("reset"));
     let telemetry = &output["baseline_metrics"];
-    assert_eq!(telemetry["waves"][0]["preemptions"][0]["status"], "reset_observed");
+    assert_eq!(
+        telemetry["waves"][0]["preemptions"][0]["status"],
+        "reset_observed"
+    );
     assert!(telemetry["waves"][0]["preemptions"][0]["delta"].is_null());
     let preemptions = telemetry["acquisition"]["series"]
         .as_array()
@@ -1189,9 +1203,15 @@ fn metrics_version_two_reset_and_epoch_change_withhold_zero_preemption_evidence(
         }
     });
     successful(
-        &command_v2(&temp, &server, &metrics.endpoint, "epoch", workload(1, 0, 1))
-            .output()
-            .unwrap(),
+        &command_v2(
+            &temp,
+            &server,
+            &metrics.endpoint,
+            "epoch",
+            workload(1, 0, 1),
+        )
+        .output()
+        .unwrap(),
     );
     let output = report(&temp.path("epoch"));
     let preemptions = output["baseline_metrics"]["acquisition"]["series"]
@@ -1213,7 +1233,15 @@ fn metrics_version_two_credential_is_distinct_and_admitted_before_dispatch() {
     let metrics = MetricsServer::new(|_, _| panic!("rejected configuration dispatched"));
     for (name, args) in [
         ("version", vec!["--metrics-version", "3"]),
-        ("collision", vec!["--metrics-version", "2", "--metrics-auth-env", "GRILL_METRICS_TEST_KEY"]),
+        (
+            "collision",
+            vec![
+                "--metrics-version",
+                "2",
+                "--metrics-auth-env",
+                "GRILL_METRICS_TEST_KEY",
+            ],
+        ),
     ] {
         let mut cmd = command(
             &temp,
@@ -1222,7 +1250,8 @@ fn metrics_version_two_credential_is_distinct_and_admitted_before_dispatch() {
             &format!("reject-{name}"),
             workload(1, 0, 1),
         );
-        cmd.args(&args).env("GRILL_METRICS_TEST_KEY", "model-fixture-secret");
+        cmd.args(&args)
+            .env("GRILL_METRICS_TEST_KEY", "model-fixture-secret");
         assert_eq!(cmd.output().unwrap().status.code(), Some(1));
     }
     assert_eq!(server.count.load(Ordering::SeqCst), 0);
