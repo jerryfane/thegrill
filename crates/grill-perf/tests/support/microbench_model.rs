@@ -434,24 +434,7 @@ fn operation_admission_and_byte_definitions_are_unchanged() {
 }
 
 #[test]
-fn e3_bounds_are_recomputed_from_the_frozen_tolerances() {
-    let ref_max = exact_decimal("2.0").unwrap();
-    let e2 = [
-        exact_decimal("0.001000000").unwrap(),
-        exact_decimal("0.001000000").unwrap(),
-        exact_decimal("0.001000000").unwrap(),
-        exact_decimal("0.010000000").unwrap(),
-    ];
-    let bounds = e3_bounds(E3_TOLERANCE, ref_max, &e2).expect("bounds");
-    assert_eq!(display(bounds[0]), 0.0035);
-    assert_eq!(display(bounds[3]), 0.0151);
-    assert_eq!(display(bounds[4]), 0.16);
-    let tiny = e3_bounds(E3_TOLERANCE, exact_decimal("0.5").unwrap(), &e2).expect("bounds");
-    assert_eq!(display(tiny[4]), 0.15);
-}
-
-#[test]
-fn e3_parity_boundaries_are_exact() {
+fn e3_parity_matches_public_binary64_boundaries() {
     let mut artifact = device_artifact();
     // Exactly on the recomputed maxabs bound: 1.5 * 0.001 + 1e-3 * 2 = 0.0035.
     artifact.correctness = Correctness::E3Parity {
@@ -459,7 +442,7 @@ fn e3_parity_boundaries_are_exact() {
         finite: true,
         ref_max: "2.000000000".into(),
         e2: parity("0.001000000", "0.001000000", "0.001000000", "0.010000000"),
-        e3: parity("0.003500000", "0.003500000", "0.003500000", "0.015100000"),
+        e3: parity("0.003500000", "0.003500000", "0.003500000", "0.015099999999999999"),
         tolerance: E3_TOLERANCE,
         passed: true,
         outcome: CheckOutcome::Pass,
@@ -467,13 +450,21 @@ fn e3_parity_boundaries_are_exact() {
     };
     assert!(check_artifact(None, &artifact).clean());
 
+    // Python computes 1.5 * 0.01 + 0.0001 as 0.015099999999999999.
+    // The next binary64 value, 0.0151, must fail rather than pass a decimal-rational gate.
+    let Correctness::E3Parity { e3, .. } = &mut artifact.correctness else {
+        panic!("expected E3 fixture");
+    };
+    e3.nrmse = "0.0151".into();
+    assert!(check_artifact(None, &artifact).invalid.contains(&Reason::CorrectnessFailed));
+
     // One micro-unit beyond the maxabs bound fails.
     artifact.correctness = Correctness::E3Parity {
         reference: E3_REFERENCE_ID.into(),
         finite: true,
         ref_max: "2.000000000".into(),
         e2: parity("0.001000000", "0.001000000", "0.001000000", "0.010000000"),
-        e3: parity("0.003600000", "0.003500000", "0.003500000", "0.015100000"),
+        e3: parity("0.003600000", "0.003500000", "0.003500000", "0.015099999999999999"),
         tolerance: E3_TOLERANCE,
         passed: true,
         outcome: CheckOutcome::Pass,
@@ -490,8 +481,8 @@ fn e3_parity_boundaries_are_exact() {
         reference: E3_REFERENCE_ID.into(),
         finite: true,
         ref_max: "2.000000000".into(),
-        e2: parity("0.001000000", "0.001000000", "0.001000000", "0.010000000"),
-        e3: parity("0.160000000", "0.003500000", "0.003500000", "0.015100000"),
+        e2: parity("0.200000000", "0.001000000", "0.001000000", "0.010000000"),
+        e3: parity("0.160000000", "0.003500000", "0.003500000", "0.015099999999999999"),
         tolerance: E3_TOLERANCE,
         passed: true,
         outcome: CheckOutcome::Pass,
@@ -502,6 +493,25 @@ fn e3_parity_boundaries_are_exact() {
             .invalid
             .contains(&Reason::CorrectnessFailed)
     );
+    let Correctness::E3Parity { e3, .. } = &mut artifact.correctness else {
+        panic!("expected E3 fixture");
+    };
+    e3.maxabs = "0.15999999999999998".into();
+    assert!(check_artifact(None, &artifact).clean());
+}
+
+#[test]
+fn e3_parity_accepts_finite_source_precision() {
+    let mut artifact = device_artifact();
+    let Correctness::E3Parity { e2, e3, .. } = &mut artifact.correctness else {
+        panic!("expected E3 fixture");
+    };
+    // A normal binary64 nRMSE representation needs a decimal denominator wider
+    // than u64. It is still a finite source statistic, not a timing rational.
+    e2.nrmse = "0.00012345678901234567".into();
+    e3.nrmse = "0.00012345678901234567".into();
+    let findings = check_artifact(None, &artifact);
+    assert!(findings.clean(), "{:?}", findings.invalid);
 }
 
 #[test]

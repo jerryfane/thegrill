@@ -134,11 +134,13 @@ it launched.
 with the frozen tolerances (`E3_TOL_FACTOR = 1.5`, `E3_TOL_ABS_REL = 1e-3`,
 `E3_TOL_NRMSE_ABS = 1e-4`, coarse bound
 `max(0.15, 0.08 * max(1.0, ref_max))`). The collector recomputes every bound
-exactly from the retained reference maximum and E2 statistics and compares the
-E3 statistics against them, so a widened tolerance or an out-of-contract
-tolerance value is an identity error rather than a tolerated difference.
-Non-finite statistics fail closed; the coarse bound is strict, the others
-inclusive.
+using the pinned Python helper's binary64 arithmetic and operation order on the
+retained reference maximum and E2 statistics. These are observed float
+statistics, not rational timer samples. For example, its nRMSE boundary
+`1.5 * 0.01 + 0.0001` is `0.015099999999999999`; `0.0151` must fail.
+A widened tolerance is an identity error. Non-finite values, numeric underflow
+to zero, and overflowing bounds fail closed. The coarse bound is strict; the
+other bounds are inclusive. Duration samples still use exact rational arithmetic.
 
 The retained reference maximum is the **E2** value, because the pinned public
 `_assert_e3_within` derives both the per-key floor `1e-3 * e2["ref_max"]` and

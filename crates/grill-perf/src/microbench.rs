@@ -94,9 +94,7 @@ pub const MAX_ROLE_ACQUISITIONS: u32 = 64;
 /// Most observations a producer may retain.
 pub const MAX_OBSERVATIONS: usize = 32;
 
-/// Frozen revision of the pinned public E3 sources.
-pub const E3_SOURCE_REVISION: &str = "f906ee990596486e10ddbe381efa6f0e496f77e3";
-/// `tests/bench_e3_microbench.py` at that revision.
+/// `tests/bench_e3_microbench.py` at f906ee990596486e10ddbe381efa6f0e496f77e3.
 pub const E3_OPERATION_SOURCE_SHA256: &str =
     "f57e4fa6726b0110c44ce56b0b0968ba425e566ace6d89f2db3872aae13889ec";
 /// `tests/test_exl3_overlay.py` at that revision: `_err_stats`,
@@ -684,7 +682,6 @@ pub enum Reason {
     AdapterMismatch,
     IdentityDrift,
     ClockMismatch,
-    UnsynchronizedClock,
     IterationCountMismatch,
     SampleGridIncomplete,
     SamplePrecision,
@@ -696,13 +693,10 @@ pub enum Reason {
     DeadlineExceeded,
     AllowanceExceeded,
     TierFallback,
-    MissingThresholds,
-    MissingReference,
     RoleReuse,
     ObservedStartsOutOfOrder,
     ProvenanceMismatch,
     DeclaredStartsOutOfOrder,
-    StatisticUnavailable,
     ObservationMissing,
     ObservationDrift,
     CollectorMismatch,
@@ -850,9 +844,6 @@ fn multiply(a: Rational, b: Rational) -> Option<Rational> {
     )
 }
 
-fn scale(a: Rational, numerator: u64, denominator: u64) -> Option<Rational> {
-    multiply(a, Rational { numerator, denominator })
-}
 
 fn add(a: Rational, b: Rational) -> Option<Rational> {
     reduce(
@@ -1421,7 +1412,7 @@ pub fn check_study(study: &Study) -> Vec<Reason> {
 /// Structural then plan-relative validation. `plan` is absent only for
 /// standalone inspection of a retained artifact, where plan-dependent checks
 /// cannot run and are reported as such.
-pub fn check_artifact(plan: Option<&Plan>, artifact: &Artifact) -> Findings {
+fn check_artifact(plan: Option<&Plan>, artifact: &Artifact) -> Findings {
     let mut findings = Findings::new();
     if artifact.kind != KIND || artifact.version != VERSION {
         findings.invalidate(Reason::InvalidArtifact);
@@ -1712,18 +1703,18 @@ fn check_correctness(artifact: &Artifact, findings: &mut Findings) {
                 findings.invalidate(Reason::NonFinite);
             }
             let (Some(ref_max), Some(e2), Some(e3)) =
-                (exact_decimal(ref_max), stats(e2), stats(e3))
+                (parity_scalar(ref_max), stats(e2), stats(e3))
             else {
                 findings.invalidate(Reason::NonFinite);
                 return;
             };
             match e3_bounds(*tolerance, ref_max, &e2) {
                 Some(bounds) => {
-                    let violated = order(e3[0], bounds[0]).is_gt()
-                        || order(e3[1], bounds[1]).is_gt()
-                        || order(e3[2], bounds[2]).is_gt()
-                        || order(e3[3], bounds[3]).is_gt()
-                        || !order(e3[0], bounds[4]).is_lt();
+                    let violated = e3[0] > bounds[0]
+                        || e3[1] > bounds[1]
+                        || e3[2] > bounds[2]
+                        || e3[3] > bounds[3]
+                        || e3[0] >= bounds[4];
                     if violated || *outcome != CheckOutcome::Pass || !*passed {
                         findings.invalidate(Reason::CorrectnessFailed);
                     }
@@ -1734,51 +1725,41 @@ fn check_correctness(artifact: &Artifact, findings: &mut Findings) {
     }
 }
 
-fn stats(value: &ParityStats) -> Option<[Rational; 4]> {
+fn parity_scalar(text: &str) -> Option<f64> {
+    if text.len() > 64 || !text.as_bytes().first()?.is_ascii_digit() {
+        return None;
+    }
+    let value = text.parse::<f64>().ok()?;
+    // Refuse nonfinite values and nonzero decimal text that underflows to zero.
+    let underflow = value == 0.0 && text.bytes()
+        .take_while(|byte| !matches!(byte, b'e' | b'E'))
+        .any(|byte| matches!(byte, b'1'..=b'9'));
+    (value.is_finite() && !underflow).then_some(value)
+}
+
+fn stats(value: &ParityStats) -> Option<[f64; 4]> {
     Some([
-        exact_decimal(&value.maxabs)?,
-        exact_decimal(&value.per_token_max)?,
-        exact_decimal(&value.per_token_p99)?,
-        exact_decimal(&value.nrmse)?,
+        parity_scalar(&value.maxabs)?,
+        parity_scalar(&value.per_token_max)?,
+        parity_scalar(&value.per_token_p99)?,
+        parity_scalar(&value.nrmse)?,
     ])
 }
 
-/// Recompute the pinned `_assert_e3_within` bounds exactly. `e2` is the frozen
-/// E2-vs-loop reference statistics; the E3 values must fit these bounds, so a
-/// widened tolerance cannot appear in retained evidence.
-fn e3_bounds(tolerance: Tolerance, ref_max: Rational, e2: &[Rational; 4]) -> Option<[Rational; 5]> {
-    let floor = scale(ref_max, tolerance.abs_rel_micro(), 1_000_000)?;
-    let factor = Rational {
-        numerator: tolerance.factor_milli(),
-        denominator: 1000,
-    };
-    let mut bounds = [Rational {
-        numerator: 0,
-        denominator: 1,
-    }; 5];
+/// Reproduce the pinned Python helper's binary64 operations, in the same order.
+/// The retained strings are repr(float) statistics, not rational timer samples.
+fn e3_bounds(tolerance: Tolerance, ref_max: f64, e2: &[f64; 4]) -> Option<[f64; 5]> {
+    let floor = (tolerance.abs_rel_micro() as f64 / 1_000_000.0) * ref_max;
+    let factor = tolerance.factor_milli() as f64 / 1000.0;
+    let mut bounds = [0.0; 5];
     for index in 0..3 {
-        bounds[index] = add(multiply(e2[index], factor)?, floor)?;
+        bounds[index] = factor * e2[index] + floor;
     }
-    let nrmse_floor = Rational {
-        numerator: tolerance.nrmse_abs_micro(),
-        denominator: 1_000_000,
-    };
-    bounds[3] = add(multiply(e2[3], factor)?, nrmse_floor)?;
-    let one = Rational {
-        numerator: 1,
-        denominator: 1,
-    };
-    let coarse_abs = Rational {
-        numerator: tolerance.coarse_abs_milli(),
-        denominator: 1000,
-    };
-    let coarse_factor = scale(
-        larger(one, ref_max),
-        tolerance.coarse_factor_milli(),
-        1000,
-    )?;
-    bounds[4] = larger(coarse_abs, coarse_factor);
-    Some(bounds)
+    bounds[3] = factor * e2[3] + tolerance.nrmse_abs_micro() as f64 / 1_000_000.0;
+    bounds[4] = (tolerance.coarse_abs_milli() as f64 / 1000.0).max(
+        (tolerance.coarse_factor_milli() as f64 / 1000.0) * ref_max.max(1.0),
+    );
+    bounds.iter().all(|value| value.is_finite()).then_some(bounds)
 }
 
 fn reference_sum(bound: u32) -> u64 {
