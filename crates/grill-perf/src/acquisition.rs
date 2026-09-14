@@ -157,6 +157,13 @@ pub fn budget(workload: &Workload) -> Result<Budget> {
     Ok(b)
 }
 
+// Performance eligibility deliberately retains timings for incorrect answers.
+// Complete acquisitions additionally require every declared semantic check.
+fn step_eligible(wave: &Wave) -> bool {
+    wave.eligible
+        && wave.attempts.iter().all(|a| a.sequence.as_ref().is_none_or(crate::sequence::passed))
+}
+
 /// Complete, ordered required membership; controls and warmups cannot be dropped.
 pub fn whole_samples(plan: &Plan, waves: &[Option<Wave>], phase: Phase) -> Result<Vec<u64>> {
     let Some(Protocol::Conversation { repetitions, warmup_repetitions, .. }) = &plan.workload.acquisition else {
@@ -173,7 +180,7 @@ pub fn whole_sample(plan: &Plan, waves: &[Option<Wave>], identity: AcquisitionId
         let mut members = 0;
         for spec in plan.waves.iter().filter(|s| s.acquisition == Some(identity)) {
             let wave = waves.get(spec.index as usize).and_then(Option::as_ref).ok_or("missing acquisition step")?;
-            if !wave.eligible || wave.spec != *spec { return Err("unqualified acquisition step".into()); }
+            if !step_eligible(wave) || wave.spec != *spec { return Err("unqualified acquisition step".into()); }
             let clock = wave.acquisition_clock.as_ref().ok_or("missing acquisition clock")?;
             if clock.clock_id != wave.plan_sha256 || clock.started_offset_us < end || clock.settled_offset_us < clock.started_offset_us {
                 return Err("unordered acquisition clock".into());
@@ -303,7 +310,7 @@ pub fn report(run: &crate::evidence::Loaded) -> Option<Report> {
         if protocol.measured(step) { record.measured_steps.push(step.clone()); }
         match run.waves.get(spec.index as usize).and_then(Option::as_ref) {
             Some(wave) => {
-                if !wave.eligible { record.ineligible_steps.push(step.clone()); record.complete_eligible = false; }
+                if !step_eligible(wave) { record.ineligible_steps.push(step.clone()); record.complete_eligible = false; }
                 if let Some(clock) = &wave.acquisition_clock {
                     record.started_offset_us.get_or_insert(clock.started_offset_us);
                     record.settled_offset_us = Some(clock.settled_offset_us);

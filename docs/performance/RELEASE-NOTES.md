@@ -10,6 +10,8 @@
   serialization, tolerance boundaries, reason precedence or exit meanings.
 - Preserve all A/B/A2, warmup, output amount and cache eligibility requirements.
   Actual-hit latency never fabricates cold-prefill throughput.
+  Workload6 acquisition populations additionally require every declared semantic
+  check; timing-eligible but incorrect steps remain explicit failed members.
 - Add finite workload4 solo/mixed schedules, fixed offsets and first-generated
   triggers, named controls, actual overlap evidence and settle-before-publication
   cancellation. Preserve never-dispatched and failed peers.

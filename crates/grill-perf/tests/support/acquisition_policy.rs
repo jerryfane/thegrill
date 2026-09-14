@@ -187,6 +187,15 @@ fn acquisition_whole_membership_excludes_warmups_but_requires_all_controls() {
     run.waves[2].as_mut().unwrap().eligible=false;
     assert!(crate::acquisition::whole_samples(&run.plan,&run.waves,Phase::Measured).is_err());
     run.waves[2].as_mut().unwrap().eligible=true;
+    // A wrong final answer still has usable timing, but cannot count as a
+    // complete acquisition even when every required step is present.
+    run.waves[3].as_mut().unwrap().attempts[0].sequence = Some(crate::sequence::Check {
+        history: "h".into(), parent: None, correct: false, canonical_match: Some(false),
+        strict_match: None, error: None,
+    });
+    assert!(run.waves[3].as_ref().unwrap().eligible);
+    assert!(crate::acquisition::whole_samples(&run.plan,&run.waves,Phase::Measured).is_err());
+    run.waves[3].as_mut().unwrap().attempts[0].sequence = None;
     run.waves[3]=None;
     assert!(crate::acquisition::whole_samples(&run.plan,&run.waves,Phase::Measured).is_err());
 }
