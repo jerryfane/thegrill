@@ -1115,6 +1115,60 @@ fn group_compare_rejects_membership_axis_and_collector_drift() {
 }
 
 #[test]
+fn group_compare_uses_observed_chronology_and_rejects_mixed_provenance() {
+    let temp = Temp::new();
+    let study = mb_study(CPU_FIXTURE_REVISION, CPU_FIXTURE_REVISION, 3, 3);
+    let roles: Vec<PathBuf> = ["baseline", "candidate", "reference"]
+        .into_iter()
+        .enumerate()
+        .map(|(role_index, role)| {
+            let revisions: Vec<_> = (0..3)
+                .map(|index| (CPU_FIXTURE_REVISION, START + role_index as u64 * 60_000 + index * 1000, 1000))
+                .collect();
+            let path = mb_cpu_role(&temp, role, role, &revisions);
+            for index in 0..3 {
+                let receipt_path = path.join(format!("{role}{index:02}/receipt.json"));
+                let mut receipt: Value = serde_json::from_slice(&fs::read(&receipt_path).unwrap()).unwrap();
+                let started = receipt["started_unix_ms"].as_u64().unwrap() + 1_000_000;
+                receipt["started_unix_ms"] = json!(started);
+                receipt["observation_unix_ms"] = json!(started + 100);
+                receipt["duration_ms"] = json!(100);
+                mb_write(&receipt_path, &receipt);
+            }
+            path
+        })
+        .collect();
+    let (code, report, _) = mb_compare(&temp, "ordered-observation", &study, &roles[0], &roles[1], &roles[2]);
+    assert_eq!(code, 0, "{report}");
+
+    // Declarations remain grouped and precede every observation. Only the actual
+    // candidate interval overlaps baseline, so declarations cannot hide it.
+    let receipt_path = roles[1].join("candidate00/receipt.json");
+    let receipt_bytes = fs::read(&receipt_path).unwrap();
+    let mut receipt: Value = serde_json::from_slice(&receipt_bytes).unwrap();
+    receipt["started_unix_ms"] = json!(START + 1_001_500);
+    receipt["observation_unix_ms"] = json!(START + 1_001_600);
+    mb_write(&receipt_path, &receipt);
+    let (code, report, _) = mb_compare(&temp, "interleaved-observation", &study, &roles[0], &roles[1], &roles[2]);
+    assert_eq!(code, 1, "{report}");
+    assert!(mb_has(&report, "reason_codes", "OBSERVED_STARTS_OUT_OF_ORDER"), "{report}");
+    fs::write(&receipt_path, receipt_bytes).unwrap();
+
+    // One honestly imported member cannot inherit the other members' native claim.
+    let artifact_path = roles[1].join("candidate00/artifact.json");
+    let mut artifact: Value = serde_json::from_slice(&fs::read(&artifact_path).unwrap()).unwrap();
+    artifact["provenance"] = json!("imported");
+    mb_write(&artifact_path, &artifact);
+    let mut receipt: Value = serde_json::from_slice(&fs::read(&receipt_path).unwrap()).unwrap();
+    receipt["provenance"] = json!("imported");
+    receipt["artifact_sha256"] = json!(mb_sha(&fs::read(&artifact_path).unwrap()));
+    mb_write(&receipt_path, &receipt);
+    let (code, report, _) = mb_compare(&temp, "mixed-provenance", &study, &roles[0], &roles[1], &roles[2]);
+    assert_eq!(code, 1, "{report}");
+    assert!(mb_has(&report, "reason_codes", "PROVENANCE_MISMATCH"), "{report}");
+}
+
+#[test]
 fn collective_world_samples_use_per_repetition_maxima() {
     let temp = Temp::new();
     let plan = mb_reduce_plan("a01", START, 2);

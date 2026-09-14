@@ -3345,14 +3345,16 @@ fn finish(verdict: Verdict) -> Decision {
         .acquisitions
         .iter()
         .find_map(|view| view.provenance);
-    let scope = match (provenance, adapter) {
+    let scope = if reason_codes.contains(&Reason::ProvenanceMismatch) {
+        "Mixed-provenance evidence: no uniform native or imported comparison scope exists.".into()
+    } else { match (provenance, adapter) {
         (Some(Provenance::NativeObserved), Some(adapter)) => {
             scope_sentence(Provenance::NativeObserved, adapter)
         }
         (Some(Provenance::Imported), Some(adapter)) => scope_sentence(Provenance::Imported, adapter),
         (Some(Provenance::Declared), Some(adapter)) => scope_sentence(Provenance::Declared, adapter),
         _ => "Unavailable evidence: the study declaration or the baseline acquisitions could not be loaded, so no comparison scope exists.".into(),
-    };
+    }};
     let minimum = study
         .as_ref()
         .map_or(MIN_ROLE_ACQUISITIONS, |summary| summary.minimum_acquisitions);

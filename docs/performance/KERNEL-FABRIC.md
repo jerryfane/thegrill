@@ -375,106 +375,98 @@ every identity field in them is a placeholder:
 
 | Document | Placeholder | Becomes observed when |
 |---|---|---|
-| `microbench-cpu-sum-u64.json` | `revision` all zeros | the first CPU capture records the collector's actual descriptor hash |
+| `microbench-cpu-sum-u64.json` | `revision` all zeros | derive the expected descriptor hash from the collector binary; capture checks it before timing |
 | `microbench-exl3-e3-grouped.json`, `microbench-nccl-allreduce-sum.json` | `revision` all zeros | the first device capture records the loaded runtime descriptor hash |
 | `microbench-study-cpu.json` | both `revision_axis` entries all zeros, `started_unix_ms` fixed | the smoke writes its study from the observed hash and a real clock reading |
 | all plans | `acquisition.id`, `acquisition.started_unix_ms` | the smoke writes one plan per acquisition |
 
 `program_sha256` and the adapter's own `sources` entry are **not** placeholders:
 they are the shipped adapter's real hash and are re-pinned whenever the adapter
-changes. A plan whose `revision` does not match the observed descriptor is not
-refused at capture time — the capture retains the actual revision and the
-comparison rejects the mismatch.
+changes. Native CPU capture rejects a mismatching expected revision before
+allocation or timing; a placeholder capture cannot discover that identity.
+External captures retain observed runtime identity for subsequent validation.
 
 ## CPU reference smoke plan
 
-Authoritative CPU exercise, to be run by the integrator on a stable head that
-includes this slice (never during concurrent writers). It is written to be
-executed as-is: it observes the implementation hash, builds every plan and the
-study from that observation and from the real clock, runs all baseline
-acquisitions, then all candidate, then all reference (matching the shipped slot
-ids `a01..a03`, `b01..b03`, `r01..r03`), and never invents a date or a revision
-as observed chronology.
+Run on a stable build, without concurrent writers. Derive the CPU implementation
+identity from that binary, write every plan and the study before execution,
+then acquire all A, all B, and all A2. Actual receipt intervals—not declaration
+timestamps—prove execution order. Keep the output directory even on failure.
 
 ```sh
-cd "<checkout>"
-cargo test -p grill-perf --locked --bin grill-perf microbench_model -- --test-threads=1
-cargo test -p grill-perf --locked --test cli microbench -- --test-threads=1
+cargo build --offline -p grill-perf
+python3 - target/debug/grill-perf /path/to/new-private-smoke-directory <<'PY'
+import hashlib, json, os, pathlib, subprocess, sys, time
 
-cargo build --workspace --locked
-GRILL=target/debug/grill-perf
-TMP=$(mktemp -d)
-
-# 1. Observe the implementation descriptor. The shipped plan carries a
-#    placeholder revision; the mismatch is retained, the artifact records the
-#    hash this build actually observed, and this throwaway capture is NOT a
-#    study member.
-mkdir -p "$TMP/observe"
-"$GRILL" microbench capture --adapter cpu-sum-u64-reference \
-  --plan crates/grill-perf/examples/microbench-cpu-sum-u64.json \
-  --out "$TMP/observe/a01" --json
-REVISION=$(python3 -c "import json;print(json.load(open('$TMP/observe/a01/artifact.json'))['revision'])")
-
-# 2. Write every plan AND the study prospectively, before any measured
-#    acquisition runs, from the observed revision and a real clock reading.
-plan() { # slot started_ms
-  python3 - "$1" "$2" "$REVISION" "$TMP" <<'PY'
-import json, sys
-slot, started, revision, out = sys.argv[1:5]
-plan = json.load(open("crates/grill-perf/examples/microbench-cpu-sum-u64.json"))
-plan["revision"] = revision
-plan["acquisition"] = {"id": slot, "started_unix_ms": int(started)}
-json.dump(plan, open(f"{out}/{slot}.json", "w"), indent=2)
-PY
-}
-study() { # first_declared_ms
-  python3 - "$REVISION" "$TMP" "$1" <<'PY'
-import json, sys
-revision, out, started = sys.argv[1:4]
-study = json.load(open("crates/grill-perf/examples/microbench-study-cpu.json"))
-# The same observed descriptor on every arm: this build's CPU code is one
-# program, so the smoke is an A/A control, reported as a control, not as a v2.
+os.umask(0o077)
+binary = pathlib.Path(sys.argv[1]).resolve(strict=True)
+out = pathlib.Path(sys.argv[2]).resolve()
+out.mkdir(mode=0o700)  # Must be fresh; never replace a failed run.
+collector = hashlib.sha256(binary.read_bytes()).hexdigest()
+descriptor = "cpu-sum-u64-reference-v1;collector:" + collector
+revision = hashlib.sha256(descriptor.encode("ascii")).hexdigest()
+examples = pathlib.Path("crates/grill-perf/examples")
+template = json.loads((examples / "microbench-cpu-sum-u64.json").read_text())
+study = json.loads((examples / "microbench-study-cpu.json").read_text())
+declared = time.time_ns() // 1_000_000
+study["started_unix_ms"] = declared
 study["revision_axis"] = {"baseline": revision, "candidate": revision}
-study["started_unix_ms"] = int(started)
-json.dump(study, open(f"{out}/study.json", "w"), indent=2)
+for role, slots in study["roles"].items():
+    (out / role).mkdir()
+    for slot in slots:
+        plan = dict(template, revision=revision,
+                    acquisition={"id": slot, "started_unix_ms": declared})
+        (out / (slot + ".json")).write_text(json.dumps(plan, indent=2) + "\n")
+(out / "study.json").write_text(json.dumps(study, indent=2) + "\n")
+commands = []
+
+def invoke(name, args, allowed=(0,)):
+    command = [str(binary), "microbench", *map(str, args), "--json"]
+    commands.append(command)
+    (out / "commands.json").write_text(json.dumps(commands, indent=2))
+    result = subprocess.run(command, capture_output=True, timeout=30)
+    (out / (name + ".stdout.json")).write_bytes(result.stdout)
+    (out / (name + ".stderr.txt")).write_bytes(result.stderr)
+    if result.returncode not in allowed:
+        raise RuntimeError(f"{name}: exit {result.returncode}; evidence retained in {out}")
+    return json.loads(result.stdout)
+
+for role in ("baseline", "candidate", "reference"):
+    for slot in study["roles"][role]:
+        destination = out / role / slot
+        captured = invoke(slot + "-capture", [
+            "capture", "--adapter", "cpu-sum-u64-reference",
+            "--plan", out / (slot + ".json"), "--out", destination])
+        inspected = invoke(slot + "-inspect", ["inspect", destination])
+        assert captured["provenance"] == inspected["provenance"] == "native_observed"
+        assert captured["samples"] == inspected["samples"] == 5
+        assert inspected["plan_verified"] and not inspected["invalid"]
+        artifact = json.loads((destination / "artifact.json").read_text())
+        assert artifact["kernel_revision"] == descriptor
+        assert artifact["revision"] == revision
+        for sample in artifact["samples"]:
+            assert sample["duration"] == {"numerator": int(sample["raw"]), "denominator": 1}
+
+report = invoke("comparison", [
+    "compare", "--study", out / "study.json", "--baseline", out / "baseline",
+    "--candidate", out / "candidate", "--reference", out / "reference"], (0, 2, 3))
+assert all(group["complete"] == 3 for group in report["roles"].values())
+assert report["axis"] == "same-implementation-control"
+print(json.dumps({"result": "CPU_PROTOCOL_SMOKE_PASSED", "decision": report["decision"],
+                  "collector_sha256": collector, "evidence": str(out),
+                  "device_or_serving_qualification": False}))
 PY
-}
-DECLARED=$(date +%s%3N)
-for slot in a01 a02 a03 b01 b02 b03 r01 r02 r03; do plan "$slot" "$DECLARED"; done
-study "$DECLARED"
-
-# 3. Run all baseline, then all candidate, then all reference. Each slot gets
-#    its own real start reading, so declared starts are strictly increasing in
-#    the declared order and the arms cannot interleave. Failures are retained:
-#    inspect every directory and keep whatever it recorded.
-for arm in baseline candidate reference; do
-  mkdir -p "$TMP/$arm"
-  for index in 01 02 03; do
-    case "$arm" in baseline) slot="a$index";; candidate) slot="b$index";; reference) slot="r$index";; esac
-    NOW=$(date +%s%3N)
-    plan "$slot" "$NOW"
-    "$GRILL" microbench capture --adapter cpu-sum-u64-reference \
-      --plan "$TMP/$slot.json" --out "$TMP/$arm/$slot" --json || true
-    "$GRILL" microbench inspect "$TMP/$arm/$slot" --json || true
-    sleep 0.05   # real time must pass, so the next declared start is greater
-  done
-done
-
-# 4. Compare. A mismatch between the study's expected revision and any
-#    artifact's observed revision is rejected here by the collector.
-"$GRILL" microbench compare --study "$TMP/study.json" \
-  --baseline "$TMP/baseline" --candidate "$TMP/candidate" --reference "$TMP/reference" --json
 ```
 
 Each capture runs a real `sum_u64` reduction over `0..4096` with warmups 2 and
 five measured iterations, records exact nanosecond rational samples on the
 process monotonic clock, and validates the exact `n*(n-1)/2` reference. Because
-this build's descriptor is the same for every arm, the smoke is an A/A control:
-a PASS says the three arms agree within the declared envelope, which is exactly
-what an unmodified-code control should say, and it is not evidence of a kernel
-change. A device or kernel change is exercised only in a separately authorized
-window, where the observed descriptor changes and the plan's expected revision
-is updated from the observation.
+this build's descriptor is the same for every arm, the smoke is an A/A control.
+A PASS means agreement within the declared envelope; timing variability can
+instead produce INCONCLUSIVE or REGRESSION. The smoke reports that decision
+unchanged, without retries or wider thresholds. It is not evidence of a kernel
+change. Device or kernel changes require a separately authorized window and
+plans whose expected revisions match the observed runtime descriptors.
 
 Device adapters are *not* exercised by this plan; the collective launch contract
 is above, and the E3 adapter is launched the same way as a single explicit
