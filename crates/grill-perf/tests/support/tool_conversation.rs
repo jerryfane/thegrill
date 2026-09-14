@@ -119,7 +119,11 @@ fn fixture(fault: Option<&'static str>) -> Server {
             if !delta(
                 &mut stream,
                 json!({"tool_calls":[{"index":0,"function":{"arguments":arguments}}]}),
-                None,
+                if fault == Some("named-stop") {
+                    Some("stop")
+                } else {
+                    None
+                },
             ) {
                 return;
             }
@@ -141,7 +145,12 @@ fn fixture(fault: Option<&'static str>) -> Server {
             {
                 return;
             }
-            if !delta(&mut stream, json!({}), Some("tool_calls")) {
+            let finish = if fault == Some("length") {
+                "length"
+            } else {
+                "tool_calls"
+            };
+            if fault != Some("named-stop") && !delta(&mut stream, json!({}), Some(finish)) {
                 return;
             }
         }
@@ -168,7 +177,7 @@ fn fixture(fault: Option<&'static str>) -> Server {
 #[test]
 fn tool_conversation_streams_fragments_links_actual_history_and_replays() {
     let temp = Temp::new();
-    let server = fixture(None);
+    let server = fixture(Some("named-stop"));
     let result = decoded(&run(&temp, &server, &workload()));
     assert_eq!(result["status"], "completed", "{result}");
     assert_eq!(server.count.load(Ordering::SeqCst), 2);
@@ -207,6 +216,7 @@ fn tool_conversation_invalid_and_partial_streams_stop_without_followup() {
         "duplicate-id",
         "trailing",
         "missing-done",
+        "length",
     ] {
         let temp = Temp::new();
         let server = fixture(Some(fault));

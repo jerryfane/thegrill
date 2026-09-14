@@ -49,6 +49,18 @@ bytes rather than echoed). No declared implementation pin is echoed back as
 observed kernel provenance, and none of these observations is authenticated
 execution evidence.
 
+Allowance admission. Before the torch import and before any device work, the
+declared allowance must already cover the frozen cell's known minimum: the
+projection work `tokens * topk * 3 * 2 * hidden * intermediate` for the required
+warmups, the measured iterations and the three parity passes, plus the fp16
+activation payload `tokens * hidden * 2` the timed kernel cannot run without.
+The retained `execution.work_units` is that same derivation, so the accounting
+cannot be understated relative to what was admitted. The retained
+`execution.memory_bytes` is the process-local PyTorch allocator peak
+(`memory_allocated` / `max_memory_allocated`): it is never total device, driver
+or NVIDIA memory, it says nothing about non-PyTorch workspaces such as the CUDA
+context or allocator caches, and it is not a physical OOM bound.
+
 Usage (inside a separately authorized device window only):
 
     grill-perf microbench capture \
@@ -125,6 +137,18 @@ FROZEN_OPERATION = {
 
 WARMUPS = 2
 ITERATIONS = 5
+
+# Passes of the pinned `apply_exl3_experts` entry point the cell always runs
+# before timing starts: once as the E2 kernel reference and twice as the E3
+# candidate and its repeat. The pinned Python reference loop is a different
+# implementation and is not counted as grouped-expert work.
+PARITY_PASSES = 3
+# Projections per grouped expert (gate, up, down) and the two elementary
+# operations one multiply-accumulate is counted as, matching this cell's
+# existing work definition.
+EXPERT_PROJECTIONS = 3
+FACTOR_PER_MULTIPLY_ACCUMULATE = 2
+FP16_BYTES = 2
 
 ARTIFACT_KEYS = {
     "kind",
@@ -272,6 +296,35 @@ def sha256_file(path: str) -> str:
         for block in iter(lambda: handle.read(1 << 20), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def minimum_allowance(operation: dict) -> tuple[int, int]:
+    """Sound minimum `(work_units, memory_bytes)` for the frozen E3 cell.
+
+    Mirrors `microbench::minimum_allowance` in
+    crates/grill-perf/src/microbench.rs; both sides derive the same numbers, or
+    one could admit a plan the other refuses.
+
+    `work_units` counts one multiply-accumulate as two, as this cell's existing
+    definition does, over the projection shape
+    `tokens * topk * 3 * 2 * hidden * intermediate`, for every pass the cell
+    executes: the required warmups, the measured iterations and the three
+    parity passes. `memory_bytes` is the fp16 activation payload
+    `tokens * hidden * 2` the timed kernel cannot run without — a minimum, not
+    the retained observation, which stays the larger process-local PyTorch
+    allocator peak and is never total device, driver or NVIDIA memory.
+    """
+    per_pass = (
+        int(operation["tokens"])
+        * int(operation["topk"])
+        * EXPERT_PROJECTIONS
+        * FACTOR_PER_MULTIPLY_ACCUMULATE
+        * int(operation["hidden"])
+        * int(operation["intermediate"])
+    )
+    work_units = per_pass * (WARMUPS + ITERATIONS + PARITY_PASSES)
+    memory_bytes = int(operation["tokens"]) * int(operation["hidden"]) * FP16_BYTES
+    return work_units, memory_bytes
 
 
 def sample_duration(value: object) -> tuple[str, dict] | str:
@@ -451,6 +504,20 @@ def check_plan(plan: dict) -> None:
     for key in ("work_units", "memory_bytes", "deadline_ms"):
         if not isinstance(allowance.get(key), int) or allowance[key] <= 0:
             abort(f"plan allowance {key} must be a positive integer")
+    # Admission happens before the torch import and before any device or window
+    # is opened: a declared allowance below the frozen cell's known minimum is
+    # not an allowance, and it must not be discovered after the kernel ran.
+    minimum_work, minimum_memory = minimum_allowance(FROZEN_OPERATION)
+    if allowance["work_units"] < minimum_work:
+        abort(
+            f"plan allowance work_units {allowance['work_units']} is below the frozen E3 cell "
+            f"minimum {minimum_work}"
+        )
+    if allowance["memory_bytes"] < minimum_memory:
+        abort(
+            f"plan allowance memory_bytes {allowance['memory_bytes']} is below the frozen E3 "
+            f"activation payload floor {minimum_memory}"
+        )
     revision = plan.get("revision")
     if not isinstance(revision, str) or len(revision) != 64 or not all(
         character in "0123456789abcdef" for character in revision
@@ -716,15 +783,21 @@ def main() -> int:
         torch.cuda.synchronize()
         peak_bytes = torch.cuda.max_memory_allocated()
 
-        work_units = (
-            FROZEN_OPERATION["tokens"]
-            * FROZEN_OPERATION["topk"]
-            * 3
-            * 2
-            * FROZEN_OPERATION["hidden"]
-            * FROZEN_OPERATION["intermediate"]
-        )
+        work_units, minimum_memory = minimum_allowance(FROZEN_OPERATION)
         memory_bytes = int(max(peak_bytes, before_bytes))
+        if memory_bytes < minimum_memory:
+            # The observed allocator peak cannot be smaller than the activation
+            # the timed kernel read; an understated observation is retained as a
+            # failure instead of being emitted as if it were sufficient.
+            failures.append(
+                {
+                    "kind": "adapter-error",
+                    "detail": (
+                        f"observed process-local allocator peak {memory_bytes} is below the frozen "
+                        f"activation payload floor {minimum_memory}"
+                    ),
+                }
+            )
         # The pinned source token for a grouped E3 fallback is the literal
         # "grouped"; "e3-grouped" is only this collector's normalized spelling.
         normalized_fallback = normalize_fallback(raw_fallback) if raw_fallback else None

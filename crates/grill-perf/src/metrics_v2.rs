@@ -344,6 +344,10 @@ pub enum Status {
     Unsupported,
     Deadline,
     BodyLimit,
+    /// One admitted scrape crossed the cooperative cumulative overhead limit.
+    /// Actual bytes/timing remain retained; this and later snapshots cannot
+    /// establish complete telemetry coverage.
+    OverheadLimit,
     SkippedBudget,
     /// The acquisition was cancelled while this scrape was in flight. Bounded
     /// partial raw bytes are retained and are never continuity evidence.
@@ -753,7 +757,7 @@ pub async fn scrape(
     if snapshot.status != Status::Complete {
         snapshot.series = 0;
     }
-    budget.retain_v2(config, &snapshot)?;
+    budget.finish_v2(config, &mut snapshot)?;
     Ok(snapshot)
 }
 
@@ -2310,16 +2314,65 @@ mod tests {
         let mut valid = snapshot(0, 10);
         valid.series = 7;
         assert!(budget.retain_v2(&config, &valid).is_ok());
-        let consumption = budget.v2.unwrap();
-        assert_eq!(consumption.snapshots, 1);
-        assert_eq!(consumption.series, 7);
-        assert_eq!(consumption.overhead_us, 0);
-        assert_eq!(budget.requests, 1);
-        assert_eq!(budget.charged_us, 10);
 
         // A cancelled scrape retains bounded partial bytes but never counts as
         // complete series evidence.
         assert!(budget.retain_v2(&config, &incomplete).is_err());
+    }
+
+    #[test]
+    fn overhead_boundary_is_retained_without_favorable_telemetry_or_more_scrapes() {
+        let config = config();
+        let mut first = snapshot(0, config.max_overhead_us);
+        first.scrape_us = 2;
+        first.overhead_us = first.duration_us - first.scrape_us;
+        for (overhead, expected) in [(2, Status::Complete), (3, Status::OverheadLimit)] {
+            let mut budget = Budget::default();
+            budget.retain_v2(&config, &first).unwrap();
+            let mut last = snapshot(first.duration_us + 1, overhead + 1);
+            last.scrape_us = 1;
+            last.overhead_us = overhead;
+            let original_duration = last.duration_us;
+            let original_bytes = last.raw_bytes;
+            let original_hash = last.raw_sha256.clone();
+            let mut replay = Budget::default();
+            replay.retain_v2(&config, &first).unwrap();
+            if expected == Status::OverheadLimit {
+                // A forged complete snapshot cannot conceal the overrun.
+                assert!(replay.retain_v2(&config, &last).is_err());
+            }
+            budget.finish_v2(&config, &mut last).unwrap();
+            assert_eq!(last.status, expected);
+            assert_eq!(last.duration_us, original_duration);
+            assert_eq!(last.overhead_us, overhead);
+            assert_eq!(
+                (last.raw_bytes, &last.raw_sha256),
+                (original_bytes, &original_hash)
+            );
+            if expected == Status::OverheadLimit {
+                assert_eq!(last.series, 0);
+                assert!(last.error.is_some());
+            }
+            replay.retain_v2(&config, &last).unwrap();
+            assert!(budget.exhausted_v2(&config));
+            assert!(replay.exhausted_v2(&config));
+            let skipped = Snapshot {
+                started_unix_ms: last.started_unix_ms,
+                scrape_offset_us: last.scrape_offset_us + last.duration_us,
+                scrape_us: 0,
+                duration_us: 0,
+                charged_us: 0,
+                overhead_us: 0,
+                allowance_us: 0,
+                status: Status::SkippedBudget,
+                error: Some("whole-run telemetry budget exhausted".into()),
+                http_status: None,
+                raw_bytes: 0,
+                raw_sha256: evidence::digest(b""),
+                series: 0,
+            };
+            replay.retain_v2(&config, &skipped).unwrap();
+        }
     }
 
     #[test]

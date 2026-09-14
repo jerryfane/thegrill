@@ -1077,6 +1077,93 @@ pub fn frozen_iterations(adapter: AdapterId) -> u32 {
     }
 }
 
+/// Passes of the pinned `apply_exl3_experts` entry point every E3 acquisition
+/// executes before timing starts: once as the E2 kernel reference and twice as
+/// the E3 candidate and its repeat. The pinned Python reference loop is a
+/// different implementation and is not counted as grouped-expert work.
+pub const E3_PARITY_PASSES: u32 = 3;
+
+/// Sound minimum `(work_units, memory_bytes)` for the frozen operation of one
+/// adapter, derived from the declared operation and the pinned per-adapter
+/// warmup and iteration counts, and from nothing else. Both producers mirror
+/// this derivation and refuse a declared allowance below it before they import
+/// a device runtime, while `check_artifact` refuses retained accounting below
+/// it: an under-budget cell is rejected instead of being admitted and failing
+/// only after the work has already run.
+///
+/// Units are fixed per adapter and are never converted between adapters:
+///
+/// * `work_units` counts one elementary operation of the measured cell: one
+///   `u64` add per element per repetition for the CPU reference, one reduced
+///   `int64` element per participating rank per repetition for the collective
+///   (the `world` factor is why one rank-scoped number already covers every
+///   rank), and, for the E3 cell, one multiply-accumulate counted as two over
+///   the projection shape `tokens * topk * 3 * 2 * hidden * intermediate`.
+///   Required warmups and the parity passes the cell must execute are included.
+/// * `memory_bytes` counts PyTorch tensor payloads only — never device, driver,
+///   NCCL or CUDA-context memory, and never a reserved or physical bound: the
+///   `u64` vector, the five live collective payloads plus the boolean payload
+///   of the exactness comparison, or the fp16 activation payload the timed E3
+///   kernel cannot run without. The retained E3 observation stays the larger
+///   process-local allocator peak, which is itself only PyTorch-visible memory.
+pub fn minimum_allowance(adapter: AdapterId, operation: &Operation) -> Option<(u64, u64)> {
+    let repetitions =
+        u64::from(frozen_warmups(adapter)).checked_add(u64::from(frozen_iterations(adapter)))?;
+    match (adapter, operation) {
+        (AdapterId::CpuSumU64Reference, Operation::SumU64 { bound, .. }) => Some((
+            u64::from(*bound).checked_mul(repetitions)?,
+            u64::from(*bound).checked_mul(8)?,
+        )),
+        (
+            AdapterId::NcclAllreduceSum,
+            Operation::AllReduce {
+                dtype,
+                numel,
+                world,
+                ..
+            },
+        ) => {
+            // Five live per-rank element payloads plus the one boolean element
+            // payload the exactness comparison allocates; scalar or
+            // library-internal temporaries below one element payload, and all
+            // non-PyTorch memory, are outside this accounting.
+            let payloads = dtype.bytes().checked_mul(5)?.checked_add(1)?;
+            Some((
+                u64::from(*world)
+                    .checked_mul(u64::from(*numel))?
+                    .checked_mul(repetitions)?,
+                u64::from(*numel).checked_mul(payloads)?,
+            ))
+        }
+        (
+            AdapterId::Exl3E3Grouped,
+            Operation::Exl3Experts {
+                hidden,
+                intermediate,
+                topk,
+                tokens,
+                dtype,
+                ..
+            },
+        ) => {
+            let per_pass = u64::from(*tokens)
+                .checked_mul(u64::from(*topk))?
+                .checked_mul(3)?
+                .checked_mul(2)?
+                .checked_mul(u64::from(*hidden))?
+                .checked_mul(u64::from(*intermediate))?;
+            let passes = repetitions.checked_add(u64::from(E3_PARITY_PASSES))?;
+            Some((
+                per_pass.checked_mul(passes)?,
+                u64::from(*tokens)
+                    .checked_mul(u64::from(*hidden))?
+                    .checked_mul(dtype.bytes())?,
+            ))
+        }
+        _ => None,
+    }
+}
+
 /// Required observation names, and the pinned values Grill re-checks against
 /// the frozen operation. A producer that reports a number it did not use is
 /// caught here; a producer that reports nothing required is rejected.
@@ -1360,21 +1447,19 @@ pub fn check_plan(plan: &Plan) -> Vec<Reason> {
             push(&mut reasons, Reason::InvalidPlan);
         }
     }
+    // A positive allowance is not enough for any adapter: the declaration must
+    // already cover the frozen cell's known minimum work and memory, or a
+    // device plan is admitted on a token budget and fails only after the work
+    // has run.
+    match minimum_allowance(plan.adapter, &plan.operation) {
+        Some((work, memory))
+            if work <= plan.allowance.work_units && memory <= plan.allowance.memory_bytes => {}
+        _ => push(&mut reasons, Reason::AllowanceExceeded),
+    }
     match plan.adapter {
         AdapterId::CpuSumU64Reference => {
             if plan.program_sha256.is_some() || !plan.sources.is_empty() {
                 push(&mut reasons, Reason::InvalidPlan);
-            }
-            if let Operation::SumU64 { bound, .. } = &plan.operation {
-                let work = u64::from(*bound)
-                    .checked_mul(u64::from(plan.warmups) + u64::from(plan.iterations));
-                let memory = u64::from(*bound).checked_mul(8);
-                match (work, memory) {
-                    (Some(work), Some(memory))
-                        if work <= plan.allowance.work_units
-                            && memory <= plan.allowance.memory_bytes => {}
-                    _ => push(&mut reasons, Reason::AllowanceExceeded),
-                }
             }
         }
         AdapterId::Exl3E3Grouped => {
@@ -1526,6 +1611,16 @@ fn check_artifact(plan: Option<&Plan>, artifact: &Artifact) -> Findings {
     }
     if artifact.execution.iterations != frozen_iterations(artifact.adapter) {
         findings.invalidate(Reason::IterationCountMismatch);
+    }
+    // Retained accounting cannot be understated: it must at least cover the
+    // frozen cell's known minimum, or the artifact claims to have run the
+    // operation with less work or fewer live payloads than the operation can
+    // occupy. The reported figures are re-checked against the allowance below.
+    match minimum_allowance(artifact.adapter, &artifact.operation) {
+        Some((work, memory))
+            if artifact.execution.work_units >= work
+                && artifact.execution.memory_bytes >= memory => {}
+        _ => findings.invalidate(Reason::AllowanceExceeded),
     }
     if artifact.execution.timed_out {
         findings.withhold(Reason::DeadlineExceeded);

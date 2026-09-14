@@ -197,6 +197,22 @@ fn exact_memory_bytes_and_instant_power_milliwatt_conversion() {
 }
 
 #[test]
+fn initialization_contract_versions_preserve_legacy_replay_and_reject_ambiguous_flags() {
+    let mut trace = fixture(false);
+    let expected = decode(&trace, false).unwrap();
+    trace.version = 1;
+    trace.init_flags = None;
+    assert_eq!(decode(&trace, false).unwrap(), expected);
+    trace.init_flags = Some(0);
+    assert_eq!(decode(&trace, false), Err(Failure::Malformed));
+    trace.version = 2;
+    trace.init_flags = None;
+    assert_eq!(decode(&trace, false), Err(Failure::Malformed));
+    trace.init_flags = Some(2);
+    assert_eq!(decode(&trace, false), Err(Failure::Malformed));
+}
+
+#[test]
 fn unsupported_memory_does_not_falsify_power_or_missing_ranks() {
     let mut memory = fixture(true);
     memory.calls.truncate(6);

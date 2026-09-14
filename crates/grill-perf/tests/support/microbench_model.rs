@@ -102,7 +102,7 @@ fn device_artifact() -> Artifact {
     // The effective tier must match the declared tier or the measurement is
     // withheld, so a device fixture always reports the grouped fallback.
     artifact.execution.observed_fallback = Some(Tier::E3Grouped);
-    artifact.execution.work_units = 206_158_430_208;
+    artifact.execution.work_units = 2_061_584_302_080;
     artifact.execution.memory_bytes = 1_073_741_824;
     artifact.program_sha256 = Some("b".repeat(64));
     artifact.kernel_revision = Some("exl3-module:fixture".into());
@@ -195,8 +195,10 @@ fn rank_artifact(values: &[[u64; 2]; 5]) -> Artifact {
         ],
     };
     artifact.execution.warmups = 1;
-    artifact.execution.work_units = 1_572_864;
-    artifact.execution.memory_bytes = 6_291_456;
+    // Two ranks x 262144 int64 elements x (1 warmup + 5 measured) repetitions,
+    // and five live int64 payloads plus the boolean comparison payload.
+    artifact.execution.work_units = 3_145_728;
+    artifact.execution.memory_bytes = 10_747_904;
     artifact.execution.observed_fallback = None;
     artifact.sources = vec![Source {
         path: "/observed/doc/PERFORMANCE.md".into(),
@@ -463,6 +465,85 @@ fn operation_admission_and_byte_definitions_are_unchanged() {
         )
         .is_none()
     );
+}
+
+#[test]
+fn allowance_minimums_are_derived_from_the_frozen_cells() {
+    // CPU reference: 4096 elements x (2 warmups + 5 iterations) and one u64
+    // payload.
+    assert_eq!(
+        minimum_allowance(
+            AdapterId::CpuSumU64Reference,
+            &frozen_operation(AdapterId::CpuSumU64Reference)
+        ),
+        Some((28_672, 32_768))
+    );
+
+    // Collective at world 2: every rank reduces 262144 int64 elements for six
+    // repetitions (1 warmup + 5 measured); five live payloads plus the boolean
+    // exactness-comparison payload are 41 bytes per element.
+    let collective = |world: u32| Operation::AllReduce {
+        op: ReduceOp::Sum,
+        dtype: Dtype::Int64,
+        numel: 262_144,
+        world,
+        ranks: (0..world).collect(),
+        input: REDUCE_INPUT_ID.into(),
+        reference: REDUCE_REFERENCE_ID.into(),
+    };
+    assert_eq!(
+        minimum_allowance(AdapterId::NcclAllreduceSum, &collective(2)),
+        Some((3_145_728, 10_747_904))
+    );
+    // Work scales with the declared world because every rank reduces its own
+    // elements; the per-rank payload does not.
+    assert_eq!(
+        minimum_allowance(AdapterId::NcclAllreduceSum, &collective(4)),
+        Some((6_291_456, 10_747_904))
+    );
+
+    // E3: 1024 tokens x topk 8 x 3 projections x 2 per multiply-accumulate x
+    // 4096 x 1024 per pass, for 2 warmups + 5 measured + 3 parity passes; the
+    // memory floor is the fp16 activation payload the timed kernel needs.
+    assert_eq!(
+        minimum_allowance(
+            AdapterId::Exl3E3Grouped,
+            &frozen_operation(AdapterId::Exl3E3Grouped)
+        ),
+        Some((2_061_584_302_080, 8_388_608))
+    );
+
+    // A pairing the adapter does not own has no derivable minimum at all.
+    assert_eq!(
+        minimum_allowance(AdapterId::CpuSumU64Reference, &collective(2)),
+        None
+    );
+}
+
+#[test]
+fn understated_retained_accounting_is_rejected() {
+    // One E3 pass of work is exactly the understatement this admission closes.
+    let mut device = device_artifact();
+    device.execution.work_units = 206_158_430_208;
+    assert!(
+        check_artifact(None, &device)
+            .invalid
+            .contains(&Reason::AllowanceExceeded)
+    );
+
+    // Three collective payloads is the old guessed figure; five payloads plus
+    // the comparison payload is the derived floor.
+    let mut ranks = rank_artifact(&[[100, 100]; 5]);
+    ranks.execution.memory_bytes = 6_291_456;
+    assert!(
+        check_artifact(None, &ranks)
+            .invalid
+            .contains(&Reason::AllowanceExceeded)
+    );
+
+    // The unmodified fixtures cover the derived minimums exactly.
+    assert!(check_artifact(None, &device_artifact()).clean());
+    assert!(check_artifact(None, &rank_artifact(&[[100, 100]; 5])).clean());
 }
 
 #[test]

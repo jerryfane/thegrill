@@ -508,6 +508,7 @@ impl State {
             .map(|expected| crate::wire::sequence_tool(attempt, body, expected))
             .transpose()?
             .flatten();
+        let streamed_tool_response = streamed_tool.is_some();
         let (pending_case, mut messages) = self
             .pending
             .take()
@@ -572,8 +573,13 @@ impl State {
                     messages.push(Rc::new(json!({"role":"assistant","content":content})));
                 }
                 Expected::Tool { key, result } => {
-                    if attempt.finish_reason.as_deref() != Some("tool_calls") {
-                        return Err("tool response requires tool_calls finish reason".into());
+                    if attempt.finish_reason.as_deref() != Some("tool_calls")
+                        && !(streamed_tool_response
+                            && attempt.finish_reason.as_deref() == Some("stop"))
+                    {
+                        return Err(
+                            "tool response lacks a supported successful finish reason".into()
+                        );
                     }
                     let calls = message
                         .get("tool_calls")

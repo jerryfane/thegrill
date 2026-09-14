@@ -40,7 +40,7 @@
         "cadence_us": 100000,
         "max_gap_us": 250000,
         "max_read_us": 200000,
-        "max_samples": 16,
+        "max_samples": 32,
         "deadline_us": 5000000,
         "per_sample_bytes": 32768,
         "raw_total_bytes": 524288
@@ -88,7 +88,7 @@
         "cadence_us": 100000,
         "max_gap_us": 250000,
         "max_read_us": 200000,
-        "max_samples": 16,
+        "max_samples": 32,
         "deadline_us": 5000000,
         "per_sample_bytes": 32768,
         "raw_total_bytes": 524288
@@ -136,7 +136,7 @@
         "cadence_us": 100000,
         "max_gap_us": 250000,
         "max_read_us": 200000,
-        "max_samples": 16,
+        "max_samples": 32,
         "deadline_us": 5000000,
         "per_sample_bytes": 32768,
         "raw_total_bytes": 524288

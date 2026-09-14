@@ -185,8 +185,32 @@ impl Budget {
             || consumed.series >= config.max_series
             || consumed.overhead_us >= config.max_overhead_us
     }
+    fn finish_v2(&mut self, config: &v2::Config, snapshot: &mut v2::Snapshot) -> Result<()> {
+        let overhead = self
+            .v2
+            .unwrap_or_default()
+            .overhead_us
+            .checked_add(snapshot.overhead_us)
+            .ok_or("metrics overhead budget overflow")?;
+        if snapshot.status == v2::Status::Complete && overhead > config.max_overhead_us {
+            // Read/parse/publication cannot be preempted at an exact CPU-time
+            // boundary. Retain the actual overrun, but not favorable telemetry.
+            snapshot.status = v2::Status::OverheadLimit;
+            snapshot.error = Some("whole-run telemetry overhead budget exceeded".into());
+            snapshot.series = 0;
+        }
+        self.retain_v2(config, snapshot)
+    }
+
     fn retain_v2(&mut self, config: &v2::Config, snapshot: &v2::Snapshot) -> Result<()> {
         let skipped = snapshot.status == v2::Status::SkippedBudget;
+        let overhead_exceeded = self
+            .v2
+            .unwrap_or_default()
+            .overhead_us
+            .checked_add(snapshot.overhead_us)
+            .ok_or("metrics overhead budget overflow")?
+            > config.max_overhead_us;
         if skipped != self.exhausted_v2(config)
             || snapshot.charged_us != snapshot.duration_us
             || snapshot.allowance_us
@@ -218,6 +242,9 @@ impl Budget {
                     || snapshot.http_status.is_some()))
             || snapshot.error.as_ref().is_some_and(|text| text.len() > 256)
             || (snapshot.status == v2::Status::Complete) != snapshot.error.is_none()
+            || (snapshot.status == v2::Status::Complete && overhead_exceeded)
+            || (snapshot.status == v2::Status::OverheadLimit
+                && (!overhead_exceeded || snapshot.http_status != Some(200)))
         {
             return Err("invalid metrics snapshot budget or status".into());
         }
@@ -241,11 +268,8 @@ impl Budget {
             .overhead_us
             .checked_add(snapshot.overhead_us)
             .ok_or("metrics overhead budget overflow")?;
-        if self.requests > config.max_requests
-            || consumed.series > config.max_series
-            || consumed.overhead_us > config.max_overhead_us
-        {
-            return Err("metrics request, series or overhead budget exceeded".into());
+        if self.requests > config.max_requests || consumed.series > config.max_series {
+            return Err("metrics request or series budget exceeded".into());
         }
         Ok(())
     }

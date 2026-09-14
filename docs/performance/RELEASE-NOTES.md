@@ -20,11 +20,16 @@
   completed, so native capture and offline replay agree.
 - Add workload5 streamed-tool fragments and first-delta/fully-validated-call
   timing with exact retained history and replay. Tool fragments are not text.
+- Accept the supported named-tool `stop` finish in streamed fixed-tool profiles,
+  without accepting truncation or changing historical nonstreaming receipts.
 - Add explicit bounded metrics2 provider accounting and prospective required
   telemetry gates. Missing sources, gaps and resets are not zero; shared counters
   are not attributed to one request, and an isolation declaration is not proof.
   Source/position selectors cannot bypass contradictory engine accounting;
   unrelated engine identities remain independent.
+  Cooperative overhead overruns retain actual timing as unavailable telemetry
+  and skip later scrapes rather than aborting model acquisition; replay cannot
+  relabel an over-budget snapshot complete.
 - Add fourteen explicit GLM/DeepSeek profiles: routine decode/prefill, mixed
   interference, tools, history branches, long context and p95 stress. Controls,
   source-byte pins and warmup/measured traffic ceilings are documented. The eight
@@ -41,6 +46,8 @@
   by every source; unsupported CPU-integral boundaries stay unavailable.
   Sampled maxima are not peaks, energy integration is an estimate, and
   source ownership is not model attribution.
+  NVML uses lazy initialization rather than `NO_ATTACH`, which can prevent
+  selected UUID resolution; versioned raw traces preserve prior failure replay.
 - Add finite capacity/retention runs with successful, failed and undispatched
   cells, actual workload history and explicit source journals. Two closed public
   vLLM source sets reject mixed/unknown files. Required retention needs declared
@@ -58,6 +65,8 @@
   missing or corrupt raw evidence cannot support a favorable native comparison.
   Forced collector death and descendants escaping the group remain outside
   graceful-cleanup guarantees.
+  Collective warmup failures from every rank survive gathering, even when all
+  measured reductions are correct; a CPU-only producer regression covers this.
 - Expand the explicit archive allowlist with domain examples, offline guides and
   four opt-in Python producer modules. Installed verification shares the staging
   payload contract and checks executable permissions as well as bytes.

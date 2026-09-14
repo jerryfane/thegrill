@@ -34,7 +34,7 @@ const LIBRARY: &CStr = c"libnvidia-ml.so.1";
 const TRACE_CAP: usize = 8192;
 const POWER_INSTANT: c_uint = 186;
 const GPU_SCOPE: c_uint = 0;
-const NO_ATTACH: c_uint = 2;
+const INIT_FLAGS: c_uint = 0;
 type Device = *mut c_void;
 type Init = unsafe extern "C" fn(c_uint) -> c_int;
 type Shutdown = unsafe extern "C" fn() -> c_int;
@@ -163,6 +163,8 @@ enum LoadFailure {
 #[serde(deny_unknown_fields)]
 struct Trace {
     version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    init_flags: Option<u32>,
     abi_sha256: String,
     library: String,
     // This is the adapter ABI contract, not a fabricated observed driver version.
@@ -173,7 +175,8 @@ struct Trace {
 impl Trace {
     fn new() -> Self {
         Self {
-            version: 1,
+            version: 2,
+            init_flags: Some(INIT_FLAGS),
             abi_sha256: ABI_SHA256.into(),
             library: LIBRARY.to_string_lossy().into_owned(),
             abi: "linux-lp64-v1".into(),
@@ -247,8 +250,9 @@ impl Library {
             return;
         };
         let init = unsafe { std::mem::transmute::<*mut c_void, Init>(symbol) };
-        // No legacy init fallback: it would initialize all GPUs.
-        if !trace.push(Api::Init, unsafe { init(NO_ATTACH) }, None) {
+        // Lazy v2 initialization permits the selected UUID lookup; NO_ATTACH can
+        // make a present device unresolvable. Never fall back to legacy nvmlInit.
+        if !trace.push(Api::Init, unsafe { init(INIT_FLAGS) }, None) {
             return;
         }
         self.collect_initialized(uuid, memory, trace);
@@ -481,7 +485,8 @@ pub(super) fn parse(
         return Err(Failure::ByteBudget);
     }
     let trace: Trace = serde_json::from_slice(bytes).map_err(|_| Failure::Malformed)?;
-    if trace.version != 1
+    // Version 1 implicitly used NO_ATTACH. Preserve its replay, not its collection.
+    if !matches!((trace.version, trace.init_flags), (1, None) | (2, Some(0)))
         || trace.abi_sha256 != ABI_SHA256
         || trace.library != "libnvidia-ml.so.1"
         || trace.abi != "linux-lp64-v1"

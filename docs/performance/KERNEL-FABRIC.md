@@ -79,7 +79,8 @@ and no floating-point decision path.
 | `nccl-allreduce-sum` | Ranks | Operator program, explicitly launched | `all_reduce` SUM, `int64`, numel 262144, declared world and ranks 0..world-1, warmups 1, measured iterations 5 |
 
 The frozen cells are checked in code, not only documented: a plan that changes
-the shape, cap, skew, tier, dtype, routing, clock, warmup count or bit-width is
+the shape, cap, skew, tier, dtype, routing, clock, warmup count or bit-width, or
+that declares an allowance below the cell's derived minimum work or memory, is
 rejected before anything runs. There is no shape, cap, skew, tier or world
 search, no best-median summary, no `torch.cuda.empty_cache()`, no remote
 discovery and no script-hook framework. A plan names one adapter; the device
@@ -203,9 +204,10 @@ parity or a nonzero mismatch count makes the acquisition ineligible and the
 comparison ERROR or INCONCLUSIVE, never PASS.
 
 **Warmups.** Required warmups are executed and their timings never enter the
-measured samples. A correctness failure during a warmup remains a failure: it
-is retained with a detail that names the warmup population, while only measured
-repetitions contribute to the measured mismatch count. Warmups are required
+measured samples. A correctness failure during a warmup on **any rank** remains
+a failure in rank 0's merged artifact, with the originating rank and warmup
+population retained. Only measured repetitions contribute to the measured
+mismatch count. Warmups are required
 work, not disposable work, and they are not a licence to hide a failure that
 happened while the cell was warming.
 
@@ -272,10 +274,59 @@ substituted for the algorithm payload. `microbench inspect` prints both.
 Every plan declares finite `work_units`, `memory_bytes` and `deadline_ms`
 before execution. The collector rejects a plan whose declared allowance cannot
 cover the frozen cell, and withholds evidence whose observed work or memory
-exceeds the declaration. Linux external capture places only the explicitly
-spawned program in a fresh process group. Deadline expiry, observed SIGINT or
-SIGTERM cancellation, capture failure, and normal leader exit all finish by
-signalling that owned group with SIGKILL, including its normal descendants.
+exceeds the declaration. That admission is now derived from the frozen
+operation alone — never from a measured outcome — and it happens before
+anything runs: Rust `check_plan` refuses the plan before the output directory
+exists, and each producer refuses the same plan in its own `check_plan`, before
+it imports a device runtime or opens a rank, window or device. A tiny positive
+budget is therefore no longer admitted only to fail after the work has already
+run. Retained accounting is checked the same way: an artifact whose
+`work_units` or `memory_bytes` is below the derived minimum is invalid
+(`ALLOWANCE_EXCEEDED`), not a small favorable number.
+
+| Adapter | Minimum `work_units` | Minimum `memory_bytes` |
+|---|---|---|
+| `cpu-sum-u64-reference` | `bound * (warmups + iterations)` = 4096 * 7 = 28672 `u64` adds | `bound * 8` = 32768 |
+| `exl3-e3-grouped` | `tokens * topk * 3 * 2 * hidden * intermediate` per pass, for 2 warmups + 5 measured + 3 parity passes = 2061584302080 | fp16 activation payload `tokens * hidden * 2` = 8388608 |
+| `nccl-allreduce-sum` | `world * numel * (warmups + iterations)` = 2 * 262144 * 6 = 3145728 reduced `int64` elements | `numel * (8 * 5 + 1)` = 10747904 per rank |
+
+Units are fixed per adapter and are never converted between adapters. One
+`work_units` is one elementary operation of that cell: a `u64` add per element
+per repetition for the CPU reference, one reduced `int64` element per
+participating rank per repetition for the collective (the `world` factor is why
+rank 0's single retained number already covers every rank), and for E3 one
+multiply-accumulate counted as two over the projection shape, which is how the
+cell already counted it. Required warmups are charged, and so are the parity
+passes the cell must execute before timing: the E3 adapter runs
+`apply_exl3_experts` once as the E2 kernel reference and twice as the E3
+candidate and its repeat, while its pinned Python reference loop is a different
+implementation and is not counted as grouped-expert work. No adapter derives an
+allowance from an observed duration, tier, mismatch or any other outcome.
+
+`memory_bytes` counts **PyTorch tensor payloads only**. For the CPU reference
+that is the `u64` vector; for the collective it is the five live per-rank
+`int64` payloads (`index`, `partial`, `expected`, `input_template`, `buffer`)
+plus the boolean element payload the exactness comparison allocates; for E3 the
+minimum is the fp16 activation the timed kernel cannot run without, while the
+**retained observation stays the process-local PyTorch allocator peak**
+(`memory_allocated` / `max_memory_allocated`), which is larger. None of these
+figures is total device, driver, NCCL or CUDA-context memory; none is a
+reserved, physical or hard-OOM bound; and non-PyTorch workspaces — the CUDA
+context, NCCL channels/rings/buffers, allocator caches and every other process
+— stay outside every allowance by construction. The E3 artifact's memory figure
+is documented as a process-local allocator peak, never as a device total.
+
+The accounting a run retains is re-derived from the same frozen figures that
+admitted the plan, so it cannot drift from the admission bound or be understated
+relative to it. In the collective every rank derives its own accounting and
+retains an `allowance-exceeded` failure before the gather, and rank 0 flattens
+the retained failures of **all** ranks, so an exceeded allowance, a peer failure
+or a missing participant is never hidden behind a favorable result.
+
+Linux external capture places only the explicitly spawned program in a fresh
+process group. Deadline expiry, observed SIGINT or SIGTERM cancellation,
+capture failure, and normal leader exit all finish by signalling that owned
+group with SIGKILL, including its normal descendants.
 The collector never signals the invoking shell's group, unrelated PIDs,
 operator-started peers or services. A graceful **collector cancellation** means
 the collector retains a failed receipt; it does not promise a producer shutdown

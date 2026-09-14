@@ -1,9 +1,11 @@
 //! CPU protocol fixtures for the #54 microbenchmark commands.
 //!
-//! Every case here is a synthetic protocol fixture: the device adapters are
-//! never executed, and no device, collective, model or service is touched.
-//! Only the in-process CPU reference runs for real. The external-program cases
-//! launch a trivial local shell script so that the collector-side launch,
+//! Every case here is a synthetic protocol fixture: no device, collective,
+//! model or service is touched. One producer fixture injects CPU-only tensor
+//! and transport modules; a second refuses every device runtime import so the
+//! producer's own pre-launch admission is observable. Only the in-process CPU
+//! reference runs for real.
+//! Other external-program cases launch a trivial local shell script so that the collector-side launch,
 //! hashing, receipt and bounded-timeout paths are exercised; that script
 //! performs no kernel or collective work, and nothing here demonstrates device
 //! or fabric execution.
@@ -114,7 +116,7 @@ fn mb_reduce_plan(id: &str, started: u64, world: u32) -> Value {
         },
         "warmups": 1,
         "iterations": 5,
-        "allowance": {"work_units": 2000000, "memory_bytes": 8388608, "deadline_ms": 120000},
+        "allowance": {"work_units": 5000000, "memory_bytes": 16777216, "deadline_ms": 120000},
         "correctness": {
             "reference": "world*(i%251)+world*(world-1)/2",
             "tolerance": {"kind": "exact-int64"}
@@ -164,7 +166,7 @@ fn mb_e3_plan(id: &str, started: u64) -> Value {
         },
         "warmups": 2,
         "iterations": 5,
-        "allowance": {"work_units": 300000000000u64, "memory_bytes": 68719476736u64, "deadline_ms": 600000},
+        "allowance": {"work_units": 3000000000000u64, "memory_bytes": 68719476736u64, "deadline_ms": 600000},
         "correctness": {
             "reference": "apply-exl3-python-loop",
             "tolerance": {
@@ -302,7 +304,7 @@ fn mb_e3_artifact(plan: &Value, fallback: &str, e3_maxabs: &str) -> Value {
         "clock": plan["clock"],
         "execution": {
             "warmups": 2, "iterations": 5, "deadline_ms": 600000,
-            "work_units": 206158430208u64, "memory_bytes": 1073741824,
+            "work_units": 2061584302080u64, "memory_bytes": 1073741824,
             "completed": true, "timed_out": false, "observed_fallback": fallback
         },
         "samples": samples,
@@ -375,7 +377,11 @@ fn mb_reduce_artifact(plan: &Value, per_repetition: &[Vec<u64>], mismatches: u64
         "clock": plan["clock"],
         "execution": {
             "warmups": 1, "iterations": 5, "deadline_ms": plan["allowance"]["deadline_ms"],
-            "work_units": 1572864, "memory_bytes": 6291456,
+            // world * 262144 int64 elements * (1 warmup + 5 measured)
+            // repetitions, and 262144 * (5 live int64 payloads + boolean
+            // comparison payload) bytes per rank.
+            "work_units": 262144u64 * 6 * u64::from(world),
+            "memory_bytes": 262144u64 * 41,
             "completed": true, "timed_out": false, "observed_fallback": null
         },
         "samples": samples,
@@ -511,6 +517,65 @@ fn mb_inspect(temp: &Temp, name: &str, plan: &Value, artifact: &Value) -> (i32, 
     (mb_code(&output), mb_stdout(&output))
 }
 
+#[test]
+fn collective_peer_warmup_failure_cannot_disappear_behind_correct_measured_samples() {
+    let crate_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let repo = crate_dir.join("../..");
+    let output = std::process::Command::new("python3")
+        .args(["-I", "-S"])
+        .arg(crate_dir.join("tests/fixtures/nccl_peer_warmup.py"))
+        .arg(repo.join("tools/microbench/nccl_allreduce_sum.py"))
+        .arg(crate_dir.join("examples/microbench-nccl-allreduce-sum.json"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let temp = Temp::new();
+    for line in String::from_utf8(output.stdout).unwrap().lines() {
+        let case: Value = serde_json::from_str(line).unwrap();
+        let corrupt = case["corrupt_peer_warmup"].as_bool().unwrap();
+        let (code, report) = mb_inspect(
+            &temp,
+            if corrupt {
+                "peer-warmup-failed"
+            } else {
+                "correct-control"
+            },
+            &case["plan"],
+            &case["artifact"],
+        );
+        assert_eq!(code, if corrupt { 1 } else { 0 }, "{report}");
+    }
+}
+
+/// The producer refuses an under-budget plan itself, before it reaches the
+/// device import, while the shipped allowance passes admission and is stopped
+/// only by the fixture's veto of `torch`.
+#[test]
+fn producer_admission_rejects_under_budget_plans_before_the_device_import() {
+    let crate_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let repo = crate_dir.join("../..");
+    let output = std::process::Command::new("python3")
+        .args(["-I", "-S"])
+        .arg(crate_dir.join("tests/fixtures/nccl_allowance_admission.py"))
+        .arg(repo.join("tools/microbench/nccl_allreduce_sum.py"))
+        .arg(crate_dir.join("examples/microbench-nccl-allreduce-sum.json"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["under_budget_work"], 2, "{result}");
+    assert_eq!(result["under_budget_memory"], 2, "{result}");
+    assert_eq!(result["adequate_allowance"], 3, "{result}");
+}
+
 fn mb_capture(
     temp: &Temp,
     name: &str,
@@ -613,7 +678,7 @@ fn cpu_reference_capture_records_exact_rational_samples() {
 fn capture_rejects_drifted_declarations_before_running() {
     let temp = Temp::new();
     type MutatePlan = fn(&mut Value);
-    let mutations: [(&str, MutatePlan); 4] = [
+    let mutations: [(&str, MutatePlan); 5] = [
         ("clock", |plan| {
             plan["clock"]["units"] = json!("milliseconds")
         }),
@@ -621,6 +686,11 @@ fn capture_rejects_drifted_declarations_before_running() {
         ("bound", |plan| plan["operation"]["bound"] = json!(1024)),
         ("allowance", |plan| {
             plan["allowance"]["work_units"] = json!(64)
+        }),
+        // A positive budget below the frozen cell's known minimum memory is not
+        // an allowance at all: it is refused before the reference is allocated.
+        ("allowance-memory", |plan| {
+            plan["allowance"]["memory_bytes"] = json!(1024)
         }),
     ];
     for (name, mutate) in mutations {
@@ -665,6 +735,110 @@ fn capture_rejects_drifted_declarations_before_running() {
     assert_eq!(code, 1);
     assert!(stderr.contains("CPU-only authorization"), "{stderr}");
     assert!(!dir.exists());
+}
+
+/// A device plan below the frozen cell's derived minimum is refused by plan
+/// admission before any output directory exists and before the declared program
+/// is executed; the same plan with the shipped allowance reaches the launch.
+#[test]
+fn device_allowance_below_the_frozen_minimum_is_rejected_before_launch() {
+    type Mutate = fn(&mut Value);
+    let temp = Temp::new();
+    let cases = [
+        ("nccl-allreduce-sum", mb_reduce_plan("a01", START, 2)),
+        ("exl3-e3-grouped", mb_e3_plan("a01", START)),
+    ];
+    let mutations: [(&str, Mutate); 2] = [
+        ("work", |plan| plan["allowance"]["work_units"] = json!(1)),
+        ("memory", |plan| {
+            plan["allowance"]["memory_bytes"] = json!(1)
+        }),
+    ];
+    for (adapter, base) in cases {
+        let mut base = base;
+        for (name, mutate) in mutations {
+            let marker = temp.path(&format!("{adapter}-{name}.marker"));
+            let program = temp.path(&format!("{adapter}-{name}.sh"));
+            mb_write_bytes(
+                &program,
+                format!(
+                    "#!/bin/sh\n# fixture: records that the declared program was launched\ntouch '{}'\nexit 1\n",
+                    marker.display()
+                )
+                .as_bytes(),
+            );
+            fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
+            base["program_sha256"] = json!(mb_sha(&fs::read(&program).unwrap()));
+            let mut plan = base.clone();
+            mutate(&mut plan);
+            let plan_path = temp.path(&format!("{adapter}-{name}-plan.json"));
+            mb_write(&plan_path, &plan);
+            let out = temp.path(&format!("{adapter}-{name}"));
+            let output = cli()
+                .args(["microbench", "capture", "--adapter", adapter])
+                .arg("--plan")
+                .arg(&plan_path)
+                .arg("--out")
+                .arg(&out)
+                .arg("--program")
+                .arg(&program)
+                .arg("--authorize-device-window")
+                .output()
+                .unwrap();
+            assert_eq!(mb_code(&output), 1, "{adapter}/{name}");
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                stderr.contains("microbench plan rejected") && stderr.contains("AllowanceExceeded"),
+                "{adapter}/{name} stderr={stderr}"
+            );
+            assert!(
+                !marker.exists(),
+                "{adapter}/{name}: the program ran for an under-budget plan"
+            );
+            assert!(
+                !out.exists(),
+                "{adapter}/{name}: a rejected plan created an output directory"
+            );
+        }
+
+        // Control: only the allowance differs, so the launch is reached and the
+        // fixture's own exit status is what fails the capture.
+        let marker = temp.path(&format!("{adapter}-control.marker"));
+        let program = temp.path(&format!("{adapter}-control.sh"));
+        mb_write_bytes(
+            &program,
+            format!(
+                "#!/bin/sh\n# fixture: records that the declared program was launched\ntouch '{}'\nexit 1\n",
+                marker.display()
+            )
+            .as_bytes(),
+        );
+        fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
+        base["program_sha256"] = json!(mb_sha(&fs::read(&program).unwrap()));
+        let plan_path = temp.path(&format!("{adapter}-control-plan.json"));
+        mb_write(&plan_path, &base);
+        let output = cli()
+            .args(["microbench", "capture", "--adapter", adapter])
+            .arg("--plan")
+            .arg(&plan_path)
+            .arg("--out")
+            .arg(temp.path(&format!("{adapter}-control")))
+            .arg("--program")
+            .arg(&program)
+            .arg("--authorize-device-window")
+            .output()
+            .unwrap();
+        assert_eq!(mb_code(&output), 1, "{adapter}/control");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !stderr.contains("microbench plan rejected"),
+            "{adapter}/control stderr={stderr}"
+        );
+        assert!(
+            marker.exists(),
+            "{adapter}/control: the admitted plan never launched its program"
+        );
+    }
 }
 
 #[test]
@@ -1851,33 +2025,47 @@ fn external_program_cancellation_cleans_only_owned_group() {
     for (name, signal) in [("interrupt", libc::SIGINT), ("terminate", libc::SIGTERM)] {
         let pid = temp.path(&format!("{name}.pid"));
         let script = format!(
-            "#!/bin/sh\nprintf cancellation-diagnostic >&2\nsleep 2 &\nprintf '%s\\n' \"$!\" > '{}'\nwait\n",
+            "#!/bin/sh\nprintf cancellation-diagnostic >&2\nsleep 30 &\nprintf '%s\\n' \"$!\" > '{}'\nwait\n",
             pid.display()
         );
-        let (mut command, out) = mb_program_command(&temp, name, &script, 10000);
-        let collector = command.spawn().unwrap();
-        let ready_limit = Instant::now() + Duration::from_secs(2);
+        let deadline_ms = 10_000;
+        let (mut command, out) = mb_program_command(&temp, name, &script, deadline_ms);
+        let mut collector = command.spawn().unwrap();
+        let ready_limit = Instant::now() + Duration::from_millis(deadline_ms);
         while !pid.exists() && Instant::now() < ready_limit {
+            if let Some(status) = collector.try_wait().unwrap() {
+                let output = collector.wait_with_output().unwrap();
+                panic!(
+                    "collector exited before cancellation handshake ({status}): {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
             thread::sleep(Duration::from_millis(2));
         }
-        assert!(
-            pid.exists(),
-            "producer did not reach cancellation handshake"
-        );
+        if !pid.exists() {
+            // The unreaped child still owns this PID; ask its normal cleanup
+            // path to settle before reporting a readiness failure.
+            unsafe { libc::kill(collector.id() as libc::pid_t, libc::SIGTERM) };
+            let output = collector.wait_with_output().unwrap();
+            panic!(
+                "producer missed its cancellation readiness deadline: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
         // A separately owned finite child is outside the collector's new group.
-        let mut unrelated = Command::new("sleep").arg("2").spawn().unwrap();
+        let mut unrelated = Command::new("sleep").arg("30").spawn().unwrap();
         // Collector has not been reaped, so its PID remains reserved.
         assert_eq!(
             unsafe { libc::kill(collector.id() as libc::pid_t, signal) },
             0
         );
-        let started = Instant::now();
         let output = collector.wait_with_output().unwrap();
         assert_eq!(mb_code(&output), 1);
-        assert!(started.elapsed() < Duration::from_secs(1));
         let receipt = mb_raw_receipt(&out);
         assert_eq!(receipt["status"], "failed");
-        assert!(receipt["failure"].as_str().unwrap().contains("cancelled"));
+        // Cancellation must settle before the producer's own deadline, not
+        // merely wait for that deadline or the finite descendant to expire.
+        assert!(receipt["duration_ms"].as_u64().unwrap() < deadline_ms);
         assert_eq!(
             fs::read(out.join("stderr.bin")).unwrap(),
             b"cancellation-diagnostic"

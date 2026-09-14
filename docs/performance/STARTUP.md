@@ -81,8 +81,9 @@ must be source-observed; an operator attestation cannot replace them.
 
 ## Opt-in serving-runtime bridge
 
-`tools/startup-runtime.py` implements the two closed public source variants
-`runtime_vllm_v1` and `runtime_vllm_487ecf187_v1`. It is an explicit
+`tools/startup-runtime.py` implements the closed public source variants
+`runtime_vllm_v1`, `runtime_vllm_487ecf187_v1`, and
+`runtime_vllm_487ecf187_bootstrap_v1`. It is an explicit
 **operator-invoked, in-process entrypoint**, not a command that Grill launches.
 It calls the existing single-worker `api_server.run_server` with ASGI lifespan
 enabled; there is no subprocess, restart, service manager or arbitrary-module
@@ -112,16 +113,34 @@ event contract `vllm-487ecf187-uvicorn-0.52.4-sha256-v1`:
 | [vLLM async_llm.py](https://github.com/vllm-project/vllm/blob/487ecf187/vllm/v1/engine/async_llm.py) | `487ecf187` | `bceed0b3f5f0c834fef79525f2462a092f082390f0070526280abc95945837dd` |
 | [Uvicorn server.py](https://github.com/encode/uvicorn/blob/0.52.4/uvicorn/server.py) | `0.52.4` | `7c1dbd656835c9cdd6f92078ffc80bcc6007824ab322aff15435bd89c068e0be` |
 
+Bootstrap set: `adapter:"runtime_vllm_487ecf187_bootstrap_v1"`,
+event contract `vllm-487ecf187-uvicorn-0.52.4-sha256-bootstrap-v1`.
+This is a **new closed seven-file set**: all four files in the preceding 487
+table plus all three files below, with no optional member or per-file fallback.
+Hashes were computed from these public URLs, not installed-local source.
+
+| Additional source | Revision | Required SHA-256 |
+|---|---|---|
+| [vLLM core_client.py](https://github.com/vllm-project/vllm/blob/487ecf187/vllm/v1/engine/core_client.py) | `487ecf187` | `afb2b627cf9ef861f05b411494156cc6ad5076ea770c6f2a4c8a941ca82103ec` |
+| [vLLM core.py](https://github.com/vllm-project/vllm/blob/487ecf187/vllm/v1/engine/core.py) | `487ecf187` | `86b8f3b3826504549ef8bea2e7fbf7553728339803abcb3e7d051d146963ff9c` |
+| [vLLM utils.py](https://github.com/vllm-project/vllm/blob/487ecf187/vllm/v1/engine/utils.py) | `487ecf187` | `6ce83b0552b6207505c9bd7ac1fd67d2771628eac01572738765923aa91c1c0f` |
+
+The original four-file contracts retain their original meanings and do not
+emit bootstrap events. Persisted evidence is never upgraded or reinterpreted.
+The new bootstrap modules' imported locations are checked against the pinned
+distribution paths before installing the bootstrap hook.
+
 The API source is shared, but the other three files must all belong to the
 selected set. A mixed old/new installation, a complete set under the other
 adapter, missing/extra source members, or any changed bytes are rejected.
 Rechecking uses the same prospective selection; it never switches contracts.
-The ordinary CPU ASGI fixture remains `runtime_asgi_fixture_v1` and cannot
-select either public runtime set through the real entrypoint.
+The ordinary CPU ASGI fixture has separate `runtime_asgi_fixture_v1` and
+`runtime_asgi_fixture_bootstrap_v1` contracts; neither can select a public runtime
+set through the real entrypoint.
 
 Pins are checked against bounded installed source files before serving imports
 and again before sealing. Imported module locations must match those files.
-The producer source retained as `producer.bin` binds both exact pin sets and
+The producer source retained as `producer.bin` binds all exact pin sets and
 the plan-selected event contract. Replay requires that precise contract. This is native
 **unauthenticated** source observation, not execution authentication or proof
 that every dependency is unmodified. Different upstream/recipe-patched bytes
@@ -152,8 +171,9 @@ The additional set was reviewed at its concrete hook boundaries:
 The bridge records `runtime_start` at its journal entrypoint before importing
 serving libraries. It is explicitly **not OS process launch**: interpreter,
 bridge imports and initial pin checking precede this anchor. Inspection reports
-`launch_anchor:"bridge-entrypoint-not-os-launch"`; milestone durations begin
-there. Full OS exec-to-ready remains unavailable.
+`launch_anchor:"bridge-entrypoint-not-os-launch"`; anchor-based milestone durations
+begin there. Bootstrap instead uses its own entry-to-return pair below.
+Full OS exec-to-ready remains unavailable.
 
 The outermost ASGI wrapper records `ready` only on
 `lifespan.startup.complete` (`asgi-lifespan-startup-complete-v1`). In the pinned
@@ -168,9 +188,45 @@ health string, log line, model name or merely bound socket substitutes.
 `inference_complete` hashes the actual ASGI response entity after its final
 body send. Favorable first-valid inference still requires the existing Rust
 wire collector's complete valid response, exact expected answer, usage and
-matching digest. Bootstrap/communication substage timing is not observed by
-this bridge: a `communication` gate remains unavailable, not total startup
-time relabelled as communication.
+matching digest. A `communication` gate remains unavailable on real runtimes,
+not total startup or bootstrap time relabelled as communication.
+
+### Frontend-observed engine bootstrap
+
+Only the new 487-bootstrap contract hooks the synchronous static method
+`EngineCoreClient.make_async_mp_client`: `bootstrap_start` immediately before
+the call, `bootstrap_end` only after successful return. It forwards the original
+arguments and result without adding a worker launcher or changing engine behavior.
+An exception propagates to the existing entrypoint failure handler, leaving no
+successful end or fabricated duration.
+
+The actual public `487ecf187` source establishes this boundary, independently of
+the older 0.27 review:
+
+- `async_llm.py` calls `make_async_mp_client` during frontend construction.
+- `core_client.py` selects `AsyncMPClient`, `DPAsyncMPClient`, or
+  `DPLBAsyncMPClient`; each constructor synchronously reaches `MPClient.__init__`.
+  Its ready-message loop receives and applies a response from every engine
+  identity managed by **this client** before returning; timeout raises.
+- The managed-process `utils.py::launch_core_engines` context also waits for
+  engine startup on exit. The client ready-message loop applies even when
+  engines are managed externally or through the Ray branch.
+- `core.py::EngineCoreProc` calls the base engine constructor (including KV
+  initialization) before starting the input thread that emits ready responses.
+
+This is frontend-observed synchronous engine-client construction through
+readiness, including setup, IPC wait and constructor work. It is **not** a pure
+backend compute span, per-worker readiness/PIDs, NCCL/communication initialization,
+all-cluster readiness, or persisted model-KV proof. A client attaching to already
+running engines measures that attachment, not their earlier startup. Later ASGI
+app construction/readiness remains a separate milestone.
+
+Replay requires a single ordered pair after `runtime_start`, followed by ASGI
+`ready`, all with the same frontend monotonic clock and incarnation and strictly
+increasing boundary timestamps. Missing/failed boundaries remain unavailable;
+duplicates, reordered boundaries and incompatible frontend clocks invalidate the
+pair and never contribute a bootstrap sample. Bootstrap samples use the existing
+duration, import/replay and lower-is-better envelope comparison paths.
 
 ### Complete finite request exposure
 
@@ -233,13 +289,14 @@ but they cannot identify external persisted KV by themselves.
 inferred transfer. Store/reload remain callable and honestly nonqualifying for
 these missing predicates.
 
-For a separately authorized launch, prepare the normal complete startup plan,
-select `adapter:"runtime_vllm_v1"` for the original whole source set or
-`adapter:"runtime_vllm_487ecf187_v1"` for the additional reviewed whole set.
-Pin `adapter_sha256` to the exact bridge file and `collector_sha256` to the
-exact binary, and prospectively set the complete runtime window/deadline/request
-allowances. The invocation is identical for either plan; no extra source-version
-flag or package-version string can override its selection. Source-only example:
+For a separately authorized launch, prepare the normal complete startup plan and
+select one of the three public adapters above. Select
+`adapter:"runtime_vllm_487ecf187_bootstrap_v1"` and a `bootstrap` gate for the new
+frontend span. Pin `adapter_sha256` to the exact bridge file and `collector_sha256`
+to the exact binary, and prospectively set the complete runtime
+window/deadline/request allowances. Invocation is identical for every public plan;
+no extra source-version flag or package-version string can override selection.
+Source-only example:
 
 ```sh
 # Operator-owned serving invocation, not a Grill action:
@@ -265,10 +322,10 @@ required fields are:
 
 - `study_id`, collector binary SHA-256, adapter enum and exact adapter source
   SHA-256; every capture rechecks these pins.
-- `runtime_window_us` is required only for `runtime_vllm_v1`,
-  `runtime_vllm_487ecf187_v1`, and `runtime_asgi_fixture_v1`; it is absent for
-  existing non-runtime adapters. These explicit adapter contracts extend the
-  closed plan without reinterpreting old bytes.
+- `runtime_window_us` is required for every `runtime_*` adapter above, including
+  `runtime_asgi_fixture_bootstrap_v1`; it is absent for existing non-runtime
+  adapters. These explicit adapter contracts extend the closed plan without
+  reinterpreting old bytes.
 - `setup_axis` and `setup_sha256:[A,B,A2]`: prospectively declared setup
   fingerprints. A and A2 must match. These remain declarations, not observed
   proof that the only effective difference was that axis.
@@ -294,7 +351,7 @@ required fields are:
   Encoded requests stay within the existing 2 MiB ceiling. These are serialized
   buffer ceilings, not an RSS guarantee.
 - Nonempty `gates`, unique targets among `listening`, `ready`,
-  `first_valid_inference`, `communication`, `reload`, each with prospective
+  `first_valid_inference`, `communication`, `bootstrap`, `reload`, each with prospective
   `max_regression_bps` and `max_reference_spread_bps`. Reload is only legal in a
   restart study. There is no token-rate or C1 conversion for these gates.
 
@@ -316,6 +373,7 @@ quantization, not a claim of hardware timer precision.
 | `launched` | First event from the attached process incarnation |
 | `listening` | Producer has bound/listened; never model-ready or valid inference |
 | `communication_start/end` | Explicit paired communication-initialization substage |
+| `bootstrap_start/end` | New bootstrap adapters only: synchronous frontend engine-client entry/successful return |
 | `ready` | Exact `neutral-ready-v1` producer readiness contract; no model-name heuristic |
 | `controls` | Source-observed smoke/shape suppression and hash-seed contract, before requests |
 | `state` | Per-class declared/observed temperature plus appropriately typed identity |
@@ -338,9 +396,10 @@ replaced by an adapter event. Header/body arrival and health checks do not count
 
 Anchor-to-listen, anchor-to-ready and anchor-to-first-valid-inference subtract
 only timestamps with identical clock contract/origin **and** process incarnation.
-Communication duration uses its own supported start/end pair. Missing or
-cross-clock boundaries stay unavailable. HTTP reload duration is separately
-client-clock `settle_us`; it is never subtracted from a source-clock timestamp.
+Communication and bootstrap durations each use their own distinct supported
+start/end pair. Missing or cross-clock boundaries stay unavailable. HTTP reload
+duration is separately client-clock `settle_us`; it is never subtracted from a
+source-clock timestamp.
 All request/metrics offsets within a capture share a capture-scoped client
 origin. Across acquisitions, duration comparison requires matching clock kind,
 units, resolution and synchronization, but not the same origin ID.
@@ -474,11 +533,23 @@ It compares actual CLI capture with offline replay. Both CPU execution and
 pinned-library/live qualification remain separate checks; authoring these
 fixtures is not a pass.
 
+The new `runtime_asgi_fixture_bootstrap_v1` / `ordinary-asgi-fixture-bootstrap-v1`
+CPU contract adds an independently delayed synchronous constructor through the
+real bootstrap hook, followed by separately delayed ASGI readiness. The runtime
+smoke retains the old ASGI/communication/cache fixtures and adds missing start,
+missing end, missing pair, thrown construction failure, duplicate start/end,
+reordered and late boundaries. Offline imported mutations cover changed clocks,
+stale incarnation, pre-runtime ordering, a failure followed by a false end,
+legacy-contract rejection, unavailable communication and an exact 100000-us
+bootstrap arithmetic oracle. Native capture and imported evidence are replayed
+with the same consumer. These are authored regression scenarios, not executed
+verification or public-vLLM qualification.
+
 The runtime smoke also authors source-set distinction cases using tiny
 synthetic file bytes and substituted expected pin tables (never substituted
-hash/read/selection functions): both exact sets, a valid set under the wrong
-plan adapter, every mixture of the three changed files, missing/extra members,
-unsupported/fixture selectors, and drift on recheck. Actual public pins are
-also checked against wrong synthetic bytes. These CPU cases do not execute or
-qualify either real serving library; the complete smoke command above remains
-the Main-owned verification entrypoint.
+hash/read/selection functions): all three exact sets, a valid set under the wrong
+plan adapter, every mixture of the three original changed files, each missing
+member, extra members, unsupported/fixture selectors, and each file drifting on
+recheck. Actual public pins are also checked against wrong synthetic bytes.
+These CPU cases do not execute or qualify either serving library; the complete
+smoke command above remains the Main-owned verification entrypoint.

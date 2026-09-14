@@ -72,14 +72,27 @@ pub enum Adapter {
     RuntimeVllmV1,
     #[serde(rename = "runtime_vllm_487ecf187_v1")]
     RuntimeVllm487V1,
+    #[serde(rename = "runtime_vllm_487ecf187_bootstrap_v1")]
+    RuntimeVllm487BootstrapV1,
     RuntimeAsgiFixtureV1,
+    RuntimeAsgiFixtureBootstrapV1,
     UninstrumentedRecipeLogs,
 }
 impl Adapter {
     fn runtime(self) -> bool {
         matches!(
             self,
-            Self::RuntimeVllmV1 | Self::RuntimeVllm487V1 | Self::RuntimeAsgiFixtureV1
+            Self::RuntimeVllmV1
+                | Self::RuntimeVllm487V1
+                | Self::RuntimeVllm487BootstrapV1
+                | Self::RuntimeAsgiFixtureV1
+                | Self::RuntimeAsgiFixtureBootstrapV1
+        )
+    }
+    fn bootstrap(self) -> bool {
+        matches!(
+            self,
+            Self::RuntimeVllm487BootstrapV1 | Self::RuntimeAsgiFixtureBootstrapV1
         )
     }
     fn ready_contract(self) -> &'static str {
@@ -93,6 +106,8 @@ impl Adapter {
         match self {
             Self::RuntimeVllmV1 => "vllm-0.27.0-uvicorn-0.34.0-sha256-v1",
             Self::RuntimeVllm487V1 => "vllm-487ecf187-uvicorn-0.52.4-sha256-v1",
+            Self::RuntimeVllm487BootstrapV1 => "vllm-487ecf187-uvicorn-0.52.4-sha256-bootstrap-v1",
+            Self::RuntimeAsgiFixtureBootstrapV1 => "ordinary-asgi-fixture-bootstrap-v1",
             _ => "ordinary-asgi-fixture-v1",
         }
     }
@@ -252,6 +267,7 @@ pub enum Target {
     Ready,
     FirstValidInference,
     Communication,
+    Bootstrap,
     Reload,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -386,7 +402,7 @@ impl Plan {
             || !(1024..=CAP).contains(&self.event_bytes)
             || !(1_000..=3_600_000_000).contains(&self.deadline_us)
             || self.gates.is_empty()
-            || self.gates.len() > 5
+            || self.gates.len() > 6
         {
             return Err("invalid finite startup study plan".into());
         }
@@ -572,6 +588,9 @@ pub enum EventKind {
     },
     CommunicationStart,
     CommunicationEnd,
+    /// Frontend synchronous EngineCoreClient construction, not worker/NCCL timing.
+    BootstrapStart,
+    BootstrapEnd,
     Controls {
         smoke_suppressed: bool,
         shape_warmup_suppressed: bool,
@@ -1372,6 +1391,9 @@ fn analyze(root: &Path, plan: &Plan, c: &Capture, raw: &[u8]) -> Result<Inspecti
     let mut ready = None;
     let mut communication_start = None;
     let mut communication_end = None;
+    let mut bootstrap_start = None;
+    let mut bootstrap_end = None;
+    let mut bootstrap_invalid = false;
     let mut first_inference = None;
     let mut starts = Vec::new();
     let mut finishes = Vec::new();
@@ -1432,7 +1454,9 @@ fn analyze(root: &Path, plan: &Plan, c: &Capture, raw: &[u8]) -> Result<Inspecti
                     || *active_requests != 0
                     || (matches!(
                         plan.adapter,
-                        Adapter::RuntimeVllmV1 | Adapter::RuntimeVllm487V1
+                        Adapter::RuntimeVllmV1
+                            | Adapter::RuntimeVllm487V1
+                            | Adapter::RuntimeVllm487BootstrapV1
                     ) && !engine_hook)
                     || starts.len() != finishes.len()
                     || listening.is_none()
@@ -1483,6 +1507,20 @@ fn analyze(root: &Path, plan: &Plan, c: &Capture, raw: &[u8]) -> Result<Inspecti
                 }
             }
             EventKind::Ready { contract } => {
+                if plan.adapter.bootstrap()
+                    && bootstrap_end.is_some_and(|end: &Event| {
+                        end.clock != event.clock
+                            || end.engine != event.engine
+                            || end.offset_us >= event.offset_us
+                    })
+                {
+                    bootstrap_invalid = true;
+                    add_reason(
+                        &mut report,
+                        Outcome::Error,
+                        "bootstrap end must precede ASGI ready on the frontend clock",
+                    );
+                }
                 if contract != plan.adapter.ready_contract()
                     || ready.replace(event).is_some()
                     || launched.is_none()
@@ -1492,6 +1530,44 @@ fn analyze(root: &Path, plan: &Plan, c: &Capture, raw: &[u8]) -> Result<Inspecti
                         &mut report,
                         Outcome::Error,
                         "unsupported/malformed readiness contract or order",
+                    );
+                }
+            }
+            EventKind::BootstrapStart => {
+                if !plan.adapter.bootstrap()
+                    || bootstrap_start.replace(event).is_some()
+                    || bootstrap_end.is_some()
+                    || ready.is_some()
+                    || launched.is_none_or(|start: &Event| {
+                        !matches!(start.event, EventKind::RuntimeStart { .. })
+                            || start.clock != event.clock
+                            || start.engine != event.engine
+                            || start.offset_us >= event.offset_us
+                    })
+                {
+                    bootstrap_invalid = true;
+                    add_reason(
+                        &mut report,
+                        Outcome::Error,
+                        "bootstrap start contract, clock or order",
+                    );
+                }
+            }
+            EventKind::BootstrapEnd => {
+                if !plan.adapter.bootstrap()
+                    || bootstrap_end.replace(event).is_some()
+                    || ready.is_some()
+                    || bootstrap_start.is_none_or(|start: &Event| {
+                        start.clock != event.clock
+                            || start.engine != event.engine
+                            || start.offset_us >= event.offset_us
+                    })
+                {
+                    bootstrap_invalid = true;
+                    add_reason(
+                        &mut report,
+                        Outcome::Error,
+                        "bootstrap end contract, clock or order",
                     );
                 }
             }
@@ -1658,11 +1734,16 @@ fn analyze(root: &Path, plan: &Plan, c: &Capture, raw: &[u8]) -> Result<Inspecti
                 }
                 finishes.push(id);
             }
-            EventKind::Failure { detail } => add_reason(
-                &mut report,
-                Outcome::Inconclusive,
-                format!("source failure: {detail}"),
-            ),
+            EventKind::Failure { detail } => {
+                if bootstrap_start.is_some() && bootstrap_end.is_none() {
+                    bootstrap_invalid = true;
+                }
+                add_reason(
+                    &mut report,
+                    Outcome::Inconclusive,
+                    format!("source failure: {detail}"),
+                );
+            }
             EventKind::Sealed { requests } => {
                 sealed = Some(*requests);
                 if *requests != starts.len() {
@@ -1705,6 +1786,15 @@ fn analyze(root: &Path, plan: &Plan, c: &Capture, raw: &[u8]) -> Result<Inspecti
             &mut report,
             Outcome::Inconclusive,
             "runtime coverage seal missing",
+        );
+    }
+    if plan.adapter.bootstrap()
+        && (bootstrap_start.is_none() || bootstrap_end.is_none() || ready.is_none())
+    {
+        add_reason(
+            &mut report,
+            Outcome::Inconclusive,
+            "bootstrap completion before ASGI ready unavailable",
         );
     }
     let body_hash = evidence::digest(request_body(plan)?.as_bytes());
@@ -1750,6 +1840,10 @@ fn analyze(root: &Path, plan: &Plan, c: &Capture, raw: &[u8]) -> Result<Inspecti
                 communication_start,
                 communication_end,
             ),
+            Target::Bootstrap => {
+                let end = bootstrap_end.filter(|_| !bootstrap_invalid && ready.is_some());
+                duration(&mut report, target.clone(), bootstrap_start, end);
+            }
             Target::Reload if c.stage == Stage::Reload => {
                 if let Some(record) = c
                     .requests

@@ -11,6 +11,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -76,17 +77,21 @@ def external(port):
         connection.close()
 
 
-def run(binary, root, fault="none", extra=None, delays=(80, 100, 120)):
+def run(binary, root, fault="none", extra=None, delays=(80, 100, 120), bootstrap_ms=None):
     port = old.port()
     plan = old.plan(binary, f"http://127.0.0.1:{port}/v1/chat/completions")
-    plan["adapter"] = "runtime_asgi_fixture_v1"
+    plan["adapter"] = "runtime_asgi_fixture_v1" if bootstrap_ms is None else "runtime_asgi_fixture_bootstrap_v1"
     plan["adapter_sha256"] = old.digest((HERE / "startup-runtime.py").read_bytes())
     plan["runtime_window_us"] = 2000000
     plan["gates"] = [gate for gate in plan["gates"] if gate["target"]["kind"] != "communication"]
+    if bootstrap_ms is not None:
+        plan["gates"].append({"target": {"kind": "bootstrap"}, "max_regression_bps": 500,
+                              "max_reference_spread_bps": 500})
     plan_path, journal, out = root / "plan.json", root / "journal.ndjson", root / "capture"
     old.save(plan_path, plan)
     with child("--plan", plan_path, "--events", journal, "--port", port, "--fault", fault,
-               "--ready-ms", delays[0], "--listen-ms", delays[1], "--inference-ms", delays[2]) as server:
+               "--ready-ms", delays[0], "--listen-ms", delays[1], "--inference-ms", delays[2],
+               "--bootstrap-ms", bootstrap_ms if bootstrap_ms is not None else 0) as server:
         if extra == "before":
             wait_event(journal, "listening")
             external(port)
@@ -115,6 +120,15 @@ def run(binary, root, fault="none", extra=None, delays=(80, 100, 120)):
             assert samples["first_valid_inference"] >= samples["listening"] + delays[2] * 1000, samples
             rows = events(out / "events.bin")
             ready = next(e for e in rows if e["event"]["kind"] == "ready")
+            if bootstrap_ms is not None:
+                start = next(e for e in rows if e["event"]["kind"] == "bootstrap_start")
+                end = next(e for e in rows if e["event"]["kind"] == "bootstrap_end")
+                assert samples["bootstrap"] == end["offset_us"] - start["offset_us"]
+                assert samples["bootstrap"] >= bootstrap_ms * 1000
+                assert ready["offset_us"] - end["offset_us"] >= delays[0] * 1000
+                assert start["clock"] == end["clock"] == ready["clock"] == rows[0]["clock"]
+                assert start["engine"] == end["engine"] == ready["engine"] == rows[0]["engine"]
+                assert rows[0]["offset_us"] < start["offset_us"] < end["offset_us"] < ready["offset_us"]
             coverage = next(e for e in rows if e["event"]["kind"] == "runtime_coverage")
             assert coverage["offset_us"] - ready["offset_us"] >= plan["runtime_window_us"]
             # An early count-based seal would finish before this required exposure.
@@ -122,6 +136,10 @@ def run(binary, root, fault="none", extra=None, delays=(80, 100, 120)):
             assert report["cache_result"] == "unavailable", report
         else:
             assert report["outcome"] != "PASS", report
+            if bootstrap_ms is not None:
+                assert "bootstrap" not in old.durations(report), report
+                if fault == "bootstrap_failed":
+                    assert not any(e["event"]["kind"] == "bootstrap_end" for e in events(out / "events.bin"))
             if extra is not None:
                 ids = [e["event"]["id"] for e in events(out / "events.bin") if e["event"]["kind"] == "request_start"]
                 assert any(value.startswith("external-") for value in ids), ids
@@ -167,20 +185,86 @@ def restart_unavailable(binary, root):
         assert identities[0] != identities[1], identities
 
 
+def bootstrap_replay(binary, root, base):
+    _, original = old.cli(binary, "inspect", base, expect=0)
+    imported = root / "bootstrap-import"
+    _, report = old.cli(binary, "import", base, "--out", imported, expect=0)
+    assert report["provenance"] == "imported"
+    assert old.durations(report) == old.durations(original)
+    _, replayed = old.cli(binary, "inspect", imported, expect=0)
+    assert replayed == report
+
+    for fault in ["end-clock", "frontend-clock", "incarnation", "before-runtime", "failed-with-end",
+                  "legacy-contract", "communication-unavailable", "duration-oracle"]:
+        source = root / f"bootstrap-replay-{fault}"
+        shutil.copytree(base, source)
+
+        def transform(rows):
+            start = next(e for e in rows if e["event"]["kind"] == "bootstrap_start")
+            end = next(e for e in rows if e["event"]["kind"] == "bootstrap_end")
+            if fault in ("end-clock", "frontend-clock"):
+                end["clock"]["id"] = "other-frontend-clock"
+                if fault == "frontend-clock":
+                    start["clock"]["id"] = "other-frontend-clock"
+            elif fault == "incarnation":
+                start["engine"]["start_ticks"] += 1
+                end["engine"]["start_ticks"] += 1
+            elif fault == "before-runtime":
+                start["offset_us"] = rows[0]["offset_us"]
+                rows.remove(start)
+                rows.insert(0, start)
+            elif fault == "failed-with-end":
+                failed = json.loads(json.dumps(start))
+                failed["event"] = {"kind": "failure", "detail": "synthetic construction exception"}
+                rows.insert(rows.index(end), failed)
+            elif fault == "legacy-contract":
+                rows[0]["event"]["source_contract"] = "ordinary-asgi-fixture-v1"
+            elif fault == "duration-oracle":
+                delta = start["offset_us"] + 100000 - end["offset_us"]
+                for row in rows[rows.index(end):]:
+                    row["offset_us"] += delta
+
+        old.rewrite_events(source, transform)
+        if fault in ("legacy-contract", "communication-unavailable"):
+            plan = json.loads((source / "plan.json").read_text())
+            if fault == "legacy-contract":
+                plan["adapter"] = "runtime_asgi_fixture_v1"
+            else:
+                plan["gates"].append({"target": {"kind": "communication"}, "max_regression_bps": 500,
+                                      "max_reference_spread_bps": 500})
+            old.save(source / "plan.json", plan)
+            receipt = json.loads((source / "capture.json").read_text())
+            receipt["plan_sha256"] = old.digest((source / "plan.json").read_bytes())
+            old.save(source / "capture.json", receipt)
+        destination = root / f"bootstrap-replay-import-{fault}"
+        _, report = old.cli(binary, "import", source, "--out", destination)
+        if fault == "duration-oracle":
+            assert report["outcome"] == "PASS", report
+            assert old.durations(report)["bootstrap"] == 100000, report
+        else:
+            assert report["outcome"] != "PASS", report
+            if fault == "communication-unavailable":
+                assert "communication" not in old.durations(report), report
+                assert old.durations(report)["bootstrap"] == old.durations(original)["bootstrap"]
+            else:
+                assert "bootstrap" not in old.durations(report), report
+        _, replayed = old.cli(binary, "inspect", destination)
+        assert replayed == report
+
+
 def source_sets(root):
-    # Tiny synthetic PUBLIC-source stand-ins, not serving code or qualified
-    # runtime evidence. Only the two expected pin tables are substituted;
-    # selection, regular-file reads, hashing and rechecking are real.
+    # Synthetic public-source stand-ins; no serving import or local pin promotion.
     names = tuple(bridge.SOURCE_PINS)
+    bootstrap_names = tuple(bridge.SOURCE_PINS_487_BOOTSTRAP)
     shared = "vllm/entrypoints/openai/api_server.py"
-    sources = []
-    pins = []
-    for revision in ["old", "new"]:
+    sources, pins = [], []
+    for revision in ["old", "new", "bootstrap"]:
         directory = root / revision
         directory.mkdir()
         paths, expected = {}, {}
-        for index, name in enumerate(names):
-            raw = ("shared-api\n" if name == shared else f"{revision}-{name}\n").encode()
+        for index, name in enumerate(bootstrap_names if revision == "bootstrap" else names):
+            source_revision = "new" if revision == "bootstrap" else revision
+            raw = ("shared-api\n" if name == shared else f"{source_revision}-{name}\n").encode()
             path = directory / f"source-{index}.py"
             path.write_bytes(raw)
             paths[name] = path
@@ -188,9 +272,10 @@ def source_sets(root):
         sources.append(paths)
         pins.append(expected)
 
-    adapters = ["runtime_vllm_v1", "runtime_vllm_487ecf187_v1"]
+    adapters = ["runtime_vllm_v1", "runtime_vllm_487ecf187_v1", "runtime_vllm_487ecf187_bootstrap_v1"]
     contracts = ["vllm-0.27.0-uvicorn-0.34.0-sha256-v1",
-                 "vllm-487ecf187-uvicorn-0.52.4-sha256-v1"]
+                 "vllm-487ecf187-uvicorn-0.52.4-sha256-v1",
+                 "vllm-487ecf187-uvicorn-0.52.4-sha256-bootstrap-v1"]
 
     def rejected(paths, adapter):
         try:
@@ -199,12 +284,14 @@ def source_sets(root):
             return
         raise AssertionError(("unreviewed source set admitted", adapter, paths))
 
-    with patch.object(bridge, "SOURCE_PINS", pins[0]), patch.object(bridge, "SOURCE_PINS_487", pins[1]):
+    with (patch.object(bridge, "SOURCE_PINS", pins[0]),
+          patch.object(bridge, "SOURCE_PINS_487", pins[1]),
+          patch.object(bridge, "SOURCE_PINS_487_BOOTSTRAP", pins[2])):
         for index, adapter in enumerate(adapters):
             assert bridge.verify_sources(sources[index], adapter) == contracts[index]
-            rejected(sources[1 - index], adapter)  # Whole valid set, wrong prospective contract.
-        # API bytes are identical across sets. Every mixture of the three changed
-        # files must fail both contracts even though each file is individually known.
+            for other in range(len(adapters)):
+                if other != index:
+                    rejected(sources[other], adapter)
         changed = tuple(name for name in names if name != shared)
         for mask in range(1, (1 << len(changed)) - 1):
             mixed = dict(sources[0])
@@ -212,17 +299,21 @@ def source_sets(root):
                 mixed[name] = sources[(mask >> index) & 1][name]
             for adapter in adapters:
                 rejected(mixed, adapter)
+            rejected({**sources[2], **mixed}, adapters[2])
         for index, adapter in enumerate(adapters):
-            rejected({name: path for name, path in sources[index].items() if name != shared}, adapter)
+            for missing in sources[index]:
+                rejected({name: path for name, path in sources[index].items() if name != missing}, adapter)
             rejected({**sources[index], "unreviewed.py": sources[index][shared]}, adapter)
-            rejected(sources[index], "runtime_asgi_fixture_v1")
-            rejected(sources[index], "runtime_vllm_latest")
+            for unsupported in ["runtime_asgi_fixture_v1", "runtime_asgi_fixture_bootstrap_v1", "runtime_vllm_latest"]:
+                rejected(sources[index], unsupported)
             assert bridge.verify_sources(sources[index], adapter) == contracts[index]
-            sources[index][changed[0]].write_bytes(b"drift after initial admission\n")
-            rejected(sources[index], adapter)  # The same selected set must fail recheck.
-    # Also exercise the actual public pins against wrong bytes (no table replacement).
-    for adapter in adapters:
-        rejected(sources[0], adapter)
+            for path in sources[index].values():
+                original = path.read_bytes()
+                path.write_bytes(b"drift after initial admission\n")
+                rejected(sources[index], adapter)
+                path.write_bytes(original)
+    for index, adapter in enumerate(adapters):
+        rejected(sources[index], adapter)
 
 
 def main():
@@ -247,9 +338,21 @@ def main():
             case = root / name
             case.mkdir()
             run(binary, case, fault, extra, delays)
+        for name, fault, delay, ready_delay in [
+                ("bootstrap-base", "none", 60, 80),
+                ("bootstrap-delay", "none", 260, 80),
+                ("bootstrap-ready-delay", "none", 60, 280),
+                *[(fault, fault, 60, 80) for fault in [
+                    "missing_bootstrap", "missing_bootstrap_start", "missing_bootstrap_end",
+                    "bootstrap_failed", "duplicate_bootstrap_start", "duplicate_bootstrap_end",
+                    "reordered_bootstrap", "late_bootstrap"]]]:
+            case = root / name
+            case.mkdir()
+            run(binary, case, fault, delays=(ready_delay, 100, 120), bootstrap_ms=delay)
+        bootstrap_replay(binary, root, root / "bootstrap-base" / "capture")
         restart_unavailable(binary, root)
         source_sets(root)
-    print("runtime ASGI: native/replay, three delays, external before/after, internal admissions, bad readiness, namespace mismatch, source drift and missing seal")
+    print("runtime ASGI: native/replay, independent bootstrap/ready/listen/inference delays, malformed bootstrap boundaries, exposure failures and closed source sets")
 
 
 if __name__ == "__main__":

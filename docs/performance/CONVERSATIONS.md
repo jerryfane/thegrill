@@ -193,6 +193,14 @@ trailing values fail. IDs cannot duplicate an earlier call in the retained
 parent history. Unknown tools, multiple calls and answer text in the tool step
 fail; no arbitrary tool runs.
 
+Successful streamed fixed calls accept `tool_calls` or `stop`, followed by
+`[DONE]`. The pinned [vLLM named-tool implementation](https://github.com/vllm-project/vllm/blob/487ecf187/vllm/entrypoints/openai/chat_completion/serving.py)
+uses `stop` for the explicitly named function selected by this profile.
+This applies to the streamed workload-5 and workload-6 paths only; historical
+nonstreaming tool semantics remain unchanged. `length`, missing finish/terminal
+events, malformed arguments and incomplete calls still fail. Neither successful
+finish spelling bypasses tool identity, history or usage validation.
+
 The follow-up is built by the existing history machinery using the actual
 assembled ID/name/argument bytes and declared local fixture result. Formatting
 inside the encoded arguments is retained. A parent-linked factual follow-up is

@@ -3,11 +3,11 @@
   "version": 1,
   "adapter": "exl3-e3-grouped",
   "revision": "0000000000000000000000000000000000000000000000000000000000000000",
-  "program_sha256": "bdd39986fe525b7416473128babc694e591913e959a1b846af464cd734e87c6d",
+  "program_sha256": "80aa81701286b4d1bd9b44dc8e91acf27614d13621e672a7db55b04f29ce1d01",
   "sources": [
     {
       "path": "tools/microbench/exl3_e3_grouped.py",
-      "sha256": "bdd39986fe525b7416473128babc694e591913e959a1b846af464cd734e87c6d"
+      "sha256": "80aa81701286b4d1bd9b44dc8e91acf27614d13621e672a7db55b04f29ce1d01"
     },
     {
       "path": "tests/bench_e3_microbench.py",
@@ -47,7 +47,7 @@
   "warmups": 2,
   "iterations": 5,
   "allowance": {
-    "work_units": 300000000000,
+    "work_units": 3000000000000,
     "memory_bytes": 68719476736,
     "deadline_ms": 600000
   },

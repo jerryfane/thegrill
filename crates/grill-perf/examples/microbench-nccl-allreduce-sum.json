@@ -3,11 +3,11 @@
   "version": 1,
   "adapter": "nccl-allreduce-sum",
   "revision": "0000000000000000000000000000000000000000000000000000000000000000",
-  "program_sha256": "5dfb5a9b38ffeb38965367e2abb2f9b9c93c0419536f69ae6eb76a521a850081",
+  "program_sha256": "0a80b4c9a69819a2f5f890c72fb8ca5fe81b4f775a209d7c09f0fcae05c99a85",
   "sources": [
     {
       "path": "tools/microbench/nccl_allreduce_sum.py",
-      "sha256": "5dfb5a9b38ffeb38965367e2abb2f9b9c93c0419536f69ae6eb76a521a850081"
+      "sha256": "0a80b4c9a69819a2f5f890c72fb8ca5fe81b4f775a209d7c09f0fcae05c99a85"
     },
     {
       "path": "doc/PERFORMANCE.md",
@@ -37,8 +37,8 @@
   "warmups": 1,
   "iterations": 5,
   "allowance": {
-    "work_units": 2000000,
-    "memory_bytes": 8388608,
+    "work_units": 5000000,
+    "memory_bytes": 16777216,
     "deadline_ms": 120000
   },
   "correctness": {

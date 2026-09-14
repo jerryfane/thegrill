@@ -49,6 +49,20 @@ Byte definitions (NVIDIA/nccl-tests `doc/PERFORMANCE.md`):
 
 The adapter never translates either bandwidth into a serving-speed claim.
 
+Allowance admission. Before `torch` is imported, before any rendezvous, and
+before any rank, window or device is opened, the declared allowance must already
+cover the frozen cell's known minimum: `world * numel * (warmups + iterations)`
+element operations, and, per rank, the PyTorch tensor payloads the cell holds
+(five live `int64` element tensors plus the boolean element payload of the
+exactness comparison). The retained `execution.work_units` and
+`execution.memory_bytes` are that same derivation, so the accounting cannot be
+understated relative to what was admitted, and every rank checks it before the
+gather so an exceeded allowance is retained whichever rank observed it.
+`memory_bytes` is a PyTorch tensor-payload figure for one rank — never total
+device, driver, NCCL or world memory, and not a physical OOM bound: the CUDA
+context, NCCL channels/rings/buffers, driver allocations and any non-PyTorch
+workspace are outside it.
+
 Runtime pins are observations of what this process actually saw (installed
 torch/NCCL versions, participating device names, the participant count and
 element shape it reduced, and how many declared sources it could verify from
@@ -191,6 +205,24 @@ REQUIRED_OBSERVATIONS = {
 }
 PINNED_OBSERVATIONS = {"numel": "262144", "dtype": "int64", "op": "sum"}
 
+# Frozen repetition counts. The collector pins them for this adapter and the
+# admission bound is derived from them, so a directly executed producer must
+# refuse a plan that declares anything else.
+FROZEN_WARMUPS = 1
+FROZEN_ITERATIONS = 5
+
+# Per-rank tensor-payload accounting for the frozen collective. `index`,
+# `partial`, `expected`, `input_template` and `buffer` are five live `int64`
+# tensors of `numel` elements, and the exactness comparison allocates one
+# boolean tensor of `numel` elements. Scalar or library-internal temporaries
+# below one element payload are not counted, and neither is any non-PyTorch
+# memory: the CUDA context, NCCL channels/rings/buffers, driver allocations and
+# every other process are outside this bound. It is a per-rank PyTorch
+# tensor-payload figure, never total device, driver or world memory.
+INT64_BYTES = 8
+LIVE_INT64_PAYLOADS = 5
+COMPARISON_PAYLOADS = 1
+
 
 def abort(message: str) -> "NoReturn":  # type: ignore[name-defined]
     print(f"{ADAPTER}: {message}", file=sys.stderr, flush=True)
@@ -213,6 +245,25 @@ def sha256_file(path: str) -> str:
 def sample_duration(nanoseconds: int) -> dict:
     """Integer nanosecond readings are already exact: `value / 1`."""
     return {"numerator": int(nanoseconds), "denominator": 1}
+
+
+def minimum_allowance(operation: dict) -> tuple[int, int]:
+    """Sound minimum `(work_units, memory_bytes)` for the frozen collective.
+
+    Mirrors `microbench::minimum_allowance` in
+    crates/grill-perf/src/microbench.rs; both sides derive the same numbers, or
+    one could admit a plan the other refuses.
+
+    `work_units` counts one reduced `int64` element per participating rank per
+    repetition, warmups included: `world * numel * (warmups + iterations)`. The
+    world factor is why rank 0's single retained number already accounts for
+    every rank. `memory_bytes` is the per-rank tensor-payload figure above.
+    """
+    numel = int(operation["numel"])
+    world = int(operation["world"])
+    work_units = world * numel * (FROZEN_WARMUPS + FROZEN_ITERATIONS)
+    memory_bytes = numel * (INT64_BYTES * LIVE_INT64_PAYLOADS + COMPARISON_PAYLOADS)
+    return work_units, memory_bytes
 
 
 def artifact_body(
@@ -354,6 +405,8 @@ def check_plan(plan: dict) -> None:
         abort("plan must list a fixed world >= 2 and exactly ranks 0..world-1")
     if plan.get("clock") != CLOCK:
         abort("plan clock is not the pinned rank-monotonic-ns contract")
+    if plan.get("warmups") != FROZEN_WARMUPS or plan.get("iterations") != FROZEN_ITERATIONS:
+        abort(f"plan must declare warmups {FROZEN_WARMUPS} and iterations {FROZEN_ITERATIONS}")
     revision = plan.get("revision")
     if not isinstance(revision, str) or len(revision) != 64 or not all(
         character in "0123456789abcdef" for character in revision
@@ -367,6 +420,20 @@ def check_plan(plan: dict) -> None:
     for key in ("work_units", "memory_bytes", "deadline_ms"):
         if not isinstance(allowance.get(key), int) or allowance[key] <= 0:
             abort(f"plan allowance {key} must be a positive integer")
+    # Admission happens before any rendezvous, rank, window or device is opened:
+    # a declared allowance below the frozen cell's known minimum is not an
+    # allowance, and it must not be discovered after the collective has run.
+    minimum_work, minimum_memory = minimum_allowance(operation)
+    if allowance["work_units"] < minimum_work:
+        abort(
+            f"plan allowance work_units {allowance['work_units']} is below the frozen collective "
+            f"minimum {minimum_work}"
+        )
+    if allowance["memory_bytes"] < minimum_memory:
+        abort(
+            f"plan allowance memory_bytes {allowance['memory_bytes']} is below the frozen collective "
+            f"per-rank tensor payload {minimum_memory}"
+        )
     correctness = plan.get("correctness") or {}
     if correctness.get("reference") != REFERENCE_ID:
         abort("plan correctness reference is not the exact all-reduce sum")
@@ -556,6 +623,35 @@ def main() -> int:
                 }
             )
 
+        # The accounting the plan was admitted against, re-derived here from the
+        # same frozen figures so it cannot drift from the admission bound.
+        # Every rank checks its own accounting before the gather and every
+        # rank's failures are gathered and flattened, so an exceeded allowance
+        # is retained no matter which rank observed it. The work figure already
+        # carries the declared world, and the tensor payloads are per rank, so
+        # rank 0's retained numbers cover every participant.
+        work_units, memory_bytes = minimum_allowance(operation)
+        if work_units > plan["allowance"]["work_units"]:
+            failures.append(
+                {
+                    "kind": "allowance-exceeded",
+                    "detail": (
+                        f"rank {rank} work {work_units} exceeds declared "
+                        f"{plan['allowance']['work_units']}"
+                    ),
+                }
+            )
+        if memory_bytes > plan["allowance"]["memory_bytes"]:
+            failures.append(
+                {
+                    "kind": "allowance-exceeded",
+                    "detail": (
+                        f"rank {rank} per-rank tensor payload {memory_bytes} exceeds declared "
+                        f"{plan['allowance']['memory_bytes']}"
+                    ),
+                }
+            )
+
         gathered = [None for _ in range(world)]
         distributed.gather_object(
             {
@@ -563,6 +659,7 @@ def main() -> int:
                 "times": times,
                 "mismatches": mismatches,
                 "device": torch.cuda.get_device_name(local),
+                "failures": failures,
             },
             object_list=gathered if rank == 0 else None,
         )
@@ -582,6 +679,9 @@ def main() -> int:
 
     if rank != 0:
         return 0
+
+    # Required warmup failures belong to every rank, not just the emitting rank.
+    failures = [failure for entry in gathered if entry is not None for failure in entry["failures"]]
 
     # The observed runtime descriptor: the versions actually loaded in this
     # process plus the participating device names reported by the gather. Its
@@ -631,22 +731,6 @@ def main() -> int:
             {
                 "kind": "incomplete-samples",
                 "detail": f"retained {len(samples)} of {world * iterations} per-rank samples",
-            }
-        )
-    work_units = numel * (warmups + iterations)
-    memory_bytes = numel * 8 * 3
-    if work_units > plan["allowance"]["work_units"]:
-        failures.append(
-            {
-                "kind": "allowance-exceeded",
-                "detail": f"work {work_units} exceeds declared {plan['allowance']['work_units']}",
-            }
-        )
-    if memory_bytes > plan["allowance"]["memory_bytes"]:
-        failures.append(
-            {
-                "kind": "allowance-exceeded",
-                "detail": f"memory {memory_bytes} exceeds declared {plan['allowance']['memory_bytes']}",
             }
         )
     observations = [

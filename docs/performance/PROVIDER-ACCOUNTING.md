@@ -114,6 +114,12 @@ finite, retained and re-validated offline:
   twice the planned wave count in requests, `waves × 2 × 256` selected series
   and 1 s of scrape/parse overhead;
 - exhaustion retains `skipped_budget` without another call, as in version 1;
+- the overhead threshold is cooperative: an already-admitted operation can
+  cross it during read/parse/publication. Its actual timing and raw bytes are
+  retained without clamping; an otherwise complete snapshot becomes
+  `overhead_limit`, contributes no complete telemetry, and subsequent scrapes
+  are skipped. Existing failure/cancellation statuses remain failures. Offline
+  replay rejects a `complete` snapshot that conceals this overrun;
 - an in-flight scrape cancelled by the acquisition latch retains bounded partial
   raw bytes as `cancelled` and never counts as complete evidence.
 
@@ -194,5 +200,8 @@ Missing position vectors cannot establish a zero sum or monotonicity.
 - Independent collector traffic in an acquisition is not sufficient evidence of
   a worker-counter reset, and an exporter identity that does not attest epochs
   cannot support continuity claims.
-- Version 2 is implemented and CPU-fixture verified only; it has not been
-  exercised against a live endpoint, and no serving window is implied.
+- Version 2 has been exercised on a live vLLM deployment with three complete
+  16-snapshot acquisitions. Independent arithmetic over retained exposition
+  reproduced counter deltas, per-position ratios and accounting reconciliation.
+  This establishes that bounded path, not other providers, exclusive attribution,
+  restart continuity or a no-preemption claim. Raw operator captures remain private.

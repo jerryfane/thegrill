@@ -279,7 +279,7 @@ formatted `nvidia-smi` output. The raw envelope embeds this pin and
 
 The only runtime entry points are:
 
-* `nvmlInitWithFlags(2)` (`NVML_INIT_FLAG_NO_ATTACH`), `nvmlShutdown()`;
+* `nvmlInitWithFlags(0)` (lazy v2 initialization), `nvmlShutdown()`;
 * `nvmlSystemGetNVMLVersion`, `nvmlSystemGetDriverVersion` (80-byte buffers);
 * `nvmlDeviceGetHandleByUUID`, `nvmlDeviceGetUUID` (96-byte buffer);
 * memory: `nvmlDeviceGetMemoryInfo`, **v1**, three C unsigned long long fields in
@@ -314,6 +314,11 @@ its gates; standalone A/B/A2 comparison also requires this incarnation to remain
 compatible for each GPU gate. This conservatively excludes driver/NVML upgrades
 as a candidate change in this source version. Observed version strings are not
 hashes of driver binaries or an execution attestation.
+
+Native trace version 2 records `init_flags: 0`. `NO_ATTACH` can prevent even a
+present, explicitly selected UUID from resolving; it is no longer used for new
+collection. Version-1 traces retain their implicit `NO_ATTACH` meaning on replay,
+including failures. No legacy `nvmlInit` fallback or selector fallback is added.
 
 The caller's capture-monotonic read end is still the observation offset.
 NVML's field timestamp is retained Unix-microsecond metadata, never subtracted
@@ -379,6 +384,14 @@ complete population using the command in the Commands section. These commands
 also work with an absolute staged binary outside the checkout. Actual device
 qualification needs retained native traces and independent review; a passing
 CPU fixture or imported GPU trace is insufficient.
+Subsequent bounded native exercises observed instantaneous power on two
+explicitly selected devices. All 24 sampled energy integrals replayed and matched
+independent exact arithmetic over the retained native field values. Device memory
+was unsupported and remained unavailable; neither host-memory substitution nor
+model attribution was used. Both resource comparisons were INCONCLUSIVE.
+The template allows 32 total samples so its two sources can bracket a one-second
+interval at 100 ms cadence without exhausting a 16-sample ceiling.
+
 
 ### NVIDIA notice for the derived ABI declarations
 

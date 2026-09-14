@@ -425,12 +425,6 @@ impl Semantic {
                 return Err((Status::Malformed, "DONE before finish"));
             }
             if let Some(tool) = &self.tool {
-                if self.finish.as_deref() != Some("tool_calls") {
-                    return Err((
-                        Status::Malformed,
-                        "fixed tool stream requires tool_calls finish",
-                    ));
-                }
                 timing.first_validated_tool_call_us =
                     Some(tool.validated_us().map_err(|_| {
                         (Status::Malformed, "incomplete or invalid fixed tool call")
@@ -560,7 +554,8 @@ impl Semantic {
                 return Err((Status::Malformed, "duplicate finish"));
             }
             if let Some(tool) = &self.tool
-                && (reason != "tool_calls" || tool.validated_us().is_err())
+                && (!matches!(reason.as_ref(), "tool_calls" | "stop")
+                    || tool.validated_us().is_err())
             {
                 return Err((Status::Malformed, "invalid fixed tool call at finish"));
             }

@@ -9,6 +9,7 @@ import asyncio
 import importlib.util
 import json
 from pathlib import Path
+import time
 from types import SimpleNamespace
 
 spec = importlib.util.spec_from_file_location("startup_runtime", Path(__file__).with_name("startup-runtime.py"))
@@ -24,9 +25,12 @@ async def serve(args):
         if args.fault == "source_drift" or bridge.digest(bridge.bounded_read(source)) != initial_hash:
             raise ValueError("synthetic source drift")
 
-    journal = bridge.Journal(args.plan, args.events, args.stage, "ordinary-asgi-fixture-v1", source_check)
-    if journal.plan["adapter"] != "runtime_asgi_fixture_v1":
+    adapter = json.loads(bridge.bounded_read(args.plan))["adapter"]
+    bootstrap = adapter == "runtime_asgi_fixture_bootstrap_v1"
+    if adapter not in ("runtime_asgi_fixture_v1", "runtime_asgi_fixture_bootstrap_v1"):
         raise ValueError("fixture cannot claim real runtime source execution")
+    contract = "ordinary-asgi-fixture-bootstrap-v1" if bootstrap else "ordinary-asgi-fixture-v1"
+    journal = bridge.Journal(args.plan, args.events, args.stage, contract, source_check)
     if args.fault == "namespace":
         # Adversarial retained source identity, not a fabricated host PID mapping.
         # Alter the initial event before the collector attaches; replay must refuse.
@@ -48,6 +52,31 @@ async def serve(args):
             return str(sum(range(7)))
 
     engine = Engine()
+
+    class CoreClient:
+        @staticmethod
+        def make_async_mp_client():
+            time.sleep(args.bootstrap_ms / 1000)
+            if args.fault == "bootstrap_failed":
+                raise RuntimeError("synthetic engine construction failure")
+            return engine
+
+    if bootstrap:
+        bridge.install_bootstrap(journal, CoreClient)
+
+    def construct():
+        if args.fault == "missing_bootstrap_start":
+            journal.emit("bootstrap_end")
+        elif args.fault == "missing_bootstrap_end":
+            journal.emit("bootstrap_start")
+        elif args.fault != "missing_bootstrap":
+            if args.fault == "duplicate_bootstrap_start":
+                journal.emit("bootstrap_start")
+            if args.fault == "reordered_bootstrap":
+                journal.emit("bootstrap_end")
+            assert CoreClient.make_async_mp_client() is engine
+            if args.fault == "duplicate_bootstrap_end":
+                journal.emit("bootstrap_end")
 
     async def app(scope, receive, send):
         if scope["type"] == "lifespan":
@@ -156,7 +185,11 @@ async def serve(args):
     bridge.install(journal, Server, Engine)
     server = Server()
     try:
+        if bootstrap and args.fault != "late_bootstrap":
+            construct()
         await server.startup()
+        if bootstrap and args.fault == "late_bootstrap":
+            construct()
         if args.fault == "missing_seal" and journal.timer is not None:
             journal.timer.cancel()
         if args.fault == "hidden_engine":
@@ -186,14 +219,20 @@ def main():
     parser.add_argument("--events", required=True)
     parser.add_argument("--port", type=int, required=True)
     parser.add_argument("--stage", choices=["startup", "store", "reload"], default="startup")
-    parser.add_argument("--fault", choices=["none", "invalid_ready", "namespace", "source_drift", "missing_seal", "hidden_engine", "hidden_inline"], default="none")
+    parser.add_argument("--fault", choices=[
+        "none", "invalid_ready", "namespace", "source_drift", "missing_seal", "hidden_engine", "hidden_inline",
+        "missing_bootstrap", "missing_bootstrap_start", "missing_bootstrap_end", "bootstrap_failed",
+        "duplicate_bootstrap_start", "duplicate_bootstrap_end", "reordered_bootstrap", "late_bootstrap",
+    ], default="none")
+    parser.add_argument("--bootstrap-ms", type=int, default=60)
     parser.add_argument("--ready-ms", type=int, default=80)
     parser.add_argument("--listen-ms", type=int, default=100)
     parser.add_argument("--inference-ms", type=int, default=120)
     parser.add_argument("--lifetime", type=float, default=20)
     args = parser.parse_args()
     if (not 0 < args.port < 65536 or not 0 < args.lifetime <= 120
-            or any(not 0 <= value <= 5000 for value in (args.ready_ms, args.listen_ms, args.inference_ms))):
+            or any(not 0 <= value <= 5000 for value in
+                   (args.bootstrap_ms, args.ready_ms, args.listen_ms, args.inference_ms))):
         parser.error("finite fixture bounds exceeded")
     asyncio.run(serve(args))
 

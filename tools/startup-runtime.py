@@ -31,6 +31,13 @@ SOURCE_PINS_487 = {
     "vllm/v1/engine/async_llm.py": "bceed0b3f5f0c834fef79525f2462a092f082390f0070526280abc95945837dd",
     "uvicorn/server.py": "7c1dbd656835c9cdd6f92078ffc80bcc6007824ab322aff15435bd89c068e0be",
 }
+SOURCE_CONTRACT_487_BOOTSTRAP = "vllm-487ecf187-uvicorn-0.52.4-sha256-bootstrap-v1"
+SOURCE_PINS_487_BOOTSTRAP = {
+    **SOURCE_PINS_487,
+    "vllm/v1/engine/core_client.py": "afb2b627cf9ef861f05b411494156cc6ad5076ea770c6f2a4c8a941ca82103ec",
+    "vllm/v1/engine/core.py": "86b8f3b3826504549ef8bea2e7fbf7553728339803abcb3e7d051d146963ff9c",
+    "vllm/v1/engine/utils.py": "6ce83b0552b6207505c9bd7ac1fd67d2771628eac01572738765923aa91c1c0f",
+}
 CAP = 4 * 1024 * 1024
 BODY_CAP = 2 * 1024 * 1024
 REQUEST = contextvars.ContextVar("startup_runtime_request", default=None)
@@ -64,11 +71,13 @@ def process():
 
 
 def source_contract(adapter):
-    # Two closed, whole source sets. Never select a version separately per file.
+    # Closed, whole source sets. Never select a version separately per file.
     if adapter == "runtime_vllm_v1":
         return SOURCE_CONTRACT, SOURCE_PINS
     if adapter == "runtime_vllm_487ecf187_v1":
         return SOURCE_CONTRACT_487, SOURCE_PINS_487
+    if adapter == "runtime_vllm_487ecf187_bootstrap_v1":
+        return SOURCE_CONTRACT_487_BOOTSTRAP, SOURCE_PINS_487_BOOTSTRAP
     raise ValueError("unsupported real runtime source contract")
 
 
@@ -352,6 +361,20 @@ def install(journal, server_class, engine_class):
     journal.engine_hook = True
 
 
+def install_bootstrap(journal, core_client_class):
+    """Frontend synchronous entry-to-return; no worker or collective timing."""
+    make_client = core_client_class.make_async_mp_client
+
+    def observed_make_client(*args, **kwargs):
+        journal.emit("bootstrap_start")
+        # No finally: construction failure must never acquire a successful end.
+        result = make_client(*args, **kwargs)
+        journal.emit("bootstrap_end")
+        return result
+
+    core_client_class.make_async_mp_client = staticmethod(observed_make_client)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--plan", required=True)
@@ -381,6 +404,17 @@ def main():
             if Path(module.__file__).resolve() != Path(paths[name]).resolve():
                 raise ValueError("imported runtime source differs from verified distribution")
         install(journal, uvicorn.server.Server, vllm.v1.engine.async_llm.AsyncLLM)
+        if adapter == "runtime_vllm_487ecf187_bootstrap_v1":
+            import vllm.v1.engine.core_client
+            import vllm.v1.engine.core
+            import vllm.v1.engine.utils
+            for name, module in [
+                    ("vllm/v1/engine/core_client.py", vllm.v1.engine.core_client),
+                    ("vllm/v1/engine/core.py", vllm.v1.engine.core),
+                    ("vllm/v1/engine/utils.py", vllm.v1.engine.utils)]:
+                if Path(module.__file__).resolve() != Path(paths[name]).resolve():
+                    raise ValueError("imported bootstrap source differs from verified distribution")
+            install_bootstrap(journal, vllm.v1.engine.core_client.EngineCoreClient)
         # This is the existing single-worker entrypoint in this same OS process,
         # not a child launcher or configurable module/plugin execution framework.
         sys.argv = ["vllm.entrypoints.openai.api_server", *serving_args[1:]]

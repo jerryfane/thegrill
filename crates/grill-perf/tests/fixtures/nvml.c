@@ -12,10 +12,11 @@ union value { double d; int si; unsigned int ui; unsigned long ul;
 struct field { unsigned int field_id, scope_id; long long timestamp, latency;
     int value_type, code; union value value; };
 static int initialized;
+static unsigned int init_flags;
 static const char uuid[] = "GPU-00000000-0000-0000-0000-000000000001";
 int nvmlInitWithFlags(unsigned int flags) {
-    if (flags != 2 || initialized) return 2;
-    initialized = 1; return 0;
+    if ((flags != 0 && flags != 2) || initialized) return 2;
+    initialized = 1; init_flags = flags; return 0;
 }
 int nvmlShutdown(void) {
     if (!initialized) return 1;
@@ -34,7 +35,8 @@ int nvmlSystemGetDriverVersion(char *out, unsigned int cap) {
 }
 int nvmlDeviceGetHandleByUUID(const char *requested, device_t *device) {
     if (!initialized) return 1;
-    if (strcmp(requested, uuid)) return 6;
+    /* Reproduce the observed driver behavior without loading NVIDIA libraries. */
+    if (init_flags == 2 || strcmp(requested, uuid)) return 6;
     *device = (device_t)(uintptr_t)1; return 0;
 }
 int nvmlDeviceGetUUID(device_t device, char *out, unsigned int cap) {
