@@ -6,6 +6,7 @@ mod lifecycle;
 mod metrics;
 mod model;
 mod policy;
+mod resources;
 mod run;
 mod schedule;
 mod selection;
@@ -29,6 +30,11 @@ struct Cli {
 }
 #[derive(Subcommand)]
 enum Command {
+    /// Explicit bounded host resource observation and offline domain evidence.
+    Resource {
+        #[command(subcommand)]
+        command: resources::Command,
+    },
     /// Record the default or explicitly selected bounded workload with native evidence.
     Baseline(study::BaselineOptions),
     /// Compare a declared serving change using the verified baseline settings.
@@ -97,6 +103,7 @@ fn print_json(value: &impl serde::Serialize) -> model::Result<()> {
 }
 fn execute(cli: Cli) -> model::Result<u8> {
     match cli.command {
+        Command::Resource { command } => resources::execute(command),
         Command::Baseline(options) => {
             let report = study::baseline(&options)?;
             show_study(&report, options.json)

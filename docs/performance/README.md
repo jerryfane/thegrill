@@ -1131,6 +1131,14 @@ credential: the name is retained, the value is sent only to the metrics endpoint
 and never inherits the model credential. Version 1 runs, plans and receipts keep
 their existing schema and bytes.
 
+## Independent host resource observations
+
+[`resource capture/import/inspect/compare`](RESOURCES.md) provides a bounded
+ordinary Linux process/cgroup/explicit host observer and source-specific offline
+A/B/A2 comparisons. It does not change the default serving collector, execute
+GPU sources, or implement capacity/retention studies. Imported device/provider
+bytes remain imported evidence; source delivery is not live qualification.
+
 ## Deployment declarations and privacy
 
 `--deployment FILE` optionally records a closed JSON object with nullable
