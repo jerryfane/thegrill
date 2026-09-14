@@ -1,9 +1,10 @@
 //! Exact observed-envelope comparisons shared by serving and domain policies.
 //! Floating bounds are display-only; every decision uses checked integer products.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct Rational {
     pub numerator: u64,
     pub denominator: u64,

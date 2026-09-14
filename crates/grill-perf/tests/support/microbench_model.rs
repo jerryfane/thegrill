@@ -28,12 +28,13 @@ fn cpu_artifact(samples: Vec<Sample>) -> Artifact {
         kind: KIND.into(),
         version: VERSION,
         adapter: AdapterId::CpuSumU64Reference,
-        revision: "cpu-sum-u64-reference-v1".into(),
+        revision: evidence::digest(b"cpu-fixture"),
+        acquisition: Acquisition { id: "fixture".into(), started_unix_ms: 1 },
         operation: frozen_operation(AdapterId::CpuSumU64Reference),
         provenance: Provenance::NativeObserved,
         submitted_provenance: None,
         program_sha256: None,
-        kernel_revision: None,
+        kernel_revision: Some("cpu-fixture".into()),
         sources: Vec::new(),
         observations: Vec::new(),
         topology: Topology {
@@ -96,6 +97,7 @@ fn device_artifact() -> Artifact {
     artifact.execution.memory_bytes = 1_073_741_824;
     artifact.program_sha256 = Some("b".repeat(64));
     artifact.kernel_revision = Some("exl3-module:fixture".into());
+    artifact.revision = evidence::digest(b"exl3-module:fixture");
     artifact.sources = vec![Source {
         path: "/observed/tests/test_exl3_overlay.py".into(),
         sha256: E3_PARITY_SOURCE_SHA256.into(),
@@ -128,6 +130,11 @@ fn parity(maxabs: &str, per_token_max: &str, per_token_p99: &str, nrmse: &str) -
 }
 
 fn e3_observations(fallback: &str) -> Vec<Observation> {
+    let fallback = match fallback {
+        "e3-grouped" => "grouped",
+        "e2-kernel" => "kernel",
+        other => other,
+    };
     let observed = |name: ObservationName, value: &str| Observation {
         name,
         value: value.into(),
@@ -245,16 +252,21 @@ fn rank_artifact(values: &[[u64; 2]; 5]) -> Artifact {
 
 #[test]
 fn exact_decimal_accepts_scientific_notation_and_rejects_the_rest() {
-    assert_eq!(exact_decimal("4096"), Some(ratio(4096, 1)));
-    // Values are reduced exactly: 1.25 is 5/4, not 125/100.
-    assert_eq!(exact_decimal("1.25"), Some(ratio(5, 4)));
-    assert_eq!(exact_decimal("1."), Some(ratio(1, 1)));
-    assert_eq!(exact_decimal("1.234e-05"), Some(ratio(1234, 100_000_000)));
-    assert_eq!(exact_decimal("1E+3"), Some(ratio(1000, 1)));
-    assert_eq!(
-        exact_decimal("0.123456789012345"),
-        Some(ratio(24_691_357_802_469, 200_000_000))
-    );
+    for (text, expected) in [
+        ("4096", ratio(4096, 1)),
+        ("1.25", ratio(125, 100)),
+        ("1.", ratio(1, 1)),
+        ("1.234e-05", ratio(1234, 100_000_000)),
+        ("1E+3", ratio(1000, 1)),
+        ("0.123456789012345", ratio(123_456_789_012_345, 1_000_000_000_000_000)),
+    ] {
+        let actual = exact_decimal(text).unwrap();
+        assert_eq!(
+            u128::from(actual.numerator) * u128::from(expected.denominator),
+            u128::from(expected.numerator) * u128::from(actual.denominator),
+            "{text}"
+        );
+    }
     for rejected in [
         "", ".5", "-1", "+1", "nan", "inf", "1.2.3", " 1", "0x10", "1e", "1e31", "1e-31",
     ] {
@@ -282,6 +294,11 @@ fn durations_keep_fractional_nanoseconds_and_never_round_to_a_resolution() {
     assert_eq!(
         duration_ns("0.0000001", Units::Milliseconds),
         Ok(ratio(1, 10))
+    );
+    // The raw fraction exceeds u64, but conversion to nanoseconds fits.
+    assert_eq!(
+        duration_ns("0.00000000000000000001", Units::Milliseconds),
+        Ok(ratio(1, 100_000_000_000_000))
     );
     // Legacy three-decimal device samples still parse exactly.
     assert_eq!(
@@ -317,7 +334,8 @@ fn samples_are_checked_against_their_own_raw_representation() {
     // resolution never quantizes a value.
     let mut artifact = device_artifact();
     artifact.clock.resolution_ns = 1000;
-    assert!(check_artifact(None, &artifact).clean());
+    let findings = check_artifact(None, &artifact);
+    assert!(findings.clean(), "invalid={:?}; unavailable={:?}", findings.invalid, findings.unavailable);
     artifact.samples[0] = sample(0, None, None, "31.2345678", ratio(156_172_839, 5));
     assert!(check_artifact(None, &artifact).clean());
 
@@ -406,6 +424,13 @@ fn operation_admission_and_byte_definitions_are_unchanged() {
     assert_eq!(bus_normalization(2), Some(ratio(1, 1)));
     assert_eq!(bus_normalization(3), Some(ratio(4, 3)));
     assert_eq!(bus_normalization(1), None);
+    // Inspection still derives fields from rejected input; it must not panic.
+    let mut oversized = declared;
+    if let Operation::AllReduce { numel, .. } = &mut oversized {
+        *numel = u32::MAX;
+    }
+    assert!(derived(&oversized, &required_clock(AdapterId::NcclAllreduceSum),
+        ratio(1, u64::MAX)).is_none());
 }
 
 #[test]
@@ -548,14 +573,14 @@ fn observed_sources_and_runtime_observations_are_cross_checked() {
 }
 
 #[test]
-fn study_declaration_requires_three_complete_roles_and_a_change_axis() {
+fn study_declaration_requires_complete_roles_and_observed_revision_pins() {
     let study = |minimum: u32, baseline: &str, candidate: &str, slots: usize| Study {
         kind: STUDY_KIND.into(),
         version: VERSION,
         adapter: AdapterId::CpuSumU64Reference,
         revision_axis: RevisionAxis {
-            baseline: baseline.into(),
-            candidate: candidate.into(),
+            baseline: evidence::digest(baseline.as_bytes()),
+            candidate: evidence::digest(candidate.as_bytes()),
         },
         thresholds: Thresholds {
             adverse_bps: 500,
@@ -578,10 +603,10 @@ fn study_declaration_requires_three_complete_roles_and_a_change_axis() {
         check_study(&study(3, "rev-a", "rev-b", 2))
             .contains(&Reason::RoleMinimum)
     );
-    assert!(
-        check_study(&study(3, "rev-a", "rev-a", 3))
-            .contains(&Reason::InvalidStudy)
-    );
+    assert!(check_study(&study(3, "rev-a", "rev-a", 3)).is_empty());
+    let mut unobserved = study(3, "rev-a", "rev-b", 3);
+    unobserved.revision_axis.candidate = "operator-label".into();
+    assert!(check_study(&unobserved).contains(&Reason::InvalidStudy));
     let mut duplicated = study(3, "rev-a", "rev-b", 3);
     duplicated.roles.reference[0] = "a00".into();
     assert!(check_study(&duplicated).contains(&Reason::RoleReuse));

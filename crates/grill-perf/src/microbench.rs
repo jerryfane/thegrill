@@ -181,7 +181,7 @@ impl AdapterId {
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "kebab-case")]
+#[serde(rename_all = "snake_case")]
 pub enum Provenance {
     Declared,
     Imported,
@@ -446,7 +446,7 @@ pub struct Plan {
     pub kind: String,
     pub version: u32,
     pub adapter: AdapterId,
-    /// The candidate change axis. Every other pin must match across roles.
+    /// SHA256 of the expected observed kernel implementation descriptor.
     pub revision: String,
     pub program_sha256: Option<String>,
     pub sources: Vec<Source>,
@@ -613,6 +613,7 @@ pub struct Artifact {
     pub version: u32,
     pub adapter: AdapterId,
     pub revision: String,
+    pub acquisition: Acquisition,
     pub operation: Operation,
     /// Assigned by this collector; never taken from the payload.
     pub provenance: Provenance,
@@ -698,6 +699,8 @@ pub enum Reason {
     MissingThresholds,
     MissingReference,
     RoleReuse,
+    ObservedStartsOutOfOrder,
+    ProvenanceMismatch,
     DeclaredStartsOutOfOrder,
     StatisticUnavailable,
     ObservationMissing,
@@ -738,8 +741,13 @@ pub enum DurationError {
 /// nor separator. Rejects `nan`, `inf`, signs, empty integer parts, more than
 /// [`DECIMAL_DIGITS`] digits and exponents beyond [`DECIMAL_EXPONENT`].
 pub fn exact_decimal(text: &str) -> Option<Rational> {
+    let (numerator, denominator) = decimal_parts(text).ok()?;
+    reduce(numerator, denominator)
+}
+
+fn decimal_parts(text: &str) -> std::result::Result<(u128, u128), DurationError> {
     if text.is_empty() || text.len() > 64 {
-        return None;
+        return Err(DurationError::Malformed);
     }
     let (mantissa, exponent) = match text.split_once(['e', 'E']) {
         Some((mantissa, exponent)) => {
@@ -748,41 +756,47 @@ pub fn exact_decimal(text: &str) -> Option<Rational> {
                 None => (1i64, exponent.strip_prefix('+').unwrap_or(exponent)),
             };
             if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
-                return None;
+                return Err(DurationError::Malformed);
             }
-            let magnitude: u32 = digits.parse().ok()?;
+            let magnitude: u32 = digits.parse().map_err(|_| DurationError::Malformed)?;
             if magnitude > DECIMAL_EXPONENT {
-                return None;
+                return Err(DurationError::Malformed);
             }
             (mantissa, sign * i64::from(magnitude))
         }
         None => (text, 0),
     };
-    if mantissa.contains(['e', 'E', '-', '+']) {
-        return None;
-    }
     let (whole, fraction) = match mantissa.split_once('.') {
         Some((whole, fraction)) => (whole, fraction),
         None => (mantissa, ""),
     };
-    if whole.is_empty() || !whole.bytes().all(|b| b.is_ascii_digit()) {
-        return None;
+    if whole.is_empty()
+        || !whole.bytes().all(|b| b.is_ascii_digit())
+        || !fraction.bytes().all(|b| b.is_ascii_digit())
+        || whole.len() + fraction.len() > DECIMAL_DIGITS
+    {
+        return Err(DurationError::Malformed);
     }
-    if !fraction.bytes().all(|b| b.is_ascii_digit()) {
-        return None;
-    }
-    if whole.len() + fraction.len() > DECIMAL_DIGITS {
-        return None;
-    }
-    let digits: u128 = format!("{whole}{fraction}").parse().ok()?;
-    let mut numerator = digits;
-    let mut denominator = 10u128.pow(fraction.len() as u32);
+    let digits = whole.bytes().chain(fraction.bytes()).try_fold(0u128, |value, byte| {
+        value.checked_mul(10)?.checked_add(u128::from(byte - b'0'))
+    }).ok_or(DurationError::Overflow)?;
+    let denominator = 10u128.pow(fraction.len() as u32);
+    let divisor = gcd(digits, denominator);
+    let mut numerator = digits / divisor;
+    let mut denominator = denominator / divisor;
+    let factor = 10u128.pow(exponent.unsigned_abs() as u32);
+    // Cancel before multiplication so representable scientific decimals do not
+    // overflow merely because their unreduced intermediate fraction is large.
     if exponent >= 0 {
-        numerator = numerator.checked_mul(10u128.checked_pow(exponent as u32)?)?;
+        let divisor = gcd(factor, denominator);
+        numerator = numerator.checked_mul(factor / divisor).ok_or(DurationError::Overflow)?;
+        denominator /= divisor;
     } else {
-        denominator = denominator.checked_mul(10u128.checked_pow((-exponent) as u32)?)?;
+        let divisor = gcd(numerator, factor);
+        numerator /= divisor;
+        denominator = denominator.checked_mul(factor / divisor).ok_or(DurationError::Overflow)?;
     }
-    reduce(numerator, denominator)
+    Ok((numerator, denominator))
 }
 
 /// Exact nanosecond conversion of a retained decimal in the declared units.
@@ -790,15 +804,15 @@ pub fn exact_decimal(text: &str) -> Option<Rational> {
 /// rounded and no value is rejected for being finer than the declared
 /// resolution.
 pub fn duration_ns(text: &str, units: Units) -> std::result::Result<Rational, DurationError> {
-    let value = exact_decimal(text).ok_or(DurationError::Malformed)?;
-    if value.numerator == 0 {
+    let (numerator, denominator) = decimal_parts(text)?;
+    if numerator == 0 {
         return Err(DurationError::Zero);
     }
-    let scaled = u128::from(value.numerator)
-        .checked_mul(u128::from(units.nanoseconds()))
-        .ok_or(DurationError::Overflow)?;
-    let duration = reduce(scaled, u128::from(value.denominator)).ok_or(DurationError::Overflow)?;
-    if compare(duration, Rational {
+    let factor = u128::from(units.nanoseconds());
+    let divisor = gcd(factor, denominator);
+    let scaled = numerator.checked_mul(factor / divisor).ok_or(DurationError::Overflow)?;
+    let duration = reduce(scaled, denominator / divisor).ok_or(DurationError::Overflow)?;
+    if order(duration, Rational {
         numerator: MAX_DURATION_NS,
         denominator: 1,
     })
@@ -842,19 +856,17 @@ fn scale(a: Rational, numerator: u64, denominator: u64) -> Option<Rational> {
 
 fn add(a: Rational, b: Rational) -> Option<Rational> {
     reduce(
-        u128::from(a.numerator) * u128::from(b.denominator)
-            + u128::from(b.numerator) * u128::from(a.denominator),
+        (u128::from(a.numerator) * u128::from(b.denominator))
+            .checked_add(u128::from(b.numerator) * u128::from(a.denominator))?,
         u128::from(a.denominator) * u128::from(b.denominator),
     )
 }
 
-fn compare(a: Rational, b: Rational) -> std::cmp::Ordering {
-    (u128::from(a.numerator) * u128::from(b.denominator))
-        .cmp(&(u128::from(b.numerator) * u128::from(a.denominator)))
-}
+fn order(a: Rational, b: Rational) -> std::cmp::Ordering { (u128::from(a.numerator) * u128::from(b.denominator))
+    .cmp(&(u128::from(b.numerator) * u128::from(a.denominator))) }
 
 fn larger(a: Rational, b: Rational) -> Rational {
-    if compare(a, b).is_lt() { b } else { a }
+    if order(a, b).is_lt() { b } else { a }
 }
 
 fn display(value: Rational) -> f64 {
@@ -1103,7 +1115,7 @@ fn observations_admitted(
             numeric(ObservationName::RoutingSeed, 1, &mut reasons);
             numeric(ObservationName::ParityRoutingSeed, 3, &mut reasons);
             numeric(ObservationName::ActivationSeed, 3, &mut reasons);
-            pinned(ObservationName::FallbackTier, "e3-grouped", &mut reasons);
+            present(ObservationName::FallbackTier, &mut reasons);
             let verified =
                 observed_count(observations, &mut reasons, ObservationName::SourcesVerified);
             let declared =
@@ -1217,7 +1229,7 @@ fn derived(operation: &Operation, clock: &Clock, duration: Rational) -> Option<D
     let normalization = bus_normalization(world)?;
     // Exact bytes per second: payload * 1e9 / duration.
     let algorithm = reduce(
-        u128::from(payload) * 1_000_000_000 * u128::from(duration.denominator),
+        u128::from(payload).checked_mul(1_000_000_000)?.checked_mul(u128::from(duration.denominator))?,
         u128::from(duration.numerator),
     )?;
     let bus = multiply(algorithm, normalization)?;
@@ -1274,7 +1286,7 @@ pub fn check_plan(plan: &Plan) -> Vec<Reason> {
         push(&mut reasons, Reason::InvalidPlan);
         return reasons;
     }
-    if !identifier(&plan.revision) {
+    if !sha256(&plan.revision) {
         push(&mut reasons, Reason::InvalidPlan);
     }
     if !identifier(&plan.acquisition.id) || plan.acquisition.started_unix_ms == 0 {
@@ -1365,14 +1377,9 @@ pub fn check_study(study: &Study) -> Vec<Reason> {
         return reasons;
     }
     if study.started_unix_ms == 0
-        || !identifier(&study.revision_axis.baseline)
-        || !identifier(&study.revision_axis.candidate)
+        || !sha256(&study.revision_axis.baseline)
+        || !sha256(&study.revision_axis.candidate)
     {
-        push(&mut reasons, Reason::InvalidStudy);
-    }
-    if study.revision_axis.baseline == study.revision_axis.candidate {
-        // Without a declared change axis this is an A/A control, not a
-        // candidate comparison, and it cannot support a directional verdict.
         push(&mut reasons, Reason::InvalidStudy);
     }
     if study.thresholds.adverse_bps > 9999 || study.thresholds.spread_bps > 1_000_000 {
@@ -1423,7 +1430,9 @@ pub fn check_artifact(plan: Option<&Plan>, artifact: &Artifact) -> Findings {
     if artifact.provenance == Provenance::Declared {
         findings.invalidate(Reason::InvalidArtifact);
     }
-    if !identifier(&artifact.revision)
+    if !sha256(&artifact.revision)
+        || !identifier(&artifact.acquisition.id)
+        || artifact.acquisition.started_unix_ms == 0
         || artifact
             .program_sha256
             .as_deref()
@@ -1447,10 +1456,16 @@ pub fn check_artifact(plan: Option<&Plan>, artifact: &Artifact) -> Findings {
     {
         findings.invalidate(Reason::InvalidArtifact);
     }
-    if artifact.adapter.external()
-        && (artifact.program_sha256.is_none()
-            || artifact.kernel_revision.as_deref().is_none_or(str::is_empty))
-    {
+    if artifact.adapter.external() && artifact.program_sha256.is_none() {
+        findings.invalidate(Reason::IdentityDrift);
+    }
+    if artifact.kernel_revision.as_deref().is_none_or(|revision| {
+        revision.is_empty()
+            || revision.len() > 1024
+            || !revision.is_ascii()
+            || revision.bytes().any(|byte| byte.is_ascii_control())
+            || evidence::digest(revision.as_bytes()) != artifact.revision
+    }) {
         findings.invalidate(Reason::IdentityDrift);
     }
     for reason in observations_admitted(
@@ -1474,6 +1489,17 @@ pub fn check_artifact(plan: Option<&Plan>, artifact: &Artifact) -> Findings {
         findings.withhold(Reason::SampleGridIncomplete);
     }
     if artifact.adapter == AdapterId::Exl3E3Grouped {
+        let raw_fallback = artifact.observations.iter()
+            .find(|observation| observation.name == ObservationName::FallbackTier)
+            .map(|observation| observation.value.as_str());
+        let normalized = match raw_fallback {
+            Some("grouped") => Some(Tier::E3Grouped),
+            Some("kernel") => Some(Tier::E2Kernel),
+            _ => None,
+        };
+        if artifact.execution.observed_fallback != normalized {
+            findings.invalidate(Reason::ObservationDrift);
+        }
         let tier = match &artifact.operation {
             Operation::Exl3Experts { tier, .. } => Some(*tier),
             _ => None,
@@ -1499,6 +1525,7 @@ pub fn check_artifact(plan: Option<&Plan>, artifact: &Artifact) -> Findings {
             findings.invalidate(Reason::AdapterMismatch);
         }
         if plan.revision != artifact.revision
+            || plan.acquisition != artifact.acquisition
             || plan.operation != artifact.operation
             || plan.clock != artifact.clock
             || plan.warmups != artifact.execution.warmups
@@ -1568,7 +1595,7 @@ fn check_grid(artifact: &Artifact, findings: &mut Findings) {
         }
         match duration_ns(&sample.raw, units) {
             Ok(expected) => {
-                if compare(expected, sample.duration).is_ne() {
+                if order(expected, sample.duration).is_ne() {
                     findings.invalidate(Reason::SamplePrecision);
                 }
             }
@@ -1595,7 +1622,7 @@ fn check_grid(artifact: &Artifact, findings: &mut Findings) {
                     findings.invalidate(Reason::SampleGridIncomplete);
                     continue;
                 }
-                (0, 0)
+                (sample.index, 0)
             }
         };
         if !seen.insert(key) || sample.index != position as u32 {
@@ -1632,19 +1659,16 @@ fn check_correctness(artifact: &Artifact, findings: &mut Findings) {
                 findings.invalidate(Reason::NonFinite);
                 return;
             };
-            if compare(computed, bound).is_ne() || !*passed {
+            if order(computed, bound).is_ne() || !*passed {
                 findings.invalidate(Reason::CorrectnessFailed);
             }
             // The declared reference must be the independent closed form for
             // the declared bound, so neither value can drift independently.
             if let Operation::SumU64 { bound: declared, .. } = &artifact.operation
-                && compare(
-                    bound,
-                    Rational {
-                        numerator: reference_sum(*declared),
-                        denominator: 1,
-                    },
-                )
+                && order(bound, Rational {
+                    numerator: reference_sum(*declared),
+                    denominator: 1,
+                })
                 .is_ne()
             {
                 findings.invalidate(Reason::CorrectnessFailed);
@@ -1695,11 +1719,11 @@ fn check_correctness(artifact: &Artifact, findings: &mut Findings) {
             };
             match e3_bounds(*tolerance, ref_max, &e2) {
                 Some(bounds) => {
-                    let violated = compare(e3[0], bounds[0]).is_gt()
-                        || compare(e3[1], bounds[1]).is_gt()
-                        || compare(e3[2], bounds[2]).is_gt()
-                        || compare(e3[3], bounds[3]).is_gt()
-                        || !compare(e3[0], bounds[4]).is_lt();
+                    let violated = order(e3[0], bounds[0]).is_gt()
+                        || order(e3[1], bounds[1]).is_gt()
+                        || order(e3[2], bounds[2]).is_gt()
+                        || order(e3[3], bounds[3]).is_gt()
+                        || !order(e3[0], bounds[4]).is_lt();
                     if violated || *outcome != CheckOutcome::Pass || !*passed {
                         findings.invalidate(Reason::CorrectnessFailed);
                     }
@@ -1863,7 +1887,12 @@ fn reduce_sum(data: &[u64]) -> u64 {
 /// exact closed-form reference `n*(n-1)/2` computed independently. The reduced
 /// value passes through `black_box` on both sides so the timed reduction
 /// cannot be optimized away.
-fn cpu_reference(plan: &Plan, bound: u32) -> Result<Artifact> {
+fn cpu_reference(plan: &Plan, bound: u32, collector_sha256: &str) -> Result<Artifact> {
+    let kernel_revision = format!("cpu-sum-u64-reference-v1;collector:{collector_sha256}");
+    let revision = evidence::digest(kernel_revision.as_bytes());
+    if plan.revision != revision {
+        return Err("plan revision does not identify this native CPU implementation".into());
+    }
     let data: Vec<u64> = (0..u64::from(bound)).collect();
     let memory_bytes = (data.len() as u64)
         .checked_mul(8)
@@ -1928,12 +1957,13 @@ fn cpu_reference(plan: &Plan, bound: u32) -> Result<Artifact> {
         kind: KIND.into(),
         version: VERSION,
         adapter: plan.adapter,
-        revision: plan.revision.clone(),
+        revision,
+        acquisition: plan.acquisition.clone(),
         operation: plan.operation.clone(),
         provenance: Provenance::NativeObserved,
         submitted_provenance: None,
         program_sha256: None,
-        kernel_revision: None,
+        kernel_revision: Some(kernel_revision),
         sources: Vec::new(),
         observations: Vec::new(),
         topology: Topology {
@@ -2119,7 +2149,7 @@ impl CaptureReport {
         match self.provenance {
             Provenance::Declared => "declared",
             Provenance::Imported => "imported",
-            Provenance::NativeObserved => "native-observed",
+            Provenance::NativeObserved => "native_observed",
         }
     }
 }
@@ -2175,7 +2205,7 @@ impl Inspection {
         match self.provenance {
             Provenance::Declared => "declared",
             Provenance::Imported => "imported",
-            Provenance::NativeObserved => "native-observed",
+            Provenance::NativeObserved => "native_observed",
         }
     }
 }
@@ -2193,6 +2223,7 @@ pub struct AcquisitionView {
     pub statistic_display_ns: Option<f64>,
     pub invalid: Vec<Reason>,
     pub unavailable: Vec<Reason>,
+    pub observed_interval_unix_ms: Option<[u64; 2]>,
     #[serde(skip)]
     plan: Option<Plan>,
     #[serde(skip)]
@@ -2212,6 +2243,7 @@ impl AcquisitionView {
             statistic_display_ns: None,
             invalid: Vec::new(),
             unavailable: vec![reason],
+            observed_interval_unix_ms: None,
             plan: None,
             collector_sha256: None,
         }
@@ -2571,7 +2603,7 @@ pub fn capture(options: &CaptureOptions) -> Result<CaptureReport> {
             Operation::SumU64 { bound, .. } => bound,
             _ => return Err("the CPU reference requires the sum-u64 operation".into()),
         };
-        let artifact = cpu_reference(&plan, bound)?;
+        let artifact = cpu_reference(&plan, bound, &collector_sha256)?;
         let failed = artifact.failures.iter().any(|failure| {
             matches!(
                 failure.kind,
@@ -2836,13 +2868,47 @@ fn inspection_of(
 
 fn load_view(slot: &str, path: &Path) -> AcquisitionView {
     match load_dir(path) {
-        Ok(loaded) => {
-            let eligible = loaded.findings.clean();
-            let statistic = if eligible {
-                statistic(&loaded.artifact)
-            } else {
-                None
-            };
+        Ok(mut loaded) => {
+            let mut observed_interval = None;
+            match &loaded.receipt {
+                None => loaded.findings.withhold(Reason::MissingArtifact),
+                Some(receipt) => {
+                    if receipt.kind != RECEIPT_KIND
+                        || receipt.version != VERSION
+                        || receipt.plan_sha256 != loaded.plan_sha256
+                        || receipt.artifact_sha256.as_deref() != Some(&loaded.artifact_sha256)
+                        || receipt.adapter != loaded.artifact.adapter
+                        || receipt.provenance != loaded.artifact.provenance
+                        || receipt.program_sha256 != loaded.artifact.program_sha256
+                        || !sha256(&receipt.collector_sha256)
+                    {
+                        loaded.findings.invalidate(Reason::IdentityDrift);
+                    }
+                    let expected_status = match receipt.provenance {
+                        Provenance::NativeObserved => ReceiptStatus::Captured,
+                        Provenance::Imported => ReceiptStatus::Imported,
+                        Provenance::Declared => ReceiptStatus::Failed,
+                    };
+                    if receipt.status != expected_status || receipt.failure.is_some() {
+                        loaded.findings.withhold(Reason::CaptureFailed);
+                    }
+                    if receipt.provenance == Provenance::NativeObserved {
+                        if receipt.started_unix_ms < loaded.plan.acquisition.started_unix_ms
+                            || receipt.observation_unix_ms < receipt.started_unix_ms
+                        {
+                            loaded.findings.invalidate(Reason::ObservedStartsOutOfOrder);
+                        }
+                        observed_interval = Some([receipt.started_unix_ms, receipt.observation_unix_ms]);
+                        if !loaded.artifact.adapter.external() {
+                            let kernel = format!("cpu-sum-u64-reference-v1;collector:{}", receipt.collector_sha256);
+                            if loaded.artifact.kernel_revision.as_deref() != Some(kernel.as_str()) {
+                                loaded.findings.invalidate(Reason::IdentityDrift);
+                            }
+                        }
+                    }
+                }
+            }
+            let statistic = loaded.findings.clean().then(|| statistic(&loaded.artifact)).flatten();
             AcquisitionView {
                 slot: slot.to_string(),
                 plan_sha256: Some(loaded.plan_sha256),
@@ -2854,11 +2920,9 @@ fn load_view(slot: &str, path: &Path) -> AcquisitionView {
                 statistic_display_ns: statistic.map(display),
                 invalid: loaded.findings.invalid,
                 unavailable: loaded.findings.unavailable,
+                observed_interval_unix_ms: observed_interval,
                 plan: Some(loaded.plan),
-                collector_sha256: loaded
-                    .receipt
-                    .as_ref()
-                    .map(|receipt| receipt.collector_sha256.clone()),
+                collector_sha256: loaded.receipt.as_ref().map(|receipt| receipt.collector_sha256.clone()),
             }
         }
         Err(LoadError::Invalid(reason)) => {
@@ -3030,12 +3094,13 @@ pub fn compare(options: &CompareOptions) -> Decision {
             + groups.reference.complete) as u32,
     };
 
-    // Membership, revision axis, pins, collector identity and declared order
-    // over everything actually present.
+    // Native ordering is observed receipt start-to-finish ordering. Imported
+    // evidence has only its declared chronology and never gains native scope.
     let mut collector: Option<String> = None;
+    let mut provenance = None;
     let mut seen_slots = std::collections::BTreeSet::new();
     let mut seen_artifacts = std::collections::BTreeSet::new();
-    let mut role_starts: [Vec<u64>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+    let mut role_intervals: [Vec<[u64; 2]>; 3] = [Vec::new(), Vec::new(), Vec::new()];
     let mut reference_plan: Option<&Plan> = None;
     for (index, group) in [&groups.baseline, &groups.candidate, &groups.reference]
         .into_iter()
@@ -3068,6 +3133,14 @@ pub fn compare(options: &CompareOptions) -> Decision {
                 (None, Some(observed)) => collector = Some(observed.clone()),
                 _ => (),
             }
+            match (provenance, view.provenance) {
+                (Some(previous), Some(observed)) if previous != observed => {
+                    decision = Outcome::Error;
+                    push(&mut reasons, Reason::ProvenanceMismatch);
+                }
+                (None, Some(observed)) => provenance = Some(observed),
+                _ => (),
+            }
             let Some(plan) = &view.plan else {
                 continue;
             };
@@ -3098,7 +3171,11 @@ pub fn compare(options: &CompareOptions) -> Decision {
                 decision = Outcome::Error;
                 push(&mut reasons, Reason::InvalidBounds);
             }
-            role_starts[index].push(plan.acquisition.started_unix_ms);
+            if let Some(interval) = view.observed_interval_unix_ms {
+                role_intervals[index].push(interval);
+            } else if view.provenance != Some(Provenance::NativeObserved) {
+                role_intervals[index].push([plan.acquisition.started_unix_ms; 2]);
+            }
             match reference_plan {
                 Some(reference) if !pins_match(reference, plan) => {
                     decision = Outcome::Error;
@@ -3109,21 +3186,27 @@ pub fn compare(options: &CompareOptions) -> Decision {
             }
         }
     }
-    for starts in &role_starts {
-        if starts.windows(2).any(|pair| pair[0] >= pair[1]) {
+    let order_reason = if provenance == Some(Provenance::NativeObserved) {
+        Reason::ObservedStartsOutOfOrder
+    } else {
+        Reason::DeclaredStartsOutOfOrder
+    };
+    for intervals in &role_intervals {
+        if intervals.windows(2).any(|pair| pair[0][1] >= pair[1][0]) {
             decision = Outcome::Error;
-            push(&mut reasons, Reason::DeclaredStartsOutOfOrder);
+            push(&mut reasons, order_reason);
         }
     }
-    let overlaps = |left: &[u64], right: &[u64]| {
-        left.iter()
-            .max()
-            .zip(right.iter().min())
+    let overlaps = |left: &[[u64; 2]], right: &[[u64; 2]]| {
+        left.iter().map(|interval| interval[1]).max()
+            .zip(right.iter().map(|interval| interval[0]).min())
             .is_some_and(|(last, first)| last >= first)
     };
-    if overlaps(&role_starts[0], &role_starts[1]) || overlaps(&role_starts[1], &role_starts[2]) {
+    if overlaps(&role_intervals[0], &role_intervals[1])
+        || overlaps(&role_intervals[1], &role_intervals[2])
+    {
         decision = Outcome::Error;
-        push(&mut reasons, Reason::DeclaredStartsOutOfOrder);
+        push(&mut reasons, order_reason);
     }
 
     // The envelope is computed only from a complete, eligible membership.
@@ -3147,12 +3230,12 @@ pub fn compare(options: &CompareOptions) -> Decision {
             envelope::range(&candidate_values)
                 .and_then(|range| range.ok_or(EnvelopeReason::InvalidRational)),
         ) {
-            (Ok(pooled_range), Ok(candidate_range)) => {
+            (Ok(pooled_range), Ok(candidate_bounds)) => {
                 reference_range = Some(pooled_range);
-                candidate_range = Some(candidate_range);
+                candidate_range = Some(candidate_bounds);
                 match envelope::assess(
                     pooled_range,
-                    candidate_range,
+                    candidate_bounds,
                     study.thresholds.adverse_bps,
                     study.thresholds.spread_bps,
                     Direction::LowerBetter,
@@ -3277,12 +3360,16 @@ fn finish(verdict: Verdict) -> Decision {
         version: VERSION,
         claim: "observed-microbench-group-comparison-not-serving-speed",
         scope: format!(
-            "{} At least {minimum} complete measured acquisitions are required in every A/B/A2 role; missing, extra or unusable acquisitions withhold the verdict. This is a measurement-layer observation only; kernel or collective results never establish serving-speed impact, capacity, adoption or live qualification."
+            "{scope} At least {minimum} complete measured acquisitions are required in every A/B/A2 role; missing, extra or unusable acquisitions withhold the verdict. This is a measurement-layer observation only; kernel or collective results never establish serving-speed impact, capacity, adoption or live qualification."
         ),
         statistic: "mean-duration-ns",
         statistic_definition: "exact arithmetic mean within one acquisition (rank scope: mean of complete per-repetition maxima); roles compare acquisition statistics, and the reference envelope pools the A and A2 roles",
         direction: "lower_better",
-        axis: "revision",
+        axis: if groups.baseline.revision.is_some() && groups.baseline.revision == groups.candidate.revision {
+            "same-implementation-control"
+        } else {
+            "observed-kernel-revision"
+        },
         axis_baseline: groups.baseline.revision.clone(),
         axis_candidate: groups.candidate.revision.clone(),
         decision,
@@ -3440,6 +3527,3 @@ pub fn human_decision(decision: &Decision) -> String {
 #[path = "../tests/support/microbench_model.rs"]
 mod microbench_model;
 
-#[cfg(test)]
-#[path = "../tests/support/microbench.rs"]
-mod microbench;
