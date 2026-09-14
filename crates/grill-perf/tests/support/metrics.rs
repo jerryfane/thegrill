@@ -13,6 +13,17 @@ struct MetricsServer {
 }
 impl MetricsServer {
     fn new(handler: impl Fn(usize, &str) -> Vec<u8> + Send + Sync + 'static) -> Self {
+        Self::start(handler, false)
+    }
+    /// Variant that expects the metrics-only credential header, used to prove
+    /// the scrape carries its own declared credential rather than the model's.
+    fn authenticated(handler: impl Fn(usize, &str) -> Vec<u8> + Send + Sync + 'static) -> Self {
+        Self::start(handler, true)
+    }
+    fn start(
+        handler: impl Fn(usize, &str) -> Vec<u8> + Send + Sync + 'static,
+        authorization: bool,
+    ) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let endpoint = format!("http://{}/metrics", listener.local_addr().unwrap());
         listener.set_nonblocking(true).unwrap();
@@ -42,7 +53,10 @@ impl MetricsServer {
                             }
                             let headers = String::from_utf8(bytes).unwrap();
                             assert!(headers.starts_with("GET /metrics HTTP/1.1\r\n"));
-                            assert!(!headers.to_ascii_lowercase().contains("authorization:"));
+                            assert_eq!(
+                                headers.to_ascii_lowercase().contains("authorization:"),
+                                authorization
+                            );
                             let response = handler(calls.fetch_add(1, Ordering::SeqCst), &headers);
                             // Bounds/deadline fixtures deliberately close before consuming the entity.
                             let _ = stream.write_all(&response);
@@ -862,4 +876,384 @@ fn metrics_nonstandard_http_failure_does_not_abort_model_collection() {
     }
     assert_eq!(server.count.load(Ordering::SeqCst), 1);
     assert_eq!(metrics.count.load(Ordering::SeqCst), 2);
+}
+
+const V2_PREFIX_QUERIES: &str = "vllm:prefix_cache_queries_total";
+const V2_PREFIX_HITS: &str = "vllm:prefix_cache_hits_total";
+const V2_PREEMPTIONS: &str = "vllm:num_preemptions_total";
+const V2_DRAFTS: &str = "vllm:spec_decode_num_drafts_total";
+const V2_IDENTITY: &str = r#"engine="0",model_name="fixture-model""#;
+
+/// Pinned-shape vLLM version-2 sample whose internal relations hold.
+struct V2 {
+    preemptions: u64,
+    epoch: u64,
+    queries: u64,
+    hits: u64,
+    total: u64,
+    compute: u64,
+    local_hit: u64,
+    external: u64,
+    cached: u64,
+    drafts: u64,
+    draft_tokens: u64,
+    accepted: u64,
+    positions: [u64; 2],
+}
+
+impl V2 {
+    fn base() -> Self {
+        Self {
+            preemptions: 0,
+            epoch: 1_700_000_000,
+            queries: 100,
+            hits: 40,
+            total: 100,
+            compute: 60,
+            local_hit: 30,
+            external: 10,
+            cached: 40,
+            drafts: 10,
+            draft_tokens: 50,
+            accepted: 12,
+            positions: [10, 2],
+        }
+    }
+    fn advanced() -> Self {
+        Self {
+            preemptions: 0,
+            epoch: 1_700_000_000,
+            queries: 140,
+            hits: 70,
+            total: 160,
+            compute: 100,
+            local_hit: 50,
+            external: 10,
+            cached: 60,
+            drafts: 25,
+            draft_tokens: 125,
+            accepted: 26,
+            positions: [20, 6],
+        }
+    }
+}
+
+fn v2_line(text: &mut String, name: &str, labels: &str, value: u64) {
+    text.push_str(&format!("{name}{{{labels}}} {value}\n"));
+}
+
+fn v2_marker(text: &mut String, name: &str, labels: &str, value: u64) {
+    text.push_str(&format!("{name}{{{labels}}} {value}\n"));
+}
+
+fn v2_body(state: &V2) -> Vec<u8> {
+    let mut text = String::new();
+    v2_line(&mut text, V2_PREEMPTIONS, V2_IDENTITY, state.preemptions);
+    v2_marker(
+        &mut text,
+        "vllm:num_preemptions_created",
+        V2_IDENTITY,
+        state.epoch,
+    );
+    v2_line(
+        &mut text,
+        V2_PREFIX_QUERIES,
+        V2_IDENTITY,
+        state.queries,
+    );
+    v2_marker(
+        &mut text,
+        "vllm:prefix_cache_queries_created",
+        V2_IDENTITY,
+        1_700_000_000,
+    );
+    v2_line(&mut text, V2_PREFIX_HITS, V2_IDENTITY, state.hits);
+    v2_marker(
+        &mut text,
+        "vllm:prefix_cache_hits_created",
+        V2_IDENTITY,
+        1_700_000_000,
+    );
+    v2_line(&mut text, "vllm:prompt_tokens_total", V2_IDENTITY, state.total);
+    v2_marker(
+        &mut text,
+        "vllm:prompt_tokens_created",
+        V2_IDENTITY,
+        1_700_000_000,
+    );
+    for (source, value) in [
+        ("local_compute", state.compute),
+        ("local_cache_hit", state.local_hit),
+        ("external_kv_transfer", state.external),
+    ] {
+        let labels = format!("{V2_IDENTITY},source=\"{source}\"");
+        v2_line(&mut text, "vllm:prompt_tokens_by_source_total", &labels, value);
+        v2_marker(
+            &mut text,
+            "vllm:prompt_tokens_by_source_created",
+            &labels,
+            1_700_000_000,
+        );
+    }
+    v2_line(
+        &mut text,
+        "vllm:prompt_tokens_cached_total",
+        V2_IDENTITY,
+        state.cached,
+    );
+    v2_marker(
+        &mut text,
+        "vllm:prompt_tokens_cached_created",
+        V2_IDENTITY,
+        1_700_000_000,
+    );
+    v2_line(&mut text, V2_DRAFTS, V2_IDENTITY, state.drafts);
+    v2_marker(
+        &mut text,
+        "vllm:spec_decode_num_drafts_created",
+        V2_IDENTITY,
+        1_700_000_000,
+    );
+    v2_line(
+        &mut text,
+        "vllm:spec_decode_num_draft_tokens_total",
+        V2_IDENTITY,
+        state.draft_tokens,
+    );
+    v2_marker(
+        &mut text,
+        "vllm:spec_decode_num_draft_tokens_created",
+        V2_IDENTITY,
+        1_700_000_000,
+    );
+    v2_line(
+        &mut text,
+        "vllm:spec_decode_num_accepted_tokens_total",
+        V2_IDENTITY,
+        state.accepted,
+    );
+    v2_marker(
+        &mut text,
+        "vllm:spec_decode_num_accepted_tokens_created",
+        V2_IDENTITY,
+        1_700_000_000,
+    );
+    for (position, value) in state.positions.iter().enumerate() {
+        let labels = format!("{V2_IDENTITY},position=\"{position}\"");
+        v2_line(
+            &mut text,
+            "vllm:spec_decode_num_accepted_tokens_per_pos_total",
+            &labels,
+            *value,
+        );
+        v2_marker(
+            &mut text,
+            "vllm:spec_decode_num_accepted_tokens_per_pos_created",
+            &labels,
+            1_700_000_000,
+        );
+    }
+    v2_line(&mut text, "vllm:num_requests_running", V2_IDENTITY, 2);
+    text.into_bytes()
+}
+
+fn command_v2(temp: &Temp, server: &Server, metrics: &str, name: &str, work: Value) -> Command {
+    let mut command = command(temp, server, metrics, name, work);
+    command.args(["--metrics-version", "2"]);
+    command
+}
+
+fn command_v2_credentials(
+    temp: &Temp,
+    server: &Server,
+    metrics: &str,
+    name: &str,
+    work: Value,
+    metrics_auth_env: &str,
+) -> Command {
+    let mut command = command_v2(temp, server, metrics, name, work);
+    command.args(["--metrics-auth-env", metrics_auth_env]);
+    command
+}
+
+#[test]
+fn metrics_version_two_replays_cache_preemption_and_position_accounting_offline() {
+    let temp = Temp::new();
+    let server = Server::new(fast);
+    let metrics = MetricsServer::new(|index, _| {
+        if index == 0 {
+            response(&v2_body(&V2::base()))
+        } else {
+            response(&v2_body(&V2::advanced()))
+        }
+    });
+    successful(
+        &command_v2(&temp, &server, &metrics.endpoint, "v2", workload(1, 0, 1))
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(metrics.count.load(Ordering::SeqCst), 2);
+    let root = temp.path("v2");
+    assert_eq!(value(root.join("wave-000000/metrics.json"))["version"], 2);
+    let output = report(&root);
+    let telemetry = &output["baseline_metrics"];
+    assert_eq!(telemetry["config"]["version"], 2);
+    assert_eq!(telemetry["budget"]["v2"]["snapshots"], 2);
+    let summary = &telemetry["waves"][0];
+    assert_eq!(
+        summary["receipt"]["before"]["status"], "complete"
+    );
+    assert_eq!(summary["cache"][0]["ratio"], 0.75);
+    assert_eq!(summary["cache"][0]["queries"]["delta"], 40.0);
+    assert_eq!(summary["cache"][0]["hits"]["delta"], 30.0);
+    assert_eq!(summary["cache"][0]["local_compute"]["delta"], 40.0);
+    assert_eq!(
+        summary["cache"][0]["attribution"],
+        "server_wide_counter_delta_not_request_attributed"
+    );
+    assert_eq!(summary["draft"][0]["rounds"]["delta"], 15.0);
+    assert_eq!(summary["draft"][0]["token_acceptance"], 14.0 / 75.0);
+    assert_eq!(summary["positions"][0]["position"], 0);
+    assert_eq!(summary["positions"][0]["exposure"]["delta"], 15.0);
+    assert_eq!(summary["positions"][0]["acceptance"], 10.0 / 15.0);
+    assert_eq!(summary["positions"][1]["acceptance"], 4.0 / 15.0);
+    assert!(summary["accounting"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|check| check["status"] == "consistent"));
+    assert_eq!(
+        summary["caveats"][0],
+        "server_wide_counters_are_not_attributed_to_this_workload"
+    );
+    let acquisition = &telemetry["acquisition"];
+    assert_eq!(acquisition["snapshots"], 2);
+    assert_eq!(acquisition["complete"], 2);
+    let preemptions = acquisition["series"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|series| series["name"] == V2_PREEMPTIONS)
+        .unwrap();
+    assert_eq!(preemptions["status"], "continuous");
+    assert_eq!(preemptions["delta"], 0.0);
+    assert_eq!(preemptions["epoch"]["status"], "constant");
+    // The measured wave was still collected normally and stayed eligible.
+    assert_eq!(output["changes"][0]["eligible"], true);
+}
+
+#[test]
+fn metrics_version_two_reset_and_epoch_change_withhold_zero_preemption_evidence() {
+    let temp = Temp::new();
+    let server = Server::new(fast);
+    let mut reset_before = V2::base();
+    reset_before.preemptions = 2;
+    let mut reset_after = V2::base();
+    reset_after.preemptions = 1;
+    let metrics = MetricsServer::new(move |index, _| {
+        if index == 0 {
+            response(&v2_body(&reset_before))
+        } else {
+            response(&v2_body(&reset_after))
+        }
+    });
+    successful(
+        &command_v2(&temp, &server, &metrics.endpoint, "reset", workload(1, 0, 1))
+            .output()
+            .unwrap(),
+    );
+    let output = report(&temp.path("reset"));
+    let telemetry = &output["baseline_metrics"];
+    assert_eq!(telemetry["waves"][0]["preemptions"][0]["status"], "reset_observed");
+    assert!(telemetry["waves"][0]["preemptions"][0]["delta"].is_null());
+    let preemptions = telemetry["acquisition"]["series"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|series| series["name"] == V2_PREEMPTIONS)
+        .unwrap()
+        .clone();
+    assert_eq!(preemptions["status"], "reset_observed");
+
+    // A new exporter epoch with an unchanged value is not observed continuity.
+    let temp = Temp::new();
+    let server = Server::new(fast);
+    let base = V2::base();
+    let mut replaced = V2::base();
+    replaced.epoch = 1_700_000_500;
+    let metrics = MetricsServer::new(move |index, _| {
+        if index == 0 {
+            response(&v2_body(&base))
+        } else {
+            response(&v2_body(&replaced))
+        }
+    });
+    successful(
+        &command_v2(&temp, &server, &metrics.endpoint, "epoch", workload(1, 0, 1))
+            .output()
+            .unwrap(),
+    );
+    let output = report(&temp.path("epoch"));
+    let preemptions = output["baseline_metrics"]["acquisition"]["series"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|series| series["name"] == V2_PREEMPTIONS)
+        .unwrap()
+        .clone();
+    assert_eq!(preemptions["delta"], 0.0);
+    assert_eq!(preemptions["status"], "epoch_changed");
+    assert_eq!(preemptions["epoch"]["status"], "changed");
+}
+
+#[test]
+fn metrics_version_two_credential_is_distinct_and_admitted_before_dispatch() {
+    let temp = Temp::new();
+    let server = Server::new(fast);
+    let metrics = MetricsServer::new(|_, _| panic!("rejected configuration dispatched"));
+    for (name, args) in [
+        ("version", vec!["--metrics-version", "3"]),
+        ("collision", vec!["--metrics-version", "2", "--metrics-auth-env", "GRILL_METRICS_TEST_KEY"]),
+    ] {
+        let mut cmd = command(
+            &temp,
+            &server,
+            &metrics.endpoint,
+            &format!("reject-{name}"),
+            workload(1, 0, 1),
+        );
+        cmd.args(&args).env("GRILL_METRICS_TEST_KEY", "model-fixture-secret");
+        assert_eq!(cmd.output().unwrap().status.code(), Some(1));
+    }
+    assert_eq!(server.count.load(Ordering::SeqCst), 0);
+    assert_eq!(metrics.count.load(Ordering::SeqCst), 0);
+
+    let metrics = MetricsServer::authenticated(|_, headers| {
+        let headers = headers.to_ascii_lowercase();
+        assert!(
+            headers.contains("authorization: bearer metrics-only-secret"),
+            "{headers}"
+        );
+        assert!(!headers.contains("fixture-secret"), "{headers}");
+        response(&v2_body(&V2::base()))
+    });
+    successful(
+        &command_v2_credentials(
+            &temp,
+            &server,
+            &metrics.endpoint,
+            "distinct",
+            workload(1, 0, 1),
+            "GRILL_METRICS_ONLY_KEY",
+        )
+        .env("GRILL_METRICS_ONLY_KEY", "metrics-only-secret")
+        .env("GRILL_METRICS_TEST_KEY", "model-fixture-secret")
+        .output()
+        .unwrap(),
+    );
+    assert_eq!(metrics.count.load(Ordering::SeqCst), 2);
+    let plan = value(temp.path("distinct").join("plan.json"));
+    assert_eq!(plan["metrics"]["version"], 2);
+    assert_eq!(plan["metrics"]["auth_env"], "GRILL_METRICS_ONLY_KEY");
+    assert_eq!(plan["metrics"]["isolation"], "shared-server-unattributed");
 }

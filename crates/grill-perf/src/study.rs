@@ -774,6 +774,8 @@ fn collect(
                 deployment: Some(root.join("deployment.json")),
                 policy: None,
                 metrics_url: None,
+                metrics_version: 1,
+                metrics_auth_env: None,
                 auth_env: manifest.auth_env.clone(),
                 local_http: manifest.local_http,
             },

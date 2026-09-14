@@ -237,7 +237,7 @@ pub(crate) fn load_verified(root: &Path) -> Result<Loaded, LoadError> {
         if plan.version < 2 {
             return Err("metrics require execution-session provenance".into());
         }
-        config.validate(plan.waves.len(), plan.local_http)?;
+        config.validate(plan.waves.len(), plan.local_http, plan.auth_env.as_deref())?;
     }
     let expected_mechanism = (plan.workload.request.profile != Profile::PortableChatV1)
         .then_some("declared-vllm-prefix-cache");
@@ -387,7 +387,7 @@ pub(crate) fn load_verified(root: &Path) -> Result<Loaded, LoadError> {
         }
         match (&plan.metrics, &wave.metrics) {
             (Some(config), Some(reference)) => {
-                let summary = crate::metrics::load(
+                let summary = crate::metrics::load_wave(
                     &dir,
                     reference,
                     config,
@@ -399,7 +399,7 @@ pub(crate) fn load_verified(root: &Path) -> Result<Loaded, LoadError> {
                     a.timing
                         .dispatch_offset_us
                         .checked_add(a.timing.settle_us)
-                        .is_none_or(|n| n > summary.receipt.measured_duration_us)
+                        .is_none_or(|n| n > summary.measured_duration_us())
                 }) {
                     return Err("metrics measurement boundary contradicts wave settlement".into());
                 }
@@ -519,11 +519,7 @@ pub(crate) fn load_verified(root: &Path) -> Result<Loaded, LoadError> {
     fingerprint.update(history.evidence_sha256.as_bytes());
     lineage.update(history.lineage_sha256.as_bytes());
     Ok(Loaded {
-        metrics: plan.metrics.as_ref().map(|config| crate::metrics::Summary {
-            config: config.clone(),
-            budget: metrics_budget,
-            waves: metrics_waves,
-        }),
+        metrics: crate::metrics::summarize(plan.metrics.as_ref(), metrics_budget, metrics_waves),
         plan,
         waves,
         states,

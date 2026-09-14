@@ -397,7 +397,7 @@ pub struct Plan {
     pub cache_namespace: Option<String>,
     pub waves: Vec<WaveSpec>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub metrics: Option<crate::metrics::Config>,
+    pub metrics: Option<crate::metrics::Protocol>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub policy_sha256: Option<String>,
 }

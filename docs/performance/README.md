@@ -816,6 +816,22 @@ identifiers or other server content, including unsupported metrics and comments.
 Review all retained bytes before sharing; the allowlist is not a privacy filter.
 See the [snapshot schema and bounds](CONTRACT.md#provider-snapshot-protocol).
 
+### Explicit accounting protocol (metrics version 2)
+
+`--metrics-version 2` selects the versioned accounting protocol described in
+[PROVIDER-ACCOUNTING.md](PROVIDER-ACCOUNTING.md): a closed allowlist of
+server-wide prefix-cache, prompt-source, preemption, draft-round and
+per-position counters with typed units, full label identities, whole-capture
+continuity with exporter-epoch attestation, bounded scrape/series/overhead
+budgets with bounded partial cancellation, and per-position acceptance against
+the provider's own draft-round exposure. Optional version 2 diagnostics never
+change performance eligibility; required evidence is an explicit policy
+declaration that fails closed, so missing or contradicted telemetry is
+unavailable rather than PASS. `--metrics-auth-env NAME` names a metrics-only
+credential: the name is retained, the value is sent only to the metrics endpoint
+and never inherits the model credential. Version 1 runs, plans and receipts keep
+their existing schema and bytes.
+
 ## Deployment declarations and privacy
 
 `--deployment FILE` optionally records a closed JSON object with nullable

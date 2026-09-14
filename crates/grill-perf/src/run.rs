@@ -51,6 +51,14 @@ pub struct CommonArgs {
     /// Optional bounded server-wide diagnostics; can perturb between-wave cadence.
     #[arg(long)]
     pub metrics_url: Option<String>,
+    /// Metrics diagnostics protocol: 1 keeps the frozen before/after allowlist,
+    /// 2 selects the explicit accounting protocol.
+    #[arg(long, default_value_t = 1)]
+    pub metrics_version: u32,
+    /// Environment variable *name* holding a metrics-only credential. Never the
+    /// model credential, and never retained as a value.
+    #[arg(long)]
+    pub metrics_auth_env: Option<String>,
     #[arg(long)]
     pub auth_env: Option<String>,
     #[arg(long)]
@@ -74,7 +82,7 @@ struct Admitted {
     endpoint: String,
     deployment: Option<Deployment>,
     waves: Vec<WaveSpec>,
-    metrics: Option<metrics::Config>,
+    metrics: Option<metrics::Protocol>,
     policy_bytes: Option<Vec<u8>>,
     policy_sha256: Option<String>,
 }
@@ -131,7 +139,7 @@ pub fn preflight(o: &CommonArgs) -> Result<PreflightReport<'_>> {
             hardware: value.hardware.as_ref().map(String::len),
             settings: value.settings.as_ref().map(String::len),
         }),
-        metrics_url: admitted.metrics.map(|config| config.endpoint),
+        metrics_url: admitted.metrics.map(|config| config.endpoint().to_owned()),
         policy_sha256: admitted.policy_sha256,
         planned_waves: admitted.waves.len(),
     })
@@ -194,8 +202,15 @@ fn admit(o: &CommonArgs) -> Result<Admitted> {
         .metrics_url
         .as_ref()
         .map(|endpoint| {
-            wire::endpoint(endpoint, o.local_http)
-                .map(|url| metrics::Config::new(url.to_string(), waves.len()))
+            wire::endpoint(endpoint, o.local_http).and_then(|url| {
+                metrics::Protocol::new(
+                    url.to_string(),
+                    waves.len(),
+                    o.metrics_version,
+                    o.metrics_auth_env.clone(),
+                    o.auth_env.as_deref(),
+                )
+            })
         })
         .transpose()?;
     let source_sha256 = evidence::digest(&source);
@@ -438,6 +453,13 @@ fn collect(
     let operation = runtime.block_on(async {
         let client = wire::client(plan.local_http, plan.pool_max_idle_per_host)?;
         let metrics_client = plan.metrics.as_ref().map(|_| wire::client(plan.local_http, 1)).transpose()?;
+        let metrics_auth = plan
+            .metrics
+            .as_ref()
+            .and_then(|config| config.auth_env())
+            .map(|name| wire::credential(Some(name)))
+            .transpose()?
+            .flatten();
         let mut signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()).map_err(|_| "cannot subscribe to interrupt signal")?;
         let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).map_err(|_| "cannot subscribe to termination signal")?;
         let mut sequence = crate::sequence::State::default();
@@ -471,8 +493,8 @@ fn collect(
             let settings = crate::sequence::settings(&plan.workload, spec);
             let prepared: Vec<_> = reservation.requests.into_iter().map(|body| wire::request(&client, &url, auth.as_ref(), body, settings.stream)).collect::<Result<_>>()?;
             let telemetry_start = plan.metrics.as_ref().map(|_| Instant::now());
-            let before = match (&plan.metrics, &metrics_client) {
-                (Some(config), Some(client)) => Some(metrics::scrape(client, config, &mut metrics_budget, &dir, "before").await?),
+            let before = match (&plan.metrics, &metrics_client, telemetry_start) {
+                (Some(config), Some(client), Some(telemetry_origin)) => Some(metrics::capture(client, config, &mut metrics_budget, &dir, "before", &metrics::CaptureCtx { origin: telemetry_origin, auth: metrics_auth.as_ref(), cancelled: Some(&INTERRUPTED) }).await?),
                 _ => None,
             };
             let before_overhead_us = telemetry_start.map_or(0, wire::us);
@@ -498,15 +520,17 @@ fn collect(
                 }
             }
             let measured_duration_us = wire::us(origin);
-            let metrics = match (&plan.metrics, &metrics_client, before, measured_origin_unix_ms) {
-                (Some(config), Some(client), Some(before), Some(measured_origin_unix_ms)) => {
+            let metrics = match (&plan.metrics, &metrics_client, before, measured_origin_unix_ms, telemetry_start) {
+                (Some(config), Some(client), Some(before), Some(measured_origin_unix_ms), Some(telemetry_origin)) => {
                     let after_start = Instant::now();
-                    let after = metrics::scrape(client, config, &mut metrics_budget, &dir, "after").await?;
-                    let snapshots_us = before.duration_us + after.duration_us;
-                    let mut reference = metrics::publish(&dir, &metrics::Receipt {
-                        version: 1, plan_sha256: plan_hash.into(), wave: spec.index,
-                        before, after, measured_origin_unix_ms, measured_duration_us,
-                    })?;
+                    let measured = metrics::Measured {
+                        origin_offset_us: metrics::offset_us(telemetry_origin, origin)?,
+                        origin_unix_ms: measured_origin_unix_ms,
+                        duration_us: measured_duration_us,
+                    };
+                    let after = metrics::capture(client, config, &mut metrics_budget, &dir, "after", &metrics::CaptureCtx { origin: telemetry_origin, auth: metrics_auth.as_ref(), cancelled: Some(&INTERRUPTED) }).await?;
+                    let snapshots_us = before.duration_us() + after.duration_us();
+                    let mut reference = metrics::publish_wave(&dir, config, plan_hash, spec.index, before, after, measured)?;
                     reference.overhead_us = before_overhead_us + wire::us(after_start);
                     metrics_budget.finish_wave(reference.overhead_us, snapshots_us)?;
                     Some(reference)
