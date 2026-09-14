@@ -59,7 +59,17 @@ pub struct CaptureArgs {
 pub enum Provenance { NativeObserved, Imported, Declared }
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum Adapter { NeutralJournalV1, UninstrumentedRecipeLogs }
+pub enum Adapter { NeutralJournalV1, RuntimeVllmV1, RuntimeAsgiFixtureV1, UninstrumentedRecipeLogs }
+impl Adapter {
+    fn runtime(self) -> bool { matches!(self, Self::RuntimeVllmV1 | Self::RuntimeAsgiFixtureV1) }
+    fn ready_contract(self) -> &'static str {
+        if self.runtime() { "asgi-lifespan-startup-complete-v1" } else { "neutral-ready-v1" }
+    }
+    fn source_contract(self) -> &'static str {
+        if self == Self::RuntimeVllmV1 { "vllm-0.27.0-uvicorn-0.34.0-sha256-v1" }
+        else { "ordinary-asgi-fixture-v1" }
+    }
+}
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, ValueEnum)]
 #[serde(rename_all = "snake_case")]
 pub enum Stage { Startup, Store, Reload }
@@ -176,6 +186,9 @@ pub struct Plan {
     pub collector_sha256: String,
     pub adapter: Adapter,
     pub adapter_sha256: String,
+    /// Runtime bridge only: minimum complete observation after ASGI startup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_window_us: Option<u64>,
     /// A and A2 must match; B differs only along this explicitly declared setup axis.
     pub setup_axis: String,
     pub setup_sha256: [String; 3],
@@ -237,6 +250,11 @@ impl Plan {
             || !(1_000..=3_600_000_000).contains(&self.deadline_us)
             || self.gates.is_empty() || self.gates.len() > 5 {
             return Err("invalid finite startup study plan".into());
+        }
+        match (self.adapter.runtime(), self.runtime_window_us) {
+            (true, Some(window)) if window >= 1_000 && window < self.deadline_us => (),
+            (false, None) => (),
+            _ => return Err("runtime adapter requires a finite post-readiness coverage window".into()),
         }
         let l = &self.limits;
         if l.total_ms == 0 || l.total_ms > 600_000 || l.idle_ms == 0 || l.idle_ms > l.total_ms
@@ -321,6 +339,12 @@ pub enum CacheResult { Stored, PersistedHit, Recomputed, Unavailable }
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum EventKind {
     Launched,
+    /// Bridge entrypoint before serving imports, explicitly NOT OS process launch.
+    RuntimeStart { producer_sha256: String, source_contract: String, pid_namespace: String, time_namespace: String },
+    /// Completion of all admitted requests after the prospective runtime window.
+    RuntimeCoverage { window_us: u64, admission_closed: bool, active_requests: usize, engine_hook: bool },
+    /// An actual AsyncLLM admission correlated to the active ASGI request.
+    RuntimeEngineRequest { id: String },
     Listening,
     Ready { contract: String },
     CommunicationStart,
@@ -366,6 +390,8 @@ pub struct Capture {
     pub store_sha256: Option<String>,
     pub engine: Option<ProcessIdentity>,
     pub cache_server: Option<ProcessIdentity>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_namespaces: Option<[String; 2]>,
     pub events_sha256: String,
     pub requests: Vec<RequestRecord>,
     pub failures: Vec<String>,
@@ -378,6 +404,7 @@ pub struct Inspection {
     pub slot: Slot,
     pub stage: Stage,
     pub outcome: Outcome,
+    pub launch_anchor: &'static str,
     pub reasons: Vec<String>,
     pub durations: Vec<DurationSample>,
     pub states: Vec<ClassState>,
@@ -457,6 +484,17 @@ impl Journal {
         parse_events(&self.raw[..end], plan)
     }
 }
+fn runtime_namespaces(pid: u32) -> Result<[String; 2]> {
+    let mut observed = [String::new(), String::new()];
+    for (index, kind) in ["pid", "time"].iter().enumerate() {
+        let target = std::fs::read_link(format!("/proc/{pid}/ns/{kind}")).map_err(|e| e.to_string())?;
+        let local = std::fs::read_link(format!("/proc/self/ns/{kind}")).map_err(|e| e.to_string())?;
+        if target != local { return Err("runtime bridge requires shared collector/producer PID and time namespaces".into()); }
+        observed[index] = target.to_str().ok_or("invalid namespace identity")?.into();
+    }
+    Ok(observed)
+}
+
 
 async fn await_journal(
     journal: &mut Journal, plan: &Plan, engine: &Option<ProcessIdentity>,
@@ -468,13 +506,27 @@ async fn await_journal(
         if events.iter().any(|e| matches!(e.event, EventKind::Failure { .. })) {
             return Err("producer reported a failed startup or inference".into());
         }
+        if plan.adapter.runtime() {
+            if let Some(event) = events.first() {
+                let id = engine.as_ref().ok_or("runtime process identity unavailable")?;
+                let namespaces = runtime_namespaces(id.pid)?;
+                match &event.event {
+                    EventKind::RuntimeStart { producer_sha256, source_contract, pid_namespace, time_namespace }
+                        if event.engine == *id && producer_sha256 == &plan.adapter_sha256
+                            && source_contract == plan.adapter.source_contract()
+                            && pid_namespace == &namespaces[0] && time_namespace == &namespaces[1] => (),
+                    _ => return Err("runtime journal process, source or namespace binding mismatch".into()),
+                }
+            }
+        }
         if let Some(id) = engine {
             if process(id.pid)? != *id { return Err("attached engine incarnation changed".into()); }
         }
         let found = if sealed {
             events.last().is_some_and(|e| matches!(e.event, EventKind::Sealed { .. }))
         } else {
-            events.iter().any(|e| matches!(&e.event, EventKind::Ready { contract } if contract == "neutral-ready-v1"))
+            events.iter().any(|e| matches!(&e.event, EventKind::Ready { contract } if contract == plan.adapter.ready_contract()))
+                && (!plan.adapter.runtime() || events.iter().any(|e| matches!(e.event, EventKind::Listening)))
         };
         if found { return Ok(()); }
         if Instant::now() >= deadline { return Err("startup observation deadline exhausted".into()); }
@@ -497,7 +549,11 @@ async fn collect_request(
     let client = wire::client(plan.local_http, 1)?;
     let url = wire::endpoint(&plan.endpoint, plan.local_http)?;
     let auth = wire::credential(plan.auth_env.as_deref())?;
-    let request = wire::request(&client, &url, auth.as_ref(), body, false)?;
+    let mut request = wire::request(&client, &url, auth.as_ref(), body, false)?;
+    if plan.adapter.runtime() {
+        request.headers_mut().insert("x-grill-startup-request", id.parse().map_err(|_| "invalid startup request header")?);
+        request.headers_mut().insert("x-grill-startup-plan", plan_hash.parse().map_err(|_| "invalid startup plan header")?);
+    }
     let clock = Clock { id: "client-acquisition".into(), kind: "monotonic".into(), units: "microseconds".into(),
         resolution_us: 1, synchronization: "single-process-origin".into() };
     let metrics_auth = wire::credential(plan.metrics.as_ref().and_then(|c| c.auth_env.as_deref()))?;
@@ -537,7 +593,7 @@ pub fn capture(args: &CaptureArgs, stage: Stage, store: Option<&Path>) -> Result
     let plan_bytes = evidence::read(&args.plan, CAP)?;
     let plan: Plan = decode(&plan_bytes)?;
     plan.validate()?;
-    if args.slot >= plan.slots.len() || plan.adapter != Adapter::NeutralJournalV1
+    if args.slot >= plan.slots.len() || plan.adapter == Adapter::UninstrumentedRecipeLogs
         || !matches!((&plan.study, stage), (Study::Startup, Stage::Startup)
             | (Study::RestartCache { .. }, Stage::Store | Stage::Reload)) {
         return Err("capture stage, slot or native producer is unsupported".into());
@@ -583,7 +639,7 @@ pub fn capture(args: &CaptureArgs, stage: Stage, store: Option<&Path>) -> Result
     let mut capture = Capture {
         version: 1, kind: "startup-observation-v1".into(), provenance: Provenance::NativeObserved,
         plan_sha256: plan_hash, collector_sha256: binary, slot: args.slot, stage,
-        previous_sha256, store_sha256, engine: None, cache_server: None,
+        previous_sha256, store_sha256, engine: None, cache_server: None, runtime_namespaces: None,
         events_sha256: String::new(), requests: Vec::new(), failures: Vec::new(),
     };
     match process(args.pid) {
@@ -593,6 +649,12 @@ pub fn capture(args: &CaptureArgs, stage: Stage, store: Option<&Path>) -> Result
     if let Some(pid) = args.cache_pid {
         match process(pid) {
             Ok(id) => capture.cache_server = Some(id),
+            Err(e) => capture.failures.push(e),
+        }
+    }
+    if plan.adapter.runtime() {
+        match runtime_namespaces(args.pid) {
+            Ok(namespaces) => capture.runtime_namespaces = Some(namespaces),
             Err(e) => capture.failures.push(e),
         }
     }
@@ -634,6 +696,9 @@ pub fn capture(args: &CaptureArgs, stage: Stage, store: Option<&Path>) -> Result
         if process(id.pid).as_ref() != Ok(id) {
             capture.failures.push("process exited or changed incarnation during observation".into());
         }
+    }
+    if plan.adapter.runtime() && runtime_namespaces(args.pid).ok() != capture.runtime_namespaces {
+        capture.failures.push("runtime PID/time namespace changed during observation".into());
     }
     capture.events_sha256 = evidence::digest(&journal.raw);
     evidence::write(&args.out.join("events.bin"), &journal.raw)?;
@@ -684,6 +749,7 @@ fn response_valid(plan: &Plan, record: &RequestRecord, bytes: &[u8]) -> Result<(
 fn analyze(root: &Path, plan: &Plan, c: &Capture, raw: &[u8]) -> Result<Inspection> {
     let mut report = Inspection { version: 1, claim: "finite-domain-observation-not-live-qualification",
         provenance: c.provenance, slot: plan.slots[c.slot].clone(), stage: c.stage,
+        launch_anchor: if plan.adapter.runtime() { "bridge-entrypoint-not-os-launch" } else { "fixture-first-event-not-os-launch" },
         outcome: Outcome::Pass, reasons: Vec::new(), durations: Vec::new(), states: Vec::new(),
         cache_result: None, request_usage: c.requests.iter().map(|r| r.attempt.usage.clone()).collect(), metrics: None };
     for reason in &c.failures { add_reason(&mut report, Outcome::Inconclusive, reason.clone()); }
@@ -743,14 +809,45 @@ fn analyze(root: &Path, plan: &Plan, c: &Capture, raw: &[u8]) -> Result<Inspecti
     let mut finishes = Vec::new();
     let mut controls = None;
     let mut sealed = None;
+    let mut runtime_coverage = None;
     let mut classes = BTreeSet::new();
+    let mut engine_requests = 0usize;
     for event in &events {
         if c.engine.as_ref() != Some(&event.engine) {
             add_reason(&mut report, Outcome::Error, "stale or missing engine incarnation on event");
         }
+        if runtime_coverage.is_some() && !matches!(event.event, EventKind::Sealed { .. }) {
+            add_reason(&mut report, Outcome::Error, "runtime events after admission coverage closure");
+        }
         match &event.event {
+            EventKind::RuntimeStart { producer_sha256, source_contract, pid_namespace, time_namespace } => {
+                let expected_contract = plan.adapter.source_contract();
+                if !plan.adapter.runtime() || launched.replace(event).is_some() || event.sequence != 0
+                    || producer_sha256 != &plan.adapter_sha256 || source_contract != expected_contract
+                    || c.runtime_namespaces.as_ref().is_none_or(|namespaces|
+                        namespaces[0] != *pid_namespace || namespaces[1] != *time_namespace) {
+                    add_reason(&mut report, Outcome::Error, "runtime source, namespace or entrypoint anchor mismatch");
+                }
+            }
+            EventKind::RuntimeCoverage { window_us, admission_closed, active_requests, engine_hook } => {
+                if !plan.adapter.runtime() || runtime_coverage.replace(event).is_some()
+                    || Some(*window_us) != plan.runtime_window_us || !admission_closed || *active_requests != 0
+                    || (plan.adapter == Adapter::RuntimeVllmV1 && !engine_hook)
+                    || starts.len() != finishes.len() || listening.is_none()
+                    || ready.is_none_or(|start: &Event| start.clock != event.clock || start.engine != event.engine
+                        || event.offset_us.checked_sub(start.offset_us).is_none_or(|elapsed| elapsed < *window_us)) {
+                    add_reason(&mut report, Outcome::Error, "incomplete runtime request coverage interval");
+                }
+            }
+            EventKind::RuntimeEngineRequest { id } => {
+                if !plan.adapter.runtime() || starts.len() != finishes.len() + 1
+                    || starts.last().map(|(request, _)| *request) != Some(id) {
+                    add_reason(&mut report, Outcome::Error, "uncorrelated runtime engine admission");
+                }
+                engine_requests += 1;
+            }
             EventKind::Launched => {
-                if launched.replace(event).is_some() || event.sequence != 0 {
+                if plan.adapter.runtime() || launched.replace(event).is_some() || event.sequence != 0 {
                     add_reason(&mut report, Outcome::Error, "duplicate or noninitial launch event");
                 }
             }
@@ -758,7 +855,8 @@ fn analyze(root: &Path, plan: &Plan, c: &Capture, raw: &[u8]) -> Result<Inspecti
                 if listening.replace(event).is_some() || launched.is_none() { add_reason(&mut report, Outcome::Error, "listening source order"); }
             }
             EventKind::Ready { contract } => {
-                if contract != "neutral-ready-v1" || ready.replace(event).is_some() || listening.is_none() {
+                if contract != plan.adapter.ready_contract() || ready.replace(event).is_some()
+                    || launched.is_none() || (!plan.adapter.runtime() && listening.is_none()) {
                     add_reason(&mut report, Outcome::Error, "unsupported/malformed readiness contract or order");
                 }
             }
@@ -787,10 +885,16 @@ fn analyze(root: &Path, plan: &Plan, c: &Capture, raw: &[u8]) -> Result<Inspecti
                     };
                     if !valid { add_reason(&mut report, Outcome::Error, "class identity type or native process binding mismatch"); }
                 }
-                report.states.push(state.clone());
+                let mut observed = state.clone();
+                if plan.adapter.runtime() && state.class == Class::CacheServer && state.identity.is_none() {
+                    // Identity of the explicitly selected process, not proof it served KV.
+                    observed.identity = c.cache_server.clone().map(|identity| ClassIdentity::Process { identity });
+                }
+                report.states.push(observed);
             }
             EventKind::RequestStart { id, body_sha256 } => {
-                if ready.is_none() || starts.len() != finishes.len() {
+                if ready.is_none() || starts.len() != finishes.len()
+                    || (plan.adapter.runtime() && listening.is_none()) {
                     add_reason(&mut report, Outcome::Error, "request before readiness or overlapping/reordered source requests");
                 }
                 starts.push((id, body_sha256));
@@ -800,6 +904,10 @@ fn analyze(root: &Path, plan: &Plan, c: &Capture, raw: &[u8]) -> Result<Inspecti
                 if starts.get(index).map(|(id, _)| *id) != Some(id) {
                     add_reason(&mut report, Outcome::Error, "response has no ordered request start");
                 }
+                if plan.adapter.runtime() && engine_requests != 1 {
+                    add_reason(&mut report, Outcome::Inconclusive, "runtime inference requires exactly one engine admission");
+                }
+                engine_requests = 0;
                 if let Some(record) = c.requests.get(index) {
                     if record.id != *id || record.attempt.response_sha256 != *response_sha256
                         || record.attempt.status != Status::Complete {
@@ -826,14 +934,21 @@ fn analyze(root: &Path, plan: &Plan, c: &Capture, raw: &[u8]) -> Result<Inspecti
             EventKind::Sealed { requests } => {
                 sealed = Some(*requests);
                 if *requests != starts.len() { add_reason(&mut report, Outcome::Error, "sealed request accounting mismatch"); }
+                if plan.adapter.runtime() && runtime_coverage.is_none() {
+                    add_reason(&mut report, Outcome::Error, "runtime seal without observed coverage closure");
+                }
             }
         }
     }
     if starts.len() != expected.len() || finishes.len() != expected.len() || sealed != Some(expected.len()) {
+        // All adapters require complete source coverage, never an attestation alone.
         add_reason(&mut report, Outcome::Inconclusive, "complete request-order/admission-closure evidence unavailable");
     }
     if starts.len() > expected.len() || finishes.len() > expected.len() {
         add_reason(&mut report, Outcome::Error, "extra/hidden inference requests");
+    }
+    if plan.adapter.runtime() && runtime_coverage.is_none() {
+        add_reason(&mut report, Outcome::Inconclusive, "runtime coverage seal missing");
     }
     let body_hash = evidence::digest(request_body(plan)?.as_bytes());
     for (index, (id, body)) in starts.iter().enumerate() {
@@ -870,7 +985,11 @@ fn analyze(root: &Path, plan: &Plan, c: &Capture, raw: &[u8]) -> Result<Inspecti
         if !matches!(controls, Some((true, true, seed)) if seed == &identity.hash_seed_contract) {
             add_reason(&mut report, Outcome::Inconclusive, "observed smoke/shape-warmup suppression or stable hash contract unavailable");
         }
-        if plan.adapter != Adapter::NeutralJournalV1 || c.provenance != Provenance::NativeObserved {
+        if plan.adapter.runtime() {
+            add_reason(&mut report, Outcome::Inconclusive,
+                "ASGI/frontend order observed; backend warmup, cache-server hash seed and per-request persisted KV transfer remain unobservable");
+        }
+        if plan.adapter == Adapter::UninstrumentedRecipeLogs || c.provenance != Provenance::NativeObserved {
             add_reason(&mut report, Outcome::Inconclusive, "import/declaration or uninstrumented logs cannot establish first-reload persistence");
         }
     }

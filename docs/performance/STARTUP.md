@@ -46,7 +46,7 @@ Native records are unauthenticated observations, **not cryptographic execution
 attestations**. Possessing producer source with the correct hash does not prove
 that an untrusted producer ran it.
 
-## Supported executable source
+## Neutral executable fixture
 
 `tools/startup-fixture.py` supplies `neutral_journal_v1`, an explicit local-process
 adapter. The **operator or test harness** invokes its `engine` and, for restart
@@ -79,6 +79,140 @@ specific instrumented producer, not of arbitrary logs with similarly named
 fields. Smoke suppression, shape-warmup suppression and stable hash control
 must be source-observed; an operator attestation cannot replace them.
 
+## Opt-in serving-runtime bridge
+
+`tools/startup-runtime.py` implements `runtime_vllm_v1`. It is an explicit
+**operator-invoked, in-process entrypoint**, not a command that Grill launches.
+It calls the existing single-worker `api_server.run_server` with ASGI lifespan
+enabled; there is no subprocess, restart, service manager or arbitrary-module
+hook. The neutral producer above remains a separate CPU fixture.
+
+Supported public source is byte-pinned, not selected by model name or image tag:
+
+| Source | Revision | Required SHA-256 |
+|---|---|---|
+| [vLLM api_server.py](https://github.com/vllm-project/vllm/blob/v0.27.0/vllm/entrypoints/openai/api_server.py) | `v0.27.0` | `cd4b83e85dc9d5aae808348d336e59b3064bee697012750d23c786de082a1c53` |
+| [vLLM launcher.py](https://github.com/vllm-project/vllm/blob/v0.27.0/vllm/entrypoints/launcher.py) | `v0.27.0` | `caf4c4517a62f05abe5998409de73af70e91d99dfab3819a4b359ba44af0da91` |
+| [vLLM async_llm.py](https://github.com/vllm-project/vllm/blob/v0.27.0/vllm/v1/engine/async_llm.py) | `v0.27.0` | `81a0cae6d5da22140f509a59d6c6bb8fc6ee1572da2a2cd793b5830222d18bcc` |
+| [Uvicorn server.py](https://github.com/encode/uvicorn/blob/0.34.0/uvicorn/server.py) | `0.34.0` | `8dd3d150523fd140a9981c41f0fae963b869b20c064dd94ab7422bc453748e6f` |
+
+Pins are checked against bounded installed source files before serving imports
+and again before sealing. Imported module locations must match those files.
+The producer source retained as `producer.bin` binds these exact pins and the
+`vllm-0.27.0-uvicorn-0.34.0-sha256-v1` event contract. This is native
+**unauthenticated** source observation, not execution authentication or proof
+that every dependency is unmodified. Different upstream/recipe-patched bytes
+are unsupported; do not replace a pin with the local hash to make it pass.
+Review a source-contract revision instead. No deployment-local source is copied.
+
+### Launch, readiness and inference
+
+The bridge records `runtime_start` at its journal entrypoint before importing
+serving libraries. It is explicitly **not OS process launch**: interpreter,
+bridge imports and initial pin checking precede this anchor. Inspection reports
+`launch_anchor:"bridge-entrypoint-not-os-launch"`; milestone durations begin
+there. Full OS exec-to-ready remains unavailable.
+
+The outermost ASGI wrapper records `ready` only on
+`lifespan.startup.complete` (`asgi-lifespan-startup-complete-v1`). In the pinned
+vLLM entrypoint this follows engine-client construction and app-state
+initialization. This is ASGI/application readiness, not independent proof of
+model correctness. `listening` is emitted separately after the pinned
+`uvicorn.Server.startup` returns with `server.started` and actual sockets whose
+`SO_ACCEPTCONN` is one. Uvicorn completes lifespan **before** starting listeners;
+ready can therefore precede listening. The collector waits for both. No
+health string, log line, model name or merely bound socket substitutes.
+
+`inference_complete` hashes the actual ASGI response entity after its final
+body send. Favorable first-valid inference still requires the existing Rust
+wire collector's complete valid response, exact expected answer, usage and
+matching digest. Bootstrap/communication substage timing is not observed by
+this bridge: a `communication` gate remains unavailable, not total startup
+time relabelled as communication.
+
+### Complete finite request exposure
+
+Declare `runtime_window_us` in the plan (1 ms or more, strictly below
+`deadline_us`). From entrypoint initialization through at least this duration
+after ASGI ready, instrumentation records all mutating/unknown HTTP routes and
+all websocket admissions, including requests without Grill headers. Only
+GET/HEAD `/health`, `/metrics`, `/v1/models` bypass body observation. Unknown
+routes are counted conservatively, not guessed to be harmless. A websocket is
+recorded and rejected as unsupported; overlap closes admission and withholds
+serial-order qualification instead of allocating unbounded concurrent bodies.
+
+Grill adds `x-grill-startup-request` and `x-grill-startup-plan` for correlation;
+it does not change the exact body or stable `cache_salt`. Unmarked requests
+receive `external-N` IDs and cannot masquerade as first reload just by arriving
+first. Headers remain unauthenticated correlations, not bearer credentials.
+`AsyncLLM.add_request` is wrapped before engine initialization:
+`runtime_engine_request` records actual admissions in the active ASGI context.
+Internal/background calls without a live context produce a retained failure.
+Missing engine admissions cannot be repaired by a 200 response alone.
+
+At the prospective timer boundary the bridge closes **its inference admission**
+and drains already admitted requests before emitting `runtime_coverage`, then
+`sealed`. It does not stop the server; read-only metrics stay accessible.
+Later inference attempts get 503 and cannot reach the wrapped app. This
+behavior is opt-in and must be accepted when the operator selects the bridge.
+It never seals just because the expected count has arrived: external requests
+after the final Grill response but before the timer still invalidate ordering.
+Timeout, changed source, partial drain, absent instrumentation or missing seal
+withhold the claim. Byte/event caps and per-request deadlines fail closed.
+
+The complete supported scope is **one frontend's ASGI and AsyncLLM admissions**.
+Additional frontends, direct engine-core clients and backend/device graph/shape
+warmup are not proven absent by these hooks. The bridge therefore does not emit
+favorable smoke/shape suppression controls, and it cannot currently qualify
+cross-restart KV persistence. `no_warming_attestation` cannot change that.
+
+### Shared namespace identity and operator invocation
+
+Run collector and producer in the **same PID and time namespaces**, with the
+same `/proc` process view: for example, both inside the operator-owned serving
+container, or both in a deliberately shared host namespace. `--pid` is the
+actual producer PID in that namespace, not a container PID copied into a host
+command. The collector checks `/proc/self/ns/{pid,time}` against
+`/proc/PID/ns/{pid,time}`, saves both namespace identities, and requires
+the runtime event's identity plus PID/start ticks/boot ID to agree.
+Different namespaces fail closed. Automatic host/container PID translation,
+namespace entry and container control are not implemented.
+
+The observed `engine` process for this adapter is the API/frontend process,
+not every backend worker. `--cache-pid` retains the kernel-observed identity of
+the explicitly selected cache-server process, but this bridge does not infer
+which cache process served a request.
+Filesystem residency, compiled artifact/weight/prefix-offload identity and
+temperature stay unknown. A matching frontend `PYTHONHASHSEED=0` is recorded
+only as `frontend-only`; cache-server seed and KV transfer are unobserved.
+Real response cached-token usage and selected metrics2 evidence are retained,
+but they cannot identify external persisted KV by themselves.
+`cache_result` is `unavailable`, never a synthetic answer-cache hit or an
+inferred transfer. Store/reload remain callable and honestly nonqualifying for
+these missing predicates.
+
+For a separately authorized launch, prepare the normal complete startup plan,
+set `adapter:"runtime_vllm_v1"`, pin `adapter_sha256` to the exact bridge file
+and `collector_sha256` to the exact binary, and prospectively set the complete
+runtime window/deadline/request allowances. Source-only example:
+
+```sh
+# Operator-owned serving invocation, not a Grill action:
+PYTHONHASHSEED=0 python3 tools/startup-runtime.py \
+  --plan PLAN --events NEW_JOURNAL --stage startup -- \
+  --model MODEL --host 127.0.0.1 --port 8000
+# A separate shell in the SAME PID/time namespaces; actual running frontend PID:
+grill-perf startup observe PLAN --slot 0 --pid PID \
+  --events NEW_JOURNAL --producer-source tools/startup-runtime.py --out NEW_CAPTURE
+```
+
+Use the existing `store`/`reload` commands and matching bridge `--stage` for
+restart evidence; operator alone replaces the serving invocation between them.
+Do not invoke recipe smoke/shape warmups hoping the bridge will ignore them.
+The existing recipe launcher remains intact and owns deployment lifecycle.
+This source support has not itself exercised or qualified a recipe/image.
+
+
 ## Plan v1 and finite exposure
 
 `startup::Plan` is a closed `version:1`, `kind:"startup-study-v1"` object. Its
@@ -86,6 +220,9 @@ required fields are:
 
 - `study_id`, collector binary SHA-256, adapter enum and exact adapter source
   SHA-256; every capture rechecks these pins.
+- `runtime_window_us` is required only for `runtime_vllm_v1` and
+  `runtime_asgi_fixture_v1`; it is absent for existing adapters. These explicit
+  adapter contracts extend the closed plan without reinterpreting old bytes.
 - `setup_axis` and `setup_sha256:[A,B,A2]`: prospectively declared setup
   fingerprints. A and A2 must match. These remain declarations, not observed
   proof that the only effective difference was that axis.
@@ -140,9 +277,12 @@ quantization, not a claim of hardware timer precision.
 | `inference_complete` | Request ID, retained response digest and supported per-request cache result |
 | `failure` | Retained producer failure; cannot disappear behind faster samples |
 | `sealed` | Final complete request count after inference admission closes |
+| `runtime_start` | Bridge-entrypoint anchor, producer pin, source contract and observed namespaces; not OS launch |
+| `runtime_engine_request` | Actual frontend engine admission correlated with the current ASGI request |
+| `runtime_coverage` | Prospective minimum window elapsed, admission closed, active requests drained, hook installed |
 
 
-For this producer, `launched` is its first explicit source event, not the OS
+For the neutral producer, `launched` is its first explicit source event, not the OS
 `exec` instant. Interpreter/import work preceding the journal origin is outside
 these source-clock durations; full OS-process-launch latency is unavailable.
 First-valid-inference requires an actual native-collected, complete valid
@@ -150,8 +290,8 @@ response with exact expected answer, supported usage, stop termination and
 matching source response digest. Failed/missing client evidence cannot be
 replaced by an adapter event. Header/body arrival and health checks do not count.
 
-Launch-to-listen, launch-to-ready and launch-to-first-valid-inference subtract
-only timestamps with identical clock contract/origin **and** engine incarnation.
+Anchor-to-listen, anchor-to-ready and anchor-to-first-valid-inference subtract
+only timestamps with identical clock contract/origin **and** process incarnation.
 Communication duration uses its own supported start/end pair. Missing or
 cross-clock boundaries stay unavailable. HTTP reload duration is separately
 client-clock `settle_us`; it is never subtracted from a source-clock timestamp.
@@ -263,6 +403,8 @@ python3 tools/smoke-startup.py --binary target/debug/grill-perf --case restart
 python3 tools/smoke-startup.py --binary target/debug/grill-perf --case comparison
 # Or all three in one finite invocation:
 python3 tools/smoke-startup.py --binary target/debug/grill-perf --case all
+# Real bridge code, ordinary ASGI fixture; no vLLM/Uvicorn/device imports:
+python3 tools/smoke-startup-runtime.py --binary target/debug/grill-perf
 ```
 
 The smoke authors actual delayed ordinary processes, source failures and
@@ -273,3 +415,15 @@ insufficient acquisitions and broken order. It uses only synthetic loopback
 fixtures. Its arithmetic inputs are explicitly imported synthetic mutations,
 not relabelled live observations. Execution is a separate verification gate;
 source authoring alone does not claim these commands passed.
+
+The runtime smoke preserves the existing neutral cases and adds real bridge
+lifecycle/admission execution through `tools/startup-asgi-fixture.py`
+(`runtime_asgi_fixture_v1`, explicitly not vLLM execution): independent
+ASGI-ready/listen/inference delays, external requests before and after the
+planned request, direct internal engine admissions, failed ASGI startup,
+container-namespace mismatch, source drift and missing seal. A separate real
+store/operator-owned process replacement/first-reload fixture preserves stable
+request identity and verifies unavailable KV accounting never becomes PASS.
+It compares actual CLI capture with offline replay. Both CPU execution and
+pinned-library/live qualification remain separate checks; authoring these
+fixtures is not a pass.
