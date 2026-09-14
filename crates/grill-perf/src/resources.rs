@@ -512,6 +512,12 @@ impl Observer {
         Ok(self.observation)
     }
     pub fn last_observed_us(&self) -> Option<u64> { self.observation.snapshots.last().map(|s| s.observed_us) }
+    fn covered_end_us(&self) -> Option<u64> {
+        // A complete cycle appends every source in time order. Its first completion
+        // bounds the interval covered by all sources, not just the final reader.
+        let first = self.observation.snapshots.len().checked_sub(self.observation.config.sources.len())?;
+        self.observation.snapshots.get(first).map(|s| s.observed_us)
+    }
 }
 
 pub fn host_clock(id: String) -> Result<Clock> {
@@ -911,11 +917,11 @@ pub fn capture(plan: &Path, role: Role, phase: Phase, index: u32, out: &Path) ->
                 _ = tokio::time::sleep(Duration::from_micros(wake - now)) => {}
             }
             if !observer.sample()? { break; }
-            if observer.last_observed_us().is_some_and(|t| t >= target) { break; }
+            if observer.covered_end_us().is_some_and(|t| t >= target) { break; }
         }
         Ok::<bool, String>(cancelled)
     })?;
-    let end = observer.last_observed_us().unwrap_or(start);
+    let end = observer.covered_end_us().unwrap_or(start).max(start);
     let observation = observer.finish(MeasuredInterval { clock: clock.id, started_us: start, settled_us: end }, cancelled)?;
     let capture = Capture { version: 1, study_sha256, acquisition_id, role, phase, index,
         started_unix_ms, settled_unix_ms: unix_ms()?, observation };

@@ -111,6 +111,12 @@ clock wake/read overshoot is not relabelled as exact requested time. Comparison
 requires actual duration in `[duration_us, duration_us + max_gap_us]`. This is a
 prospectively bounded observation-window comparison, not exactly equal CPU work.
 
+For multiple sequential sources, capture starts at the latest completion of the
+initial cycle and ends at the earliest completion of the final cycle. This
+common interval is bracketed by every source rather than only the last reader.
+It does not synthesize counter readings at those boundaries: multi-source CPU
+counter gates can remain `unsupported_boundary` even when memory gates qualify.
+
 Supported lower-is-better gates:
 
 * `sampled_maximum`: RSS, used/allocated/reserved memory, KV used bytes, or
@@ -198,6 +204,7 @@ After Main approves a stable integration head, run:
 cargo test -p grill-perf --locked resources::tests
 cargo build -p grill-perf --locked
 python3 tools/smoke-resources.py target/debug/grill-perf --out /tmp/grill-resource-smoke-new
+python3 tools/smoke-resources.py target/debug/grill-perf --sources 2 --out /tmp/grill-resource-multi-smoke-new
 ```
 
 The smoke authors a prospectively pinned plan for its own finite 8 MiB ordinary
@@ -209,6 +216,9 @@ GPU runtime, metrics, health, model, or device access is involved. Unchanged
 control variation or timing gaps may prevent PASS; inspect retained evidence
 rather than replacing acquisitions. For outside-checkout verification, pass the
 staged binary's absolute path and a fresh private output directory.
+The `--sources 2` scenario creates two distinct owned 8 MiB processes and checks
+both memory gates over their shared interval; it does not duplicate one target
+under two source labels or sum their measurements.
 
 Fixtures additionally cover final-parenthesis parsing, guest exclusion, PID reuse,
 resets, permission/byte/sample/deadline/cancellation gaps, clock and unit mismatch,
