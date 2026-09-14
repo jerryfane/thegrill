@@ -5,7 +5,7 @@ No vLLM/Uvicorn/device imports or live endpoints. Legacy startup/restart cases
 remain in smoke-startup.py; run both scripts at the integrated head.
 """
 import argparse
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 import http.client
 import importlib.util
 import json
@@ -228,9 +228,12 @@ def source_sets(root):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", type=Path, required=True)
+    parser.add_argument("--out", type=Path, help="Fresh directory retaining every case, including failures")
     args = parser.parse_args()
     binary = args.binary.resolve()
-    with tempfile.TemporaryDirectory(prefix="grill-startup-runtime-") as directory:
+    if args.out:
+        args.out.mkdir(parents=True, exist_ok=False)
+    with (nullcontext(args.out) if args.out else tempfile.TemporaryDirectory(prefix="grill-startup-runtime-")) as directory:
         root = Path(directory)
         cases = [("base", "none", None, (80, 100, 120)),
                  ("ready-delay", "none", None, (280, 100, 120)),

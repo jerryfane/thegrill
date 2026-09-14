@@ -6,7 +6,7 @@ All process launches, termination and restarts belong to this test harness.
 The production CLI is only an observer/finite request collector. No GPU imports.
 """
 import argparse
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 import hashlib
 import json
 import os
@@ -318,9 +318,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", type=Path, required=True)
     parser.add_argument("--case", choices=["all", "startup", "restart", "comparison"], default="all")
+    parser.add_argument("--out", type=Path, help="Fresh directory retaining every case, including failures")
     args = parser.parse_args()
     binary = args.binary.resolve()
-    with tempfile.TemporaryDirectory(prefix="grill-startup-cpu-") as temp:
+    if args.out:
+        args.out.mkdir(parents=True, exist_ok=False)
+    with (nullcontext(args.out) if args.out else tempfile.TemporaryDirectory(prefix="grill-startup-cpu-")) as temp:
         root = Path(temp)
         if args.case in ["all", "startup", "comparison"]:
             base, p = startup(binary, root)
