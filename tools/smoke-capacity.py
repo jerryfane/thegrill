@@ -6,14 +6,20 @@ No reruns, replacements, fallback assertions or real-backend qualification.
 """
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
 import subprocess
 import sys
 import time
+from types import SimpleNamespace
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent
+spec = importlib.util.spec_from_file_location("retention_journal", ROOT / "retention-journal.py")
+journal_module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(journal_module)
 
 
 def workload():
@@ -84,7 +90,8 @@ def stop(process, log):
     log.close()
 
 
-def retention_case(binary, root, name, fixture_args, condition, satisfied, eviction, hit, counters):
+def retention_case(binary, root, name, fixture_args, condition, satisfied, eviction, hit, counters,
+                   isolation="exclusive-single-acquisition"):
     target = root / name
     target.mkdir()
     process, log, journal, endpoint = fixture(target, fixture_args)
@@ -99,15 +106,23 @@ def retention_case(binary, root, name, fixture_args, condition, satisfied, evict
         plan = target / "plan.json"
         plan.write_text(json.dumps(capacity_plan([c])))
         command(binary, target, "preflight", ["capacity", "preflight", plan], 0)
+        isolation_args = [] if isolation is None else ["--metrics-isolation", isolation]
         report = command(binary, target, "run", ["capacity", "run", plan, "--endpoint", endpoint + "/v1/chat/completions",
                          "--model", "fixture-model", "--local-http", "--metrics-url", endpoint + "/metrics",
-                         "--metrics-isolation", "exclusive-single-acquisition", "--eviction-journal", journal, "--out", target / "capture"],
+                         *isolation_args, "--eviction-journal", journal, "--out", target / "capture"],
                          0 if satisfied or condition == "observe_only" else 2)
         replay = command(binary, target, "inspect", ["capacity", "inspect", target / "capture"], 0)
         assert replay == report
         retained = report["cells"][0]["retention"]
         assert retained["condition_satisfied"] is satisfied
         assert retained["counter_coverage_complete"] is counters
+        execution = json.loads((target / "capture/execution.json").read_text())
+        native_plan = json.loads((target / "capture/cell-000/plan.json").read_text())
+        assert execution["metrics_isolation"] == isolation
+        assert native_plan["metrics"]["isolation"] == (isolation or "shared-server-unattributed")
+        if condition != "observe_only" and isolation != "exclusive-single-acquisition":
+            assert report["cells"][0]["state"] == "unsuccessful_tested"
+            assert any("exclusive-single-acquisition" in reason for reason in retained["unavailable"])
         group = retained["acquisitions"][0]
         assert group["probe_hit"] is hit
         if eviction is None:
@@ -145,6 +160,65 @@ def capacity_failure(binary, root):
         stop(process, log)
 
 
+def source_sets(root):
+    # Synthetic files exercise whole-set admission without fetching/importing vLLM.
+    target = root / "source-sets"
+    target.mkdir()
+    names = tuple(journal_module.PINS)
+    sources, pins = [], []
+    for revision in ["old", "new"]:
+        directory = target / revision
+        directory.mkdir()
+        paths, expected = {}, {}
+        for index, name in enumerate(names):
+            raw = f"{revision}-{name}\n".encode()
+            path = directory / f"source-{index}.py"
+            path.write_bytes(raw)
+            paths[name] = path
+            expected[name] = hashlib.sha256(raw).hexdigest()
+        sources.append(paths)
+        pins.append(expected)
+    contracts = [journal_module.SOURCE, journal_module.SOURCE_487]
+
+    def rejected(paths, source):
+        try:
+            journal_module.verify_sources(paths, source)
+        except ValueError:
+            return
+        raise AssertionError(("unreviewed source set admitted", source))
+
+    with patch.object(journal_module, "PINS", pins[0]), patch.object(journal_module, "PINS_487", pins[1]):
+        for index, source in enumerate(contracts):
+            assert journal_module.verify_sources(sources[index], source) == source
+            rejected(sources[1 - index], source)
+        for mask in range(1, (1 << len(names)) - 1):
+            mixed = {name: sources[(mask >> index) & 1][name] for index, name in enumerate(names)}
+            for source in contracts:
+                rejected(mixed, source)
+        for index, source in enumerate(contracts):
+            rejected({name: path for name, path in sources[index].items() if name != names[0]}, source)
+            rejected({**sources[index], "unreviewed.py": sources[index][names[0]]}, source)
+            rejected(sources[index], journal_module.FIXTURE)
+            rejected(sources[index], "vllm-latest")
+            sources[index][names[0]].write_bytes(b"drift after selection\n")
+            rejected(sources[index], source)
+    for source in contracts:
+        rejected(sources[0], source)  # Real public pins reject synthetic bytes.
+    # Refuse absent, unknown and mismatched explicit selections before any import.
+    for selected in [None, journal_module.FIXTURE, "vllm-latest", journal_module.SOURCE_487]:
+        with patch.object(journal_module.importlib, "import_module", side_effect=AssertionError("unexpected runtime import")):
+            try:
+                journal = SimpleNamespace(source=journal_module.SOURCE)
+                if selected is None:
+                    journal_module.install_vllm(journal)
+                else:
+                    journal_module.install_vllm(journal, source=selected)
+            except (ValueError, TypeError):
+                pass
+            else:
+                raise AssertionError(("invalid installer selection admitted", selected))
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--binary", type=Path, required=True)
@@ -152,11 +226,18 @@ def main():
     args = parser.parse_args()
     args.out.mkdir(mode=0o700)  # Fresh only: failures are retained, never rerun.
     binary = args.binary.resolve()
+    source_sets(args.out)
     capacity_failure(binary, args.out)
     retention_case(binary, args.out, "eviction-recovery", ["--capacity", "1"], "eviction_and_recovery", True, True, False, True)
     retention_case(binary, args.out, "retained-hit", ["--capacity", "8"], "retained_hit", True, False, True, True)
     retention_case(binary, args.out, "missing-counters", ["--capacity", "1", "--missing-counters"], "eviction_and_recovery", False, None, False, False)
     retention_case(binary, args.out, "non-eviction-miss", ["--capacity", "8", "--miss-on-probe"], "observe_only", False, False, False, True)
+    retention_case(binary, args.out, "shared-isolation", ["--capacity", "1"], "eviction_and_recovery",
+                   False, None, False, True, isolation="shared-server-unattributed")
+    retention_case(binary, args.out, "missing-isolation", ["--capacity", "8"], "retained_hit",
+                   False, None, True, True, isolation=None)
+    retention_case(binary, args.out, "shared-observe-only", ["--capacity", "8"], "observe_only",
+                   False, False, True, True, isolation="shared-server-unattributed")
     print(json.dumps({"status": "all-finite-ordinary-fixtures-passed", "real_backend_qualification": False, "out": str(args.out)}))
 
 

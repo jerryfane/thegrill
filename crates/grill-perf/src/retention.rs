@@ -27,7 +27,25 @@ pub enum Condition { ObserveOnly, EvictionAndRecovery, RetainedHit }
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub enum Source {
     #[serde(rename = "vllm-0.27.0-block-pool-v1")] VllmBlockPool,
+    #[serde(rename = "vllm-487ecf187-block-pool-v1")] Vllm487BlockPool,
     #[serde(rename = "ordinary-lru-fixture-v1")] OrdinaryLruFixture,
+}
+impl Source {
+    fn pins(self) -> &'static [(&'static str, &'static str)] {
+        match self {
+            Self::VllmBlockPool => &[
+                ("vllm/v1/core/block_pool.py", "51cad2fd425128a0ff433ca4685acfc022e40659153ea5d7180fc586e1eebb6c"),
+                ("vllm/v1/core/kv_cache_manager.py", "70f7f608c0963af155540630a5633483e5c19c0c0280dfd621760d5db2a419a6"),
+                ("vllm/v1/request.py", "6085b0668f41d56cd81ef483c06456f4ebe88bc1d46c8131d7134182d7893012"),
+            ],
+            Self::Vllm487BlockPool => &[
+                ("vllm/v1/core/block_pool.py", "ddee56dccb2208411b3a035918e917ce8f56a9858471e9ca12b420d5d79bc69c"),
+                ("vllm/v1/core/kv_cache_manager.py", "9747090b01f758487ac7488fb0721c7cfe5507e8aeb55f4ea3795349bfff0968"),
+                ("vllm/v1/request.py", "0287844f70eeaeb077d714e833a4b449a15e045a6516f8530182e357a5bec82f"),
+            ],
+            Self::OrdinaryLruFixture => &[],
+        }
+    }
 }
 impl Plan {
     pub fn validate(&self, workload: &Workload) -> Result<()> {
@@ -208,13 +226,11 @@ fn events(raw: &[u8], plan: &Plan) -> Result<Vec<Event>> {
         Some(Kind::Start { producer_sha256, source_pins, max_events, max_bytes, max_window_us })
             if producer_sha256 == &plan.producer_sha256 && *max_events == plan.max_events && *max_bytes == plan.journal_bytes
                 && *max_window_us == plan.max_window_us => {
-                let expected: BTreeMap<String,String> = if plan.source == Source::VllmBlockPool {
-                    [("vllm/v1/core/block_pool.py","51cad2fd425128a0ff433ca4685acfc022e40659153ea5d7180fc586e1eebb6c"),
-                     ("vllm/v1/core/kv_cache_manager.py","70f7f608c0963af155540630a5633483e5c19c0c0280dfd621760d5db2a419a6"),
-                     ("vllm/v1/request.py","6085b0668f41d56cd81ef483c06456f4ebe88bc1d46c8131d7134182d7893012")]
-                        .into_iter().map(|(a,b)|(a.into(),b.into())).collect()
-                } else { BTreeMap::new() };
-                if *source_pins != expected { return Err("backend source pins mismatch".into()); }
+                let expected = plan.source.pins();
+                if source_pins.len() != expected.len()
+                    || !expected.iter().all(|(name, hash)| source_pins.get(*name).map(String::as_str) == Some(*hash)) {
+                    return Err("backend source pins mismatch".into());
+                }
             }
         _ => return Err("journal producer or finite contract mismatch".into()),
     }
@@ -253,6 +269,13 @@ pub fn report(root: &Path, index: usize, plan: &Plan, run: &evidence::Loaded) ->
     let telemetry = run.metrics.as_ref().and_then(|m| m.acquisition.as_ref());
     let counters = telemetry.is_some_and(|a| accounting_complete(a, plan, run.plan.waves.len()*2));
     if !counters { unavailable.push("complete metrics2 source continuity/accounting unavailable; preemption and miss are not eviction".into()); }
+    if plan.condition != Condition::ObserveOnly
+        && !matches!((&run.plan.metrics, &run.metrics),
+            (Some(crate::metrics::Protocol::V2(config)), Some(summary))
+                if config.isolation == crate::metrics::v2::ISOLATION_EXCLUSIVE
+                    && run.plan.metrics.as_ref() == Some(&summary.config)) {
+        unavailable.push("required retention needs prospectively declared and executed exclusive-single-acquisition metrics isolation".into());
+    }
     let lookup_indices: Vec<usize> = journal_events.iter().enumerate().skip(boundary).filter_map(|(i,e)| matches!(e.event, Kind::Lookup {..}).then_some(i)).collect();
     let mut allocations = Vec::new();
     let mut source_failed = false;
@@ -325,4 +348,67 @@ pub fn report(root: &Path, index: usize, plan: &Plan, run: &evidence::Loaded) ->
         "acquisitions":rows,"condition":plan.condition,"condition_satisfied":satisfied,"unavailable":unavailable,
         "scope":"source-pinned local pool only; target block removal is observed eviction, not proof of whole-history loss or miss causation; reported hit/miss and correctness remain separate; no reset/flush/restart",
         "live_qualified":false}))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn declaration() -> Plan {
+        let mut capacity: crate::capacity::Plan = serde_json::from_str(
+            include_str!("../examples/retention-capacity-v1.json")
+        ).unwrap();
+        capacity.cells.remove(0).retention.unwrap()
+    }
+
+    fn journal(plan: &Plan, pins: &BTreeMap<String, String>) -> Vec<u8> {
+        let kinds = [
+            serde_json::json!({"kind":"start","producer_sha256":plan.producer_sha256,
+                "source_pins":pins,"max_events":plan.max_events,"max_bytes":plan.journal_bytes,
+                "max_window_us":plan.max_window_us}),
+            serde_json::json!({"kind":"installed","hook":"allocation-remove-store-lookup-v1"}),
+        ];
+        let mut raw = Vec::new();
+        for (sequence, event) in kinds.into_iter().enumerate() {
+            serde_json::to_writer(&mut raw, &serde_json::json!({
+                "version":1,"source":plan.source,"incarnation":"a".repeat(32),
+                "sequence":sequence,"offset_us":sequence,"clock":"producer_monotonic_microseconds",
+                "overhead_us":0,"event":event
+            })).unwrap();
+            raw.push(b'\n');
+        }
+        raw
+    }
+
+    #[test]
+    fn journal_requires_one_complete_selected_public_source_set() {
+        let sources = [Source::VllmBlockPool, Source::Vllm487BlockPool];
+        let mut plan = declaration();
+        for source in sources {
+            plan.source = source;
+            let pins: BTreeMap<String, String> = source.pins().iter()
+                .map(|(name, hash)| ((*name).into(), (*hash).into())).collect();
+            assert!(events(&journal(&plan, &pins), &plan).is_ok());
+            for mask in 0..8 {
+                let mixed: BTreeMap<String, String> = Source::VllmBlockPool.pins().iter().enumerate()
+                    .map(|(index, (name, old))| {
+                        let hash = if mask & (1 << index) == 0 { *old } else { Source::Vllm487BlockPool.pins()[index].1 };
+                        ((*name).into(), hash.into())
+                    }).collect();
+                let selected = (source == Source::VllmBlockPool && mask == 0)
+                    || (source == Source::Vllm487BlockPool && mask == 7);
+                assert_eq!(events(&journal(&plan, &mixed), &plan).is_ok(), selected);
+            }
+            let mut missing = pins.clone();
+            missing.pop_first();
+            assert!(events(&journal(&plan, &missing), &plan).is_err());
+            let mut extra = pins.clone();
+            extra.insert("unreviewed.py".into(), "0".repeat(64));
+            assert!(events(&journal(&plan, &extra), &plan).is_err());
+            plan.source = Source::OrdinaryLruFixture;
+            assert!(events(&journal(&plan, &pins), &plan).is_err());
+        }
+        assert!(events(&journal(&plan, &BTreeMap::new()), &plan).is_ok());
+        assert!(serde_json::from_str::<Source>("\"vllm-latest\"").is_err());
+    }
 }

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Finite explicit backend hook; no launcher, service control, flags or devices.
 
-An operator calls install_vllm(journal) in the owning engine process before any
+An operator calls install_vllm(journal, source=...) in the owning engine process before any
 cache activity. This is deliberately NOT a frontend ASGI journal: it observes
 actual BlockPool insertion, allocation-driven removal and computed-block lookup.
 Importing this module uses only the standard library; it never imports vLLM.
@@ -19,11 +19,17 @@ import threading
 import time
 
 SOURCE = "vllm-0.27.0-block-pool-v1"
+SOURCE_487 = "vllm-487ecf187-block-pool-v1"
 FIXTURE = "ordinary-lru-fixture-v1"
 PINS = {
     "vllm/v1/core/block_pool.py": "51cad2fd425128a0ff433ca4685acfc022e40659153ea5d7180fc586e1eebb6c",
     "vllm/v1/core/kv_cache_manager.py": "70f7f608c0963af155540630a5633483e5c19c0c0280dfd621760d5db2a419a6",
     "vllm/v1/request.py": "6085b0668f41d56cd81ef483c06456f4ebe88bc1d46c8131d7134182d7893012",
+}
+PINS_487 = {
+    "vllm/v1/core/block_pool.py": "ddee56dccb2208411b3a035918e917ce8f56a9858471e9ca12b420d5d79bc69c",
+    "vllm/v1/core/kv_cache_manager.py": "9747090b01f758487ac7488fb0721c7cfe5507e8aeb55f4ea3795349bfff0968",
+    "vllm/v1/request.py": "0287844f70eeaeb077d714e833a4b449a15e045a6516f8530182e357a5bec82f",
 }
 
 
@@ -41,12 +47,23 @@ def bounded_read(path, cap):
         os.close(fd)
 
 
-def verify_sources(paths):
-    if set(paths) != set(PINS):
+def source_contract(source):
+    # Closed whole-set selection, never per-file version negotiation.
+    if source == SOURCE:
+        return PINS
+    if source == SOURCE_487:
+        return PINS_487
+    raise ValueError("unsupported real backend source contract")
+
+
+def verify_sources(paths, source):
+    pins = source_contract(source)
+    if set(paths) != set(pins):
         raise ValueError("exact backend source membership required")
-    for name, path in paths.items():
-        if hashlib.sha256(bounded_read(path, 2 * 1024 * 1024)).hexdigest() != PINS[name]:
+    for name, expected in pins.items():
+        if hashlib.sha256(bounded_read(paths[name], 2 * 1024 * 1024)).hexdigest() != expected:
             raise ValueError("unsupported backend source bytes: " + name)
+    return source
 
 
 class Journal:
@@ -57,8 +74,7 @@ class Journal:
     """
     def __init__(self, path, *, source, max_events=10000, max_bytes=8388608,
                  max_window_us=60000000):
-        if source not in (SOURCE, FIXTURE):
-            raise ValueError("unsupported journal source")
+        pins = {} if source == FIXTURE else source_contract(source)
         if not 8 <= max_events <= 10000 or not 4096 <= max_bytes <= 16777216:
             raise ValueError("invalid finite journal bounds")
         if not 1000 <= max_window_us <= 3600000000:
@@ -79,7 +95,7 @@ class Journal:
         self.pool = None
         self.check_hooks = lambda: True
         producer = hashlib.sha256(bounded_read(__file__, 1024 * 1024)).hexdigest()
-        self.emit("start", producer_sha256=producer, source_pins=PINS if source == SOURCE else {},
+        self.emit("start", producer_sha256=producer, source_pins=pins,
                   max_events=max_events, max_bytes=max_bytes, max_window_us=max_window_us)
 
     def emit(self, kind, **data):
@@ -251,16 +267,17 @@ def install(journal, pool_class, manager_class):
     journal.emit("installed", hook="allocation-remove-store-lookup-v1")
 
 
-def install_vllm(journal):
+def install_vllm(journal, *, source):
     """Operator-invoked in the single owning backend process before cache use.
 
     No environment flag is set, no cache is reset, and no server is launched.
     vLLM imports happen only here, never during source inspection or CPU fixtures.
     """
-    if journal.source != SOURCE:
+    pins = source_contract(source)
+    if journal.source != source:
         raise ValueError("production journal source mismatch")
     pool = importlib.import_module("vllm.v1.core.block_pool")
     manager = importlib.import_module("vllm.v1.core.kv_cache_manager")
     request = importlib.import_module("vllm.v1.request")
-    verify_sources({name: inspect.getsourcefile(module) for name, module in zip(PINS, (pool, manager, request))})
+    verify_sources({name: inspect.getsourcefile(module) for name, module in zip(pins, (pool, manager, request))}, source)
     install(journal, pool.BlockPool, manager.KVCacheManager)

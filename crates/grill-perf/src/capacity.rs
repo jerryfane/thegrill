@@ -184,6 +184,14 @@ fn common(options: &Options, workload: PathBuf) -> run::CommonArgs {
         metrics_auth_env: options.metrics_auth_env.clone(), metrics_isolation: options.metrics_isolation.clone(),
         auth_env: options.auth_env.clone(), local_http: options.local_http }
 }
+fn collection_error(native: Option<String>, journal: Option<String>) -> Option<String> {
+    match (native, journal) {
+        (None, None) => None,
+        (Some(error), None) => Some(format!("native collector: {error}")),
+        (None, Some(error)) => Some(format!("eviction journal capture: {error}")),
+        (Some(native), Some(journal)) => Some(format!("native collector: {native}; eviction journal capture: {journal}")),
+    }
+}
 pub fn collect(options: &Options) -> Result<Report> {
     let (plan, bytes) = load_plan(&options.plan)?;
     if plan.cells.iter().any(|c| c.retention.is_some()) && options.metrics_url.is_none() {
@@ -218,10 +226,8 @@ pub fn collect(options: &Options) -> Result<Report> {
         let native = options.out.join(cell_path(i));
         evidence::json(&options.out.join(format!("started-{i:03}.json")), &Outcome { version: 1, plan_sha256: execution.plan_sha256.clone(), error: None })?;
         let result = run::execute_capacity_bounded(&run::Options { common: common(options, options.out.join(format!("workload-{i:03}.json"))), out: native.clone(), json: true }, deadline);
-        let mut error = result.err().map(|_| "native collector returned an error; retained evidence is authoritative".to_owned());
-        if let Some(journal) = journal {
-            if journal.finish(&options.out, i).is_err() { error = Some("eviction journal capture failed; no eviction qualification".into()); }
-        }
+        let journal_error = journal.and_then(|journal| journal.finish(&options.out, i).err());
+        let error = collection_error(result.err(), journal_error);
         evidence::json(&options.out.join(format!("outcome-{i:03}.json")), &Outcome { version: 1, plan_sha256: execution.plan_sha256.clone(), error })?;
         evidence::sync(&options.out)?;
         let report = inspect(&options.out)?;
@@ -375,5 +381,22 @@ pub fn execute(command: Command) -> Result<u8> {
         Command::Preflight { plan } => { let (plan, _) = load_plan(&plan)?; crate::print_json(&plan.validate()?)?; Ok(0) }
         Command::Run(options) => { let report = collect(&options)?; let complete = report.cells.iter().all(|c| c.state == "successful_tested"); crate::print_json(&report)?; Ok(if complete { 0 } else { 2 }) }
         Command::Inspect { capture } => { crate::print_json(&inspect(&capture)?)?; Ok(0) }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn settlement_preserves_independent_collector_and_journal_failures() {
+        let native = "failed to publish native receipt";
+        let journal = "failed to persist journal window";
+        let error = collection_error(Some(native.into()), Some(journal.into())).unwrap();
+        assert!(error.contains(native));
+        assert!(error.contains(journal));
+        assert!(collection_error(Some(native.into()), None).unwrap().contains(native));
+        assert!(collection_error(None, Some(journal.into())).unwrap().contains(journal));
+        assert_eq!(collection_error(None, None), None);
     }
 }
