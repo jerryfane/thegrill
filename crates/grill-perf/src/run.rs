@@ -181,7 +181,7 @@ fn admit(o: &CommonArgs) -> Result<Admitted> {
     let workload: Workload =
         serde_json::from_slice(&source).map_err(|e| format!("invalid workload: {e}"))?;
     workload.validate()?;
-    if workload.version == 2 && o.policy.is_some() {
+    if matches!(workload.version, 2 | 5) && o.policy.is_some() {
         return Err("conversation steps have descriptive per-step semantics, not an advanced policy contract".into());
     }
     if o.model.is_empty() || o.model.len() > 4096 || o.model.chars().any(char::is_control) {
@@ -240,7 +240,7 @@ fn admit(o: &CommonArgs) -> Result<Admitted> {
         cache_namespace: (workload.request.cache != Cache::Observe || workload.salted())
             .then_some("0000000000000000000000000000000000000000000000000000000000000000"),
     };
-    if workload.version == 2 {
+    if matches!(workload.version, 2 | 5) {
         for (case, spec) in workload.cases.iter().zip(&waves) {
             if case.step.as_ref().is_some_and(|step| step.parent.is_none()) {
                 let mut root = spec.clone();
@@ -335,7 +335,7 @@ fn execute_inner(o: &Options, deadline: Option<Instant>) -> Result<Summary> {
         .max()
         .unwrap_or(1);
     let plan = Plan {
-        version: 3,
+        version: if admitted.workload.version == 5 { 4 } else { 3 },
         metric_contract: Some(METRIC_CONTRACT.into()),
         kind: "performance-run-v1".into(),
         tool_version: env!("CARGO_PKG_VERSION").into(),
@@ -380,7 +380,7 @@ fn execute_inner(o: &Options, deadline: Option<Instant>) -> Result<Summary> {
 pub fn resume(root: &std::path::Path, json: bool) -> Result<Summary> {
     let _owner = lifecycle::ownership(root)?;
     let mut loaded = evidence::load(root)?;
-    if loaded.plan.workload.version == 2 {
+    if matches!(loaded.plan.workload.version, 2 | 5) {
         return Err("bounded conversation sequences cannot resume; retain the partial sequence and start a new explicitly budgeted capture".into());
     }
     if !matches!(loaded.plan.version, 2 | 3) {
@@ -490,7 +490,7 @@ fn collect(
             let preparation = Instant::now();
             let requests: Vec<_> = (0..spec.concurrency).map(|lane| sequence.request(&body_context, spec, lane)).collect::<Result<_>>()?;
             let hashes = requests.iter().map(|r| evidence::digest(r.as_bytes())).collect();
-            let reservation = Reservation { version: 1, plan_sha256: plan_hash.into(), wave: spec.clone(), requests, request_sha256: hashes };
+            let reservation = Reservation { version: if plan.version == 4 { 2 } else { 1 }, plan_sha256: plan_hash.into(), wave: spec.clone(), requests, request_sha256: hashes };
             if interrupted() { summary.status = "interrupted".into(); break; }
             if deadline.is_some_and(|deadline| Instant::now() >= deadline) { summary.status = "budget-exhausted".into(); break; }
             let reservation_start = Instant::now();
@@ -512,11 +512,12 @@ fn collect(
             let before_overhead_us = telemetry_start.map_or(0, wire::us);
             let (stop, cancellation) = watch::channel(interrupted());
             let mut tasks = JoinSet::new();
+            let mut tool_expectation = sequence.tool_expectation(&plan.workload, spec)?;
             let preparation_us = wire::us(preparation).saturating_sub(before_overhead_us);
             let measured_origin_unix_ms = plan.metrics.as_ref().map(|_| metrics::unix_ms());
             let origin = Instant::now();
             for (lane, request) in prepared.into_iter().enumerate() {
-                tasks.spawn(wire::collect(client.clone(), request, plan.workload.limits.clone(), settings.clone(), lane as u32, (origin, deadline), cancellation.clone()));
+                tasks.spawn(wire::collect(client.clone(), request, plan.workload.limits.clone(), settings.clone(), lane as u32, (origin, deadline), cancellation.clone(), tool_expectation.take()));
             }
             let mut settled = Vec::with_capacity(spec.concurrency as usize);
             while !tasks.is_empty() {
@@ -573,7 +574,7 @@ fn collect(
                     || a.http_status.is_some_and(|status| status != 200)
             });
             let (eligible, tokens, rate) = evidence::throughput(&attempts, last - first);
-            let wave = Wave { version: 1, plan_sha256: plan_hash.into(), reservation_sha256, spec: spec.clone(), attempts, elapsed_us: last - first, dispatch_spread_us: last_dispatch - first, preparation_us, reservation_publication_us, body_publication_us: wire::us(publication), completion_tokens: tokens, achieved_completion_tokens_per_second: rate, eligible, metrics };
+            let wave = Wave { version: if plan.version == 4 { 2 } else { 1 }, plan_sha256: plan_hash.into(), reservation_sha256, spec: spec.clone(), attempts, elapsed_us: last - first, dispatch_spread_us: last_dispatch - first, preparation_us, reservation_publication_us, body_publication_us: wire::us(publication), completion_tokens: tokens, achieved_completion_tokens_per_second: rate, eligible, metrics };
             evidence::publish(&dir, "wave.json", &wave)?;
             summary.wave_publication_us += wire::us(publication);
             summary.wave_preparation_us += preparation_us;

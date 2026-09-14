@@ -217,11 +217,11 @@ pub(crate) fn load_verified(root: &Path) -> Result<Loaded, LoadError> {
     directory(root)?;
     let plan_bytes = read(&root.join("plan.json"), 8 * 1024 * 1024)?;
     let plan: Plan = decode(&plan_bytes)?;
-    if !matches!(plan.version, 1..=3) || plan.kind != "performance-run-v1" {
+    if !matches!(plan.version, 1..=4) || plan.kind != "performance-run-v1" {
         return Err("unsupported performance plan".into());
     }
     if match plan.version {
-        3 => plan.metric_contract.as_deref() != Some(METRIC_CONTRACT),
+        3 | 4 => plan.metric_contract.as_deref() != Some(METRIC_CONTRACT),
         _ => plan.metric_contract.is_some(),
     } {
         return Err("metric contract does not match plan version".into());
@@ -229,6 +229,12 @@ pub(crate) fn load_verified(root: &Path) -> Result<Loaded, LoadError> {
     plan.workload.validate()?;
     if plan.workload.version == 3 && plan.version != 3 {
         return Err("workload version 3 requires native performance plan version 3".into());
+    }
+    if (plan.version == 4) != (plan.workload.version == 5) {
+        return Err("workload 5 requires plan 4, and plan 4 requires workload 5".into());
+    }
+    if plan.workload.version == 5 && plan.policy_sha256.is_some() {
+        return Err("workload 5 has no performance policy contract".into());
     }
     if let Some(deployment) = &plan.deployment {
         deployment.validate()?;
@@ -331,7 +337,7 @@ pub(crate) fn load_verified(root: &Path) -> Result<Loaded, LoadError> {
         let reservation: Reservation = decode(&reservation_bytes)?;
         let reservation_hash = digest(&reservation_bytes);
         fingerprint.update(reservation_hash.as_bytes());
-        if reservation.version != 1
+        if reservation.version != (if plan.version == 4 { 2 } else { 1 })
             || reservation.plan_sha256 != plan_hash
             || reservation.wave != *spec
             || reservation.requests.len() != spec.concurrency as usize
@@ -378,7 +384,7 @@ pub(crate) fn load_verified(root: &Path) -> Result<Loaded, LoadError> {
             )
             .as_bytes(),
         );
-        if wave.version != 1
+        if wave.version != (if plan.version == 4 { 2 } else { 1 })
             || wave.plan_sha256 != plan_hash
             || wave.reservation_sha256 != reservation_hash
             || wave.spec != *spec
@@ -410,6 +416,10 @@ pub(crate) fn load_verified(root: &Path) -> Result<Loaded, LoadError> {
             _ => return Err("missing or undeclared metrics companion evidence".into()),
         }
         let settings = crate::sequence::settings(&workload, spec);
+        let tool_step = workload.version == 5 && workload.cases.iter()
+            .find(|case| case.id == spec.case)
+            .and_then(|case| case.step.as_ref())
+            .is_some_and(|step| matches!(step.expect, crate::sequence::Expected::Tool { .. }));
         for (lane, a) in wave.attempts.iter().enumerate() {
             if a.lane as usize != lane
                 || a.response_bytes > workload.limits.response_bytes
@@ -425,6 +435,7 @@ pub(crate) fn load_verified(root: &Path) -> Result<Loaded, LoadError> {
             if body.len() != a.response_bytes || digest(&body) != a.response_sha256 {
                 return Err("response evidence hash mismatch".into());
             }
+            a.timing.validate_tools(tool_step)?;
             if sequence.observe(&plan, spec, a, &body)? != a.sequence {
                 return Err(
                     "sequence check or lineage differs from retained response evidence".into(),
@@ -434,17 +445,19 @@ pub(crate) fn load_verified(root: &Path) -> Result<Loaded, LoadError> {
                 if !a.dispatched || a.http_status != Some(200) {
                     return Err("complete response was not a successful dispatch".into());
                 }
-                crate::wire::verify_complete(
-                    a,
-                    &body,
-                    settings.stream,
-                    plan.version == 3,
-                    settings.profile,
-                )?;
+                if !tool_step {
+                    crate::wire::verify_complete(
+                        a,
+                        &body,
+                        settings.stream,
+                        matches!(plan.version, 3 | 4),
+                        settings.profile,
+                    )?;
+                }
             }
             a.timing.validate(settings.stream)?;
-            if plan.version == 3 {
-                if a.status != Status::Complete {
+            if matches!(plan.version, 3 | 4) {
+                if a.status != Status::Complete && !tool_step {
                     crate::wire::verify_partial_arrivals(
                         a,
                         &body,

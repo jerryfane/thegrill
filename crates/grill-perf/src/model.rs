@@ -26,6 +26,7 @@ pub enum Profile {
     PortableChatV1,
     VllmFixedV1,
     VllmConversationV2,
+    VllmConversationV3,
 }
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
@@ -139,14 +140,17 @@ pub(crate) fn identifier(s: &str) -> bool {
 }
 impl Workload {
     pub fn salted(&self) -> bool {
-        self.version == 2 || self.cases.iter().any(|case| case.fill.is_some())
+        matches!(self.version, 2 | 5) || self.cases.iter().any(|case| case.fill.is_some())
     }
     pub fn validate(&self) -> Result<()> {
-        if !matches!(self.version, 1..=3) || !identifier(&self.name) {
-            return Err("expected workload version 1, 2 or 3 and a short ASCII name".into());
+        if !matches!(self.version, 1..=3 | 5) || !identifier(&self.name) {
+            return Err("expected workload version 1, 2, 3 or 5 and a short ASCII name".into());
         }
         if self.version < 3 && self.request.warmup_output.is_some() {
             return Err("request.warmup_output requires workload version 3".into());
+        }
+        if self.version == 5 && self.request.warmup_output.is_some() {
+            return Err("conversation workload 5 has no warmup output override".into());
         }
         crate::sequence::validate(self)?;
         if self.cases.is_empty()
@@ -282,7 +286,12 @@ impl Workload {
                 2 * l.response_bytes + 6 * FRAME_CAP + 512 * 1024
             } else {
                 6 * l.response_bytes + 512 * 1024
-            } + fill_bytes;
+            } + fill_bytes
+                + if self.version == 5 && case.step.as_ref().is_some_and(|step| matches!(step.expect, crate::sequence::Expected::Tool { .. })) {
+                    TOOL_TRACE_ALLOWANCE
+                } else {
+                    0
+                };
             let required = per_request * cell.concurrency as usize;
             if required > l.wave_buffer_bytes {
                 return Err(format!(
@@ -417,6 +426,47 @@ pub enum TextChannel {
     Reasoning,
     MixedEvent,
 }
+
+pub const TOOL_ARRIVAL_CAP: usize = 4096;
+// Covers the in-memory arrivals, bounded call context and pretty JSON trace.
+pub const TOOL_TRACE_ALLOWANCE: usize = 1024 * 1024;
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ToolArrival {
+    pub end_offset: usize,
+    pub observed_us: u64,
+}
+
+fn present_option<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
+    deserializer: D,
+) -> Result<Option<T>, D::Error> {
+    T::deserialize(deserializer).map(Some)
+}
+
+fn tool_arrivals<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Vec<ToolArrival>>, D::Error> {
+    struct Visitor;
+    impl<'de> serde::de::Visitor<'de> for Visitor {
+        type Value = Vec<ToolArrival>;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("at most 4096 tool response chunk arrivals")
+        }
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+            let mut values = Vec::new();
+            while let Some(value) = seq.next_element()? {
+                if values.len() == TOOL_ARRIVAL_CAP {
+                    return Err(serde::de::Error::custom("tool arrival trace exceeds 4096 chunks"));
+                }
+                values.push(value);
+            }
+            Ok(values)
+        }
+    }
+    deserializer.deserialize_seq(Visitor).map(Some)
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Timing {
@@ -430,10 +480,51 @@ pub struct Timing {
     pub last_generated_text_us: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub terminal_us: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "present_option")]
+    pub first_tool_delta_us: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "present_option")]
+    pub first_validated_tool_call_us: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "tool_arrivals")]
+    pub tool_stream_arrivals: Option<Vec<ToolArrival>>,
     pub settle_us: u64,
     pub capture_parse_us: u64,
 }
 impl Timing {
+    pub fn validate_tools(&self, tool_step: bool) -> Result<()> {
+        if !tool_step {
+            return if self.first_tool_delta_us.is_none()
+                && self.first_validated_tool_call_us.is_none()
+                && self.tool_stream_arrivals.is_none()
+            {
+                Ok(())
+            } else {
+                Err("tool observations require workload5/plan4 conversation-v3 tool step".into())
+            };
+        }
+        if self.tool_stream_arrivals.is_none()
+            || (self.first_tool_delta_us.is_some() && self.first_body_us.is_none())
+            || (self.first_validated_tool_call_us.is_some()
+                && (self.first_tool_delta_us.is_none() || self.terminal_us.is_none()))
+            || self.first_generated_text_us.is_some()
+            || self.first_answer_text_us.is_some()
+            || self.last_generated_text_us.is_some()
+            || self.first_generated_channel.is_some()
+        {
+            return Err("inconsistent fixed tool timing presence".into());
+        }
+        let mut previous = 0;
+        for value in [self.headers_us, self.first_body_us, self.first_tool_delta_us,
+            self.first_validated_tool_call_us, self.terminal_us, Some(self.settle_us)]
+            .into_iter().flatten()
+        {
+            if value < previous {
+                return Err("fixed tool timing observations are out of order".into());
+            }
+            previous = value;
+        }
+        Ok(())
+    }
+
     pub fn validate(&self, stream: bool) -> Result<()> {
         if !stream
             && (self.first_generated_text_us.is_some()
