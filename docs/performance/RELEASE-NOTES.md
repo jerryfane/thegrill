@@ -13,6 +13,9 @@
 - Add finite workload4 solo/mixed schedules, fixed offsets and first-generated
   triggers, named controls, actual overlap evidence and settle-before-publication
   cancellation. Preserve never-dispatched and failed peers.
+  Solo report rows do not claim missing controls where none are required.
+  Final barrier-clock overruns remain deadline failures even when all lanes
+  completed, so native capture and offline replay agree.
 - Add workload5 streamed-tool fragments and first-delta/fully-validated-call
   timing with exact retained history and replay. Tool fragments are not text.
 - Add explicit bounded metrics2 provider accounting and prospective required

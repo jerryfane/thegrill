@@ -1036,6 +1036,9 @@ Wave2 retains every lane position, including undispatched failures. In schedule
 observations, `settled_offset_us` and `wave.elapsed_us` both retain actual
 origin-to-barrier duration, including initial waits and cancellation settlement
 tail; the tail is never truncated to manufacture a deadline success.
+Completed lanes do not exempt the whole-scenario barrier from that deadline.
+Timeout classification uses the retained barrier clock, including a scheduler
+delay after the final admission-loop check.
 Undispatched attempts have zero/default response timings, not fictional
 dispatch or service intervals. Dispatch spread uses dispatched lanes only.
 

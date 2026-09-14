@@ -90,6 +90,7 @@ fn schedule4_mixed_and_fixed_arrivals_replay_named_controls_and_real_overlap() {
     let output = replay(&temp, "run");
     successful(&output);
     let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["schedule"]["baseline"][0]["lanes"][0]["repetitions"][0]["matched_solo_complete"], true);
     assert_eq!(report["schedule"]["baseline"][2]["lanes"][1]["repetitions"][0]["matched_solo_complete"], true);
     assert_eq!(report["schedule"]["baseline"][2]["lanes"][0]["repetitions"][0]["completion_tokens"], 8);
     assert_eq!(report["schedule"]["baseline"][2]["lanes"][1]["repetitions"][0]["completion_tokens"], 3);

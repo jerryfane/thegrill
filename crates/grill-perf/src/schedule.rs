@@ -488,7 +488,7 @@ pub fn summarize(run: &crate::evidence::Loaded) -> Vec<ScenarioReport> {
                             prompt_tokens: a.and_then(|a| a.usage.prompt_tokens),
                             completion_tokens: a.and_then(|a| a.usage.completion_tokens),
                             eligibility_errors: a.map_or_else(|| vec!["missing_attempt".into()], |a| a.eligibility_errors.clone()),
-                            matched_solo_complete: solo.as_ref().is_some_and(|s| s.get(trial).is_some_and(|s| s.is_some_and(|w| w.eligible))) && solo_warmups_complete,
+                            matched_solo_complete: solo.as_ref().is_none_or(|s| s.get(trial).is_some_and(|s| s.is_some_and(|w| w.eligible))) && solo_warmups_complete,
                         }
                     }).collect(),
                 }

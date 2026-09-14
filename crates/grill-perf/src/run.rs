@@ -630,6 +630,13 @@ fn collect(
                 (settled, None)
             };
             let measured_duration_us = wire::us(origin);
+            // Bind timeout classification to the retained barrier clock, including
+            // scheduler delay after the final admission-loop deadline check.
+            let schedule_fatal = schedule_fatal.or_else(|| {
+                (spec.lanes.is_some()
+                    && measured_duration_us >= u64::from(plan.workload.limits.total_ms) * 1000)
+                    .then_some(crate::schedule::Reason::Deadline)
+            });
             let acquisition_clock = if plan.version == 5 {
                 let started_offset_us = metrics::offset_us(capture_origin, origin)?;
                 Some(crate::acquisition::StepClock {

@@ -44,7 +44,8 @@ fn acquisition6_resets_whole_histories_keeps_actual_parents_and_replays_wall_clo
     for repetition in 0..4 {
         let phase = if repetition == 0 { "warmup" } else { "measured" };
         let index = if repetition == 0 { 0 } else { repetition-1 };
-        let expected = format!("{:x}-h", Sha256::digest(format!("grill-acquisition-v1:{original}:{phase}:{index}")));
+        let expected = format!("{}-h", Sha256::digest(format!("grill-acquisition-v1:{original}:{phase}:{index}"))
+            .iter().map(|byte| format!("{byte:02x}")).collect::<String>());
         for step in 0..2 {
             let wave = repetition*2+step;
             let reservation = read(&temp.path(&format!("run/wave-{wave:06}/reservation.json")));
@@ -128,8 +129,8 @@ fn acquisition6_native_policy3_runs_declared_roles_and_reports_step_whole_and_ta
     fs::write(temp.path("deployment.json"),serde_json::to_vec(&deployment()).unwrap()).unwrap();
     let threshold=json!({"max_regression_bps":9999,"max_reference_spread_bps":1000000});
     let policy=json!({"version":3,"method":"observed-envelope-v3","id":"acquisition-fixture",
-        "collector_sha256":format!("{:x}",Sha256::digest(fs::read(env!("CARGO_BIN_EXE_grill-perf")).unwrap())),
-        "workload_source_sha256":format!("{:x}",Sha256::digest(&source)),"min_trials":3,
+        "collector_sha256":Sha256::digest(fs::read(env!("CARGO_BIN_EXE_grill-perf")).unwrap()).iter().map(|byte| format!("{byte:02x}")).collect::<String>(),
+        "workload_source_sha256":Sha256::digest(&source).iter().map(|byte| format!("{byte:02x}")).collect::<String>(),"min_trials":3,
         "cells":[{"cell":"follow-cell","metrics":[{"metric":"completion_latency_us","max_regression_bps":9999,"max_reference_spread_bps":1000000}]}],
         "whole_conversation":threshold,
         "tail":[{"target":{"kind":"whole_conversation"},"percentile":"p95","max_regression_bps":9999,"max_reference_spread_bps":1000000}]});
