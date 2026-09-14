@@ -214,7 +214,13 @@ fn cpu_shared_library_exercises_c_abi_without_driver_or_devices() {
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     let path = CString::new(so.as_os_str().as_encoded_bytes()).unwrap();
     let library = Library::open(&path).unwrap_or_else(|e| panic!("fixture load: {e:?}"));
-    let mut memory = Trace::new(); library.collect(UUID, true, &mut memory);
+    // The sampler moves between executor threads; initialization must remain
+    // balanced and the owned library usable after a cross-thread read.
+    let (library, memory) = std::thread::spawn(move || {
+        let mut memory = Trace::new();
+        library.collect(UUID, true, &mut memory);
+        (library, memory)
+    }).join().unwrap();
     assert_eq!(decode(&memory, true), Err(Failure::UnsupportedMetric));
     let mut power = Trace::new(); library.collect(UUID, false, &mut power);
     assert_eq!(decode(&power, false).unwrap().1,

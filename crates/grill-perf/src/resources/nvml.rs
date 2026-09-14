@@ -111,6 +111,12 @@ impl Trace {
 }
 
 struct Library { handle: *mut c_void, shutdown: Shutdown }
+// SAFETY: this owns one dlopen reference and never exposes it. Linux dlopen/
+// dlclose and the pinned NVML API are thread-safe (nvml.h, introductory contract).
+// Device handles and initialized sessions stay inside one synchronous collect
+// call; moving the owner between sampler tasks cannot move an in-flight call.
+// Do not infer Sync: the observer retains exclusive ownership of its library.
+unsafe impl Send for Library {}
 impl Library {
     fn open(name: &CStr) -> std::result::Result<Self, LoadFailure> {
         if !cfg!(all(target_os = "linux", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))) {
