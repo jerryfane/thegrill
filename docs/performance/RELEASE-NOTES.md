@@ -18,6 +18,8 @@
 - Add explicit bounded metrics2 provider accounting and prospective required
   telemetry gates. Missing sources, gaps and resets are not zero; shared counters
   are not attributed to one request, and an isolation declaration is not proof.
+  Source/position selectors cannot bypass contradictory engine accounting;
+  unrelated engine identities remain independent.
 - Add small GLM/DeepSeek routine and mixed profiles from the existing prompts,
   with explicit controls and traffic ceilings. Native CPU captures and replay
   were exercised; no real-backend qualification follows from fixture success.

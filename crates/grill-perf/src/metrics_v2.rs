@@ -1627,7 +1627,13 @@ fn evaluate(
     if let Some(check) = acquisition
         .accounting
         .iter()
-        .find(|check| check.labels == requirement.labels && check.status == "inconsistent")
+        .find(|check| {
+            check.status == "inconsistent"
+                && check.labels.iter().eq(
+                    requirement.labels.iter()
+                        .filter(|(name, _)| !matches!(name.as_str(), "source" | "position"))
+                )
+        })
     {
         return result(
             requirement,
@@ -2295,6 +2301,34 @@ mod tests {
                 Some("contradictory_accounting")
             )
         );
+    }
+
+    #[test]
+    fn selector_claims_use_engine_accounting_identity() {
+        let mut corrupted = advanced();
+        corrupted.cached = 100.0;
+        let other = |text: String| text.replace("engine=\"0\"", "engine=\"1\"");
+        let before = body(&fixture()) + &other(body(&fixture()));
+        let after = body(&corrupted) + &other(body(&advanced()));
+        let summary = summary(&before, &after);
+        for (name, selector, value) in [
+            (TOKENS_BY_SOURCE, "source", "external_kv_transfer"),
+            (ACCEPTED_POS, "position", "0"),
+        ] {
+            let mut selected = identity();
+            selected.push((selector, value));
+            let required = requirement(name, &selected, Predicate::ContinuousCounter);
+            assert_eq!(
+                outcome(&assess(&[required], &summary)),
+                (AssessmentOutcome::Unavailable, Some("contradictory_accounting"))
+            );
+            selected[0].1 = "1";
+            let independent = requirement(name, &selected, Predicate::ContinuousCounter);
+            assert_eq!(
+                outcome(&assess(&[independent], &summary)),
+                (AssessmentOutcome::Satisfied, None)
+            );
+        }
     }
 
     #[test]
