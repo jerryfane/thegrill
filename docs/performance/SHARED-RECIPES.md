@@ -28,6 +28,104 @@ manage serving state separately and obtain approval before model collection.
 Unsupported request controls must fail qualification; never strip a field to
 make a server accept the workload.
 
+## Routine and mixed claim profiles
+
+The `glm-routine-decode-v3.json`, `glm-routine-prefill-v3.json` and
+`glm-mixed-prefill-decode-v4.json` files, and their `deepseek-` counterparts,
+reuse the existing bundle prompts without changing the frozen bundle files.
+They are explicit workload choices, not model detection. GLM-labelled files
+retain `chat_template_kwargs.enable_thinking: false`; DeepSeek-labelled files
+retain `chat_template_kwargs.thinking: false`. A label does not establish that a
+particular backend honors that key. Verify the actual template and retained
+request/response evidence before qualification; never retry with a stripped key.
+
+“Routine” describes the bounded workload scope below, not an agreed maintainer
+requirement or a recommended deployment configuration. Select the rows relevant
+to the change. Do not run every row automatically.
+
+| Profile suffix, for either recipe | Declared scope | Warmup / measured requests per run | Output-token ceiling per run | A/B/A2 requests / output-token ceiling |
+|---|---|---:|---:|---:|
+| `routine-decode-v3` | Structured C1/C2; prose, code and JSON C1; capped warmup32/measured400; observe cache | 6 / 18 | 7,392 | 72 / 22,176 |
+| `routine-prefill-v3` | Approximately 4K/16K input, C1; capped8; required reported-zero prefix hits | 2 / 6 | 64 | 24 / 192 |
+| `mixed-prefill-decode-v4` | Solo decode, solo approximately 4K prefill, then a two-lane mixed scenario; capped decode warmup32/measured400 and prefill8 | 4 / 12 | 2,528 | 48 / 7,584 |
+
+Every cell/scenario has one retained warmup and three measured trials. Decode
+retains the source workload's 360-second wave deadline, 60-second idle deadline,
+1 MiB response limit and 64 MiB wave-buffer limit. Routine prefill retains
+600-second total/idle deadlines, a 64 KiB response limit and a 4 MiB wave buffer.
+Mixed schedules use the decode limits and admit at most two lanes. They contain
+12 waves, at most 16 model requests, and a sum of scenario deadlines of 4,320
+seconds per run. This is not a wall-clock bound on filesystem publication or
+operator work. Output ceilings include warmup and are ceilings, not promises that
+the server generates that many tokens.
+
+Mixed `prefill` dispatch is triggered by the first generated text from `decode`;
+it is not triggered by headers or a role-only delta. `solo-decode/decode` and
+`solo-prefill/prefill` are the named controls. A declared trigger is not proof of
+overlap: require retained decode/prefill overlap for every required repetition.
+Missing triggers, early settlement, cancellation and absent overlap remain in the
+evidence; none is a replacement opportunity.
+
+Source-byte pins for these exact files:
+
+| File | SHA256 |
+|---|---|
+| `glm-routine-decode-v3.json` | `6d075fb8617280ad062393e169f4b162d12840338bbb2749e6871be5672b5846` |
+| `glm-routine-prefill-v3.json` | `f0ddfda5f5bb35b6c1637fd27e02c5ae3ef9aeb37ed5e61fc0b953b52a61edd6` |
+| `glm-mixed-prefill-decode-v4.json` | `886c96c9efeaa4f6bac85e3d19af3408469edd55eb1fdc3a82aedaa3dacce06f` |
+| `deepseek-routine-decode-v3.json` | `2e92488152a007774a1f2614b6e18e83a70b2f4ab8d9d5c052b551a2316f0074` |
+| `deepseek-routine-prefill-v3.json` | `37a121c31bcabb5df8b508edbbf3e216880a514f81d29c3401ff51c6f4d987b9` |
+| `deepseek-mixed-prefill-decode-v4.json` | `0a84ab9151e262af2e38e64c3f62601f385bcf44aa2841b9a4eb9ad12b588559` |
+
+Before an authorized acquisition, select the actual installed collector, exact
+workload and complete prospective policy. Obtain the binary/source pins and
+approve thresholds through the policy workflow below, then run native
+`preflight` with the actual model, endpoint, deployment and policy arguments.
+Preflight dispatches no requests; it validates declarations, not backend support.
+Retain its output and recheck it whenever any input changes. Optional telemetry
+adds its own bounded requests and overhead; it is not included in the model
+request counts above. These six profiles were CPU-fixture captured and replayed,
+including both thinking-key spellings and actual mixed overlap. That does not
+verify real tokenizer lengths, cache behavior or serving performance.
+
+The new source pins are not interchangeable with #45's completed studies.
+Reuse the frozen #45 evidence for its original qualified scope; do not rerun that
+campaign simply to demonstrate these new filenames. A new first-output, mixed,
+cache-accounting or other claim needs the corresponding evidence and gates.
+`compare` is descriptive eligibility, never PASS. A serving decision does not
+establish semantic/JSON/code quality; retain the applicable recipe quality checks
+and use the [single shared report](SHARED-REPORT-TEMPLATE.md).
+
+### Explicit stress and other claim scopes
+
+These routine profiles do not stand in for the rest of the claim map:
+
+- C4/C8 concurrency is an explicit additional scope in the existing full decode
+  workloads, not hidden extra traffic in the routine profile.
+- The existing `prefill-ladder-v1.json` declares a separate strict-cold
+  approximately 2K–128K ladder. Count actual encoded request bytes and actual
+  provider/tokenizer tokens before making a context-length claim: a filename or
+  a 128 KiB limit is not evidence of 128K tokens.
+- Ordered reuse, alternating histories, edits/restores and tool follow-ups reuse
+  `conversation-v2.json` data. One ordered acquisition is descriptive, not a
+  population of independent conversation trials. Whole-conversation and tail
+  claims require their separately declared repeated-acquisition protocol and
+  full history/time/attempt bounds. Do not infer eviction pressure from this
+  small fixture.
+- Retention/capacity, host/device resources, startup/reload and kernel/fabric
+  claims require their corresponding source evidence and domain comparisons.
+  No ordinary serving throughput result substitutes for those observations.
+  Separate device, pressure and lifecycle authorization is mandatory.
+- Required-hit and deliberately cache-disabled operation are incompatible.
+  Inspect suitable existing receipts before requesting traffic or configuration
+  changes. Missing historical fields do not prove that a current backend lacks
+  them; zero hits do not demonstrate warm reuse; missing counters are not zero.
+
+Record implemented, CPU-protocol verified, real-adapter exercised and
+live-backend qualified separately for every selected claim. An unavailable domain
+or unsupported required observation is a reported gap, not PASS. Broader mandatory
+adoption still requires complete coverage reconciliation and maintainer agreement.
+
 ## Install and pin the actual artifact
 
 Follow [download, checksum verification and installation](INSTALL.md) before

@@ -1,6 +1,6 @@
 # Performance release notes
 
-## Unreleased — initial policy2 decisions
+## Unreleased — extended serving evidence
 
 - Add explicit policy2 first-generated, first-answer and client-completion
   latency gates on homogeneous flat workloads, plus complete-wave worst-lane
@@ -10,10 +10,21 @@
   serialization, tolerance boundaries, reason precedence or exit meanings.
 - Preserve all A/B/A2, warmup, output amount and cache eligibility requirements.
   Actual-hit latency never fabricates cold-prefill throughput.
-- This is the first issue #50 slice, not issue closure. Schedule selectors,
-  required telemetry, tool exposure, repeated conversations, larger histories,
-  tails, independent arithmetic review and live qualification remain separate
-  delivery gates. Released v0.1.0 artifacts and fixed examples are unchanged.
+- Add finite workload4 solo/mixed schedules, fixed offsets and first-generated
+  triggers, named controls, actual overlap evidence and settle-before-publication
+  cancellation. Preserve never-dispatched and failed peers.
+- Add workload5 streamed-tool fragments and first-delta/fully-validated-call
+  timing with exact retained history and replay. Tool fragments are not text.
+- Add explicit bounded metrics2 provider accounting and prospective required
+  telemetry gates. Missing sources, gaps and resets are not zero; shared counters
+  are not attributed to one request, and an isolation declaration is not proof.
+- Add small GLM/DeepSeek routine and mixed profiles from the existing prompts,
+  with explicit controls and traffic ceilings. Native CPU captures and replay
+  were exercised; no real-backend qualification follows from fixture success.
+- Named mixed-schedule policy gates, repeated conversations, larger histories,
+  tails and resource/startup/kernel domains remain separate integration gates.
+  Independent review and live qualification are still required. Released v0.1.0
+  artifacts and frozen workload examples are unchanged.
 
 ## Version 0.1.0 — published prerelease
 
