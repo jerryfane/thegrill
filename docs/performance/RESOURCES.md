@@ -1,11 +1,11 @@
-# Bounded host resource observations
+# Bounded host and opt-in NVIDIA resource observations
 
 `grill-perf resource` is a separate version-1 domain evidence path. It does not
 change serving plan/workload meanings or collect serving requests. This source
-slice implements an ordinary Linux host producer, retained raw replay, finite
-import/inspect, and prospective A/B/A2 resource comparisons. It does **not**
-implement a capacity runner, a retention-pressure runner, GPU telemetry execution,
-or a claim of real-adapter/live qualification.
+slice implements ordinary Linux host and explicitly selected NVML producers,
+retained raw replay, finite import/inspect, and prospective A/B/A2 resource
+comparisons. It does **not** implement a capacity or retention-pressure runner,
+or establish real-adapter/live qualification from source code or synthetic tests.
 
 ## Commands
 
@@ -71,6 +71,8 @@ Supported native sources:
 | `cgroup_v2 {path}` | explicit cgroup-v2 `memory.current`, `memory.peak`, `memory.max`, `cpu.stat` | used/peak/limit bytes, cumulative CPU microseconds |
 | `host_cpu` | `/proc/stat` | aggregate **busy** CPU ticks, host-wide shared scope |
 | `host_memory` | `/proc/meminfo` | MemFree bytes and MemTotal capacity, descriptive, not model-owned memory |
+| `nvidia_memory {uuid, rank?}` | dynamically loaded NVML memory-v1 API | device used/free/total bytes; total uses `memory_limit`, not safe capacity |
+| `nvidia_power {uuid, rank?}` | NVML field 186, GPU-only scope 0 | instantaneous power, converted exactly from milliwatts to microwatts |
 
 Native source directories are held open, filesystem type is checked, and fixed
 source files use bounded nonblocking/no-follow reads rather than immutable-file
@@ -124,8 +126,8 @@ Supported lower-is-better gates:
   integral of compatible complete microwatt observations, in microjoules.
   Segments are clipped to the measured interval with exact checked rational
   arithmetic. A single power sample cannot establish energy, and this is not
-  directly measured physical energy. This authorization supports imported power
-  evidence only, not a native GPU/provider producer.
+  directly measured physical energy. Native NVML instantaneous power and imported
+  power remain distinct provenance paths; neither establishes physical energy.
 
 Missing endpoints, cadence gaps, permission failures, cancellation, budget
 exhaustion, resets, source/clock changes, and unknown ownership prevent favorable
@@ -214,6 +216,183 @@ overflow, unknown/shared ownership, missing rank visibility, unlimited versus
 missing limits, CPU endpoint alignment, clipped rational energy, exact tolerance
 boundaries, incomplete A/B/A2 populations, raw corruption, and imported provenance.
 They are authored source, not an executed verification claim.
+
+## Opt-in NVML source and runtime contract
+
+The producer is private `resources::nvml::NvmlSource`, consumed by the unchanged
+`ResourcesConfig` and `Observer` APIs above. No extra CLI selector is needed:
+only `nvidia_memory` or `nvidia_power` in the admitted source list enables NVML.
+An ordinary host-only capture never loads the NVML library. GPU-only adapter
+identity is `linux-nvml-resource-v1`; mixed host/GPU identity is
+`linux-proc-cgroup-nvml-resource-v1`; host-only evidence retains
+`linux-proc-cgroup-resource-v1` and its historical claim string.
+
+Runtime support is Linux LP64 on x86_64/aarch64 with the optional driver-installed
+`libnvidia-ml.so.1` discoverable through the platform dynamic loader. There is no
+hard NVML link, Cargo dependency, CUDA initialization, enumeration, index
+guessing, subprocess, driver install, or service management. Library loading
+executes trusted installed native code; untrusted library search paths are not
+a sandbox. Runtime unsupported-host, missing-library, missing-symbol,
+permissions, no-device, driver and per-field errors remain retained unavailable
+observations. There is no `nvidia-smi`, CPU substitute, utilization-to-power
+conversion, or import promoted to native evidence.
+
+Selection requires the full `GPU-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx` UUID,
+provided by the operator, with an optional unsigned declared `rank`. Abbreviated
+UUIDs, device indices and MIG instance selectors are not supported. A rank is
+not observed by NVML, and the collector never infers a rank-to-device mapping.
+Separate memory and power source IDs let unsupported memory visibility withhold
+the memory gate without falsifying supported power, and vice versa. Unsupported
+ranks remain missing; nothing is summed across devices, ranks or host memory.
+
+Ownership must be `dedicated_device`, `shared_memory {group}` or `unknown`.
+`dedicated_device` is an operator declaration, not process attribution.
+`unknown` withholds favorable gates. Prefer an honest shared-memory declaration
+where ownership is shared, especially on unified-memory/NUMA systems. NVML
+memory accounting may depend on the OS; pages may remain charged after process
+exit, and memory attributed to the device can overlap host memory. Free/total
+bytes are descriptive observations, not allocator headroom or safe serving
+capacity. The v1 API's used bytes include reserved and allocated device memory:
+the adapter reports only `memory_used`, `memory_free`, and `memory_limit`
+(observed total), never fabricated `memory_allocated`, `memory_reserved` or KV
+metrics. Zero/invalid total or inconsistent used+free/total is unavailable.
+
+### ABI and source pins
+
+The authoritative source is NVIDIA's
+[`nvml_dev v12.9.40/nvml.h`](https://gitlab.com/nvidia/headers/cuda-individual/nvml_dev/-/raw/v12.9.40/nvml.h),
+703,863 bytes, SHA-256
+`5a9ed049520b02354b74280f3a1e83b27292cf9f7958beb227461c0bc8676b99`.
+Bindings derive from this original header, not a wrapper-modified header or
+formatted `nvidia-smi` output. The raw envelope embeds this pin and
+`linux-lp64-v1`; the enclosing observation pins the actual collector binary.
+
+The only runtime entry points are:
+
+* `nvmlInitWithFlags(2)` (`NVML_INIT_FLAG_NO_ATTACH`), `nvmlShutdown()`;
+* `nvmlSystemGetNVMLVersion`, `nvmlSystemGetDriverVersion` (80-byte buffers);
+* `nvmlDeviceGetHandleByUUID`, `nvmlDeviceGetUUID` (96-byte buffer);
+* memory: `nvmlDeviceGetMemoryInfo`, **v1**, three C unsigned long long fields in
+  total/free/used order, in bytes;
+* power: `nvmlDeviceGetFieldValues(device, 1, ...)`,
+  **`NVML_FI_DEV_POWER_INSTANT=186`, scope 0 (GPU only)**.
+
+`nvmlDeviceGetPowerUsage` is deliberately not used: on Ampere except GA100 and
+newer devices it reports a one-second average, not consistently instantaneous
+power. Field 185 (average) and scope 1 (CPU+GPU module) cannot replay as the
+selected instantaneous GPU-only source. The field ABI retains field/scope IDs,
+signed timestamp and latency, value type, per-field return code, and active
+union scalar. Supported unsigned milliwatts multiply by 1000 with checked
+arithmetic; other scalar types remain unavailable. Failed outer or field return
+codes never acquire default-zero readings.
+
+NVML initialization is balanced with shutdown for each selected source read;
+the observer lazily holds the library open between reads. Both return codes,
+all invoked read return codes and successful output values remain in each
+bounded `nvml.json` raw trace. Shutdown-symbol absence prevents initialization.
+The adapter uses no legacy init fallback that would initialize all devices.
+**NVIDIA documents that UUID lookup itself may internally initialize additional
+GPUs while resolving the selected UUID.** Grill does not enumerate them and
+creates no CUDA context, but cannot promise that NVML internally touches only
+the selected device. This is a reason to require an approved device window.
+
+Raw call order, failure termination, balanced shutdown, string bounds, API pin,
+UUID before/after the read, metric values/units and field scope are independently
+parsed on replay. Observed UUID plus driver/NVML versions and ABI source pin
+form a digest-bound incarnation. Runtime changes during an acquisition withhold
+its gates; standalone A/B/A2 comparison also requires this incarnation to remain
+compatible for each GPU gate. This conservatively excludes driver/NVML upgrades
+as a candidate change in this source version. Observed version strings are not
+hashes of driver binaries or an execution attestation.
+
+The caller's capture-monotonic read end is still the observation offset.
+NVML's field timestamp is retained Unix-microsecond metadata, never subtracted
+from capture-monotonic time; it does not establish synchronized device timing.
+Instantaneous sensor reads have hardware update cadence, latency and accuracy
+limits, and repeated polling is not proof of independent or fresh physical
+samples. Sampled maxima and trapezoidal energy remain explicitly sampled
+estimates, not true peaks, directly measured energy, or model-only attribution.
+
+The observer requires at least 8192 bytes of remaining raw budget **before**
+calling NVML for a selected read; the bounded encoded trace consumes only its
+actual bytes. Library lookup, initialization, metadata, UUID, metric and
+shutdown calls are included in the snapshot read window and existing overhead.
+Per-read and observer deadlines are cooperative: userspace cannot preempt a
+stalled NVML/driver call. A late return remains a gap/deadline failure, not a
+hard-real-time guarantee. Cadence, counts and retained bytes stay finite.
+
+### Main-only qualification commands (not executed during source authoring)
+
+CPU fixtures never open the NVIDIA soname. They cover raw failures, exact
+units/energy, missing-library and byte-budget paths, UUID/runtime changes,
+partial visibility, scalar types, replay tampering and import downgrade. One
+fixture compiles a small **synthetic** C shared library with `cc`, loads its
+explicit temporary path, and exercises the real C call boundary. Its missing
+memory symbol and supported power field test independent capability handling;
+it has no GPU dependency and is not device-execution evidence.
+
+```sh
+cargo test -p grill-perf --locked --bin grill-perf resources::nvml::tests -- --test-threads=1
+cargo test -p grill-perf --locked --bin grill-perf resources::tests
+cargo build -p grill-perf --locked
+```
+
+[`resources-nvml-v1.json`](../../crates/grill-perf/examples/resources-nvml-v1.json)
+is a **synthetic, non-executed plan template** with one-second finite captures,
+100 ms cadence, separate memory/power sources, one warmup and three measured
+acquisitions in each A/B/A2 arm. Its fake UUID and digest placeholders are not
+runtime facts. Before an explicitly approved GPU window, Main must write a
+private prospective copy replacing the UUID, collector binary SHA-256,
+deployment/exposure pins, ownership and candidate declaration. Freeze thresholds
+and budgets before collection; do not tune them to salvage failures. For an
+unchanged control, declare that control truthfully. Merely capturing idle-device
+telemetry does not demonstrate model-resource or serving-capacity improvement.
+
+Run the following **once per arm**, in declared `a`, `b`, `a2` order, with the
+operator owning any serving-state changes between arms; the shown `a` commands
+are the complete first arm, not authorization to touch a device now:
+
+```sh
+grill-perf resource capture --plan PRIVATE_STUDY.json --role a --phase warmup --index 0 --out NEW_A_W
+grill-perf resource capture --plan PRIVATE_STUDY.json --role a --phase measured --index 0 --out NEW_A_0
+grill-perf resource capture --plan PRIVATE_STUDY.json --role a --phase measured --index 1 --out NEW_A_1
+grill-perf resource capture --plan PRIVATE_STUDY.json --role a --phase measured --index 2 --out NEW_A_2
+grill-perf resource inspect NEW_A_0 --plan PRIVATE_STUDY.json
+```
+
+Repeat those four declared acquisitions with `--role b` and fresh `NEW_B_*`
+paths, then `--role a2` and fresh `NEW_A2_*` paths. Retain every result and exit
+status, including unsupported memory, power, permission, timing and cancellation
+failures. Do not retry/replace captures or initialize an unapproved workload.
+Replay **every** saved capture with `resource inspect`, then compare the
+complete population using the command in the Commands section. These commands
+also work with an absolute staged binary outside the checkout. Actual device
+qualification needs retained native traces and independent review; a passing
+CPU fixture or imported GPU trace is insufficient.
+
+### NVIDIA notice for the derived ABI declarations
+
+Copyright 1993-2025 NVIDIA Corporation. All rights reserved.
+
+NVIDIA MAKES NO REPRESENTATION ABOUT THE SUITABILITY OF THIS SOURCE
+CODE FOR ANY PURPOSE. IT IS PROVIDED "AS IS" WITHOUT EXPRESS OR
+IMPLIED WARRANTY OF ANY KIND. NVIDIA DISCLAIMS ALL WARRANTIES WITH
+REGARD TO THIS SOURCE CODE, INCLUDING ALL IMPLIED WARRANTIES OF
+MERCHANTABILITY, NONINFRINGEMENT, AND FITNESS FOR A PARTICULAR PURPOSE.
+IN NO EVENT SHALL NVIDIA BE LIABLE FOR ANY SPECIAL, INDIRECT, INCIDENTAL,
+OR CONSEQUENTIAL DAMAGES, OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS
+OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE
+OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE
+OR PERFORMANCE OF THIS SOURCE CODE.
+
+U.S. Government End Users. This source code is a "commercial item" as
+that term is defined at 48 C.F.R. 2.101 (OCT 1995), consisting of
+"commercial computer software" and "commercial computer software
+documentation" as such terms are used in 48 C.F.R. 12.212 (SEPT 1995)
+and is provided to the U.S. Government only as a commercial end item.
+Consistent with 48 C.F.R.12.212 and 48 C.F.R. 227.7202-1 through
+227.7202-4 (JUNE 1995), all U.S. Government End Users acquire the
+source code with only those rights set forth herein.
 
 ## Remaining capacity and retention dependencies
 

@@ -1,10 +1,12 @@
-//! Bounded, explicitly selected resource observations. No discovery, device runtime, or service control.
+//! Bounded, explicitly selected resource observations. No discovery or service control.
 //! Native observations are unauthenticated; imports never acquire native provenance.
 use crate::{envelope::{self, Rational}, evidence, model::Result, policy::Outcome};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, fs::{File, OpenOptions}, io::Read,
     os::{fd::{AsRawFd, FromRawFd}, unix::fs::{MetadataExt, OpenOptionsExt}},
     path::{Component, Path, PathBuf}, time::{Duration, Instant}};
+
+mod nvml;
 
 const ARTIFACT_CAP: usize = 64 * 1024 * 1024;
 const PLAN_CAP: usize = 128 * 1024;
@@ -48,6 +50,8 @@ pub enum Target {
     CgroupV2 { path: PathBuf },
     HostCpu,
     HostMemory,
+    NvidiaMemory { uuid: String, rank: Option<u32> },
+    NvidiaPower { uuid: String, rank: Option<u32> },
     Imported { adapter: String, device: Option<String>, rank: Option<u32> },
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -197,6 +201,13 @@ fn number(s: &str) -> std::result::Result<u64, Failure> {
 fn checked(n: Option<u64>) -> std::result::Result<u64, Failure> { n.ok_or(Failure::Overflow) }
 fn pin(s: &str) -> bool { s.len() == 64 && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) }
 
+fn native_adapter(config: &ResourcesConfig) -> &'static str {
+    let gpu = config.sources.iter().filter(|s| nvml::selected(&s.target).is_some()).count();
+    if gpu == 0 { ADAPTER }
+    else if gpu == config.sources.len() { nvml::ADAPTER }
+    else { "linux-proc-cgroup-nvml-resource-v1" }
+}
+
 impl ResourcesConfig {
     pub fn validate(&self) -> Result<()> {
         if self.version != 1 || self.sources.is_empty() || self.sources.len() > 16
@@ -224,6 +235,12 @@ impl ResourcesConfig {
                     && path.components().all(|c| matches!(c, Component::RootDir | Component::Normal(_)))
                     && source.ownership == Ownership::CgroupMembers,
                 Target::HostCpu | Target::HostMemory => source.ownership == Ownership::HostShared,
+                Target::NvidiaMemory { uuid, .. } | Target::NvidiaPower { uuid, .. } => nvml::valid_uuid(uuid)
+                    && match &source.ownership {
+                        Ownership::DedicatedDevice | Ownership::Unknown => true,
+                        Ownership::SharedMemory { group } => label(group),
+                        _ => false,
+                    },
                 Target::Imported { adapter, device, .. } => label(adapter)
                     && device.as_ref().is_none_or(|s| label(s))
                     && match &source.ownership { Ownership::SharedMemory { group } => label(group), _ => true },
@@ -275,6 +292,7 @@ fn expected_files(target: &Target) -> &'static [&'static str] {
         Target::Process { .. } => &["stat", "status", "stat_after"],
         Target::CgroupV2 { .. } => &["memory.current", "memory.peak", "memory.max", "cpu.stat"],
         Target::HostCpu => &["stat"], Target::HostMemory => &["meminfo"],
+        Target::NvidiaMemory { .. } | Target::NvidiaPower { .. } => &["nvml.json"],
         Target::Imported { .. } => &["readings.json"],
     }
 }
@@ -322,6 +340,8 @@ fn parse_snapshot(source: &Source, raw: &[Raw], directory_identity: Option<&str>
             let cpu = [0, 1, 2, 5, 6, 7].into_iter().try_fold(0u64, |sum, i| checked(sum.checked_add(number(fields[i])?)))?;
             Ok((Some(format!("host-boot:{}", field(bytes, "btime", false)?)), vec![reading(Metric::CpuTime, Unit::ClockTicks, Ok(cpu))]))
         }
+        Target::NvidiaMemory { ref uuid, .. } => nvml::parse(get("nvml.json")?, uuid, true),
+        Target::NvidiaPower { ref uuid, .. } => nvml::parse(get("nvml.json")?, uuid, false),
         Target::Imported { .. } => {
             let readings: Vec<Reading> = serde_json::from_slice(get("readings.json")?).map_err(|_| Failure::Malformed)?;
             Ok((directory_identity.map(str::to_owned), readings))
@@ -345,6 +365,9 @@ fn source_directory(target: &Target) -> PathBuf {
     }
 }
 fn open_source(source: &Source) -> OpenSource {
+    if nvml::selected(&source.target).is_some() {
+        return OpenSource { directory: None, identity: None, error: None };
+    }
     let result = (|| {
         let directory = OpenOptions::new().read(true)
             .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_NONBLOCK)
@@ -394,12 +417,13 @@ pub struct Observer {
     observation: Observation,
     opened: Vec<OpenSource>,
     cycles: u32,
+    nvml: nvml::NvmlSource,
 }
 impl Observer {
     pub fn start(config: ResourcesConfig, origin: Instant, clock: Clock) -> Result<Self> {
         config.validate()?;
         if config.sources.iter().any(|s| matches!(s.target, Target::Imported { .. })) {
-            return Err("native host observer cannot execute imported/device sources".into());
+            return Err("native observer cannot execute imported sources".into());
         }
         validate_clock(&clock)?;
         if clock.resolution_ns != host_clock(clock.id.clone())?.resolution_ns {
@@ -414,10 +438,10 @@ impl Observer {
         if ticks <= 0 { return Err("CLK_TCK unavailable".into()); }
         let opened = config.sources.iter().map(open_source).collect();
         Ok(Self {
-            origin, opened, cycles: 0,
+            origin, opened, cycles: 0, nvml: nvml::NvmlSource::default(),
             observation: Observation {
                 version: 1, kind: "resource-observation-v1".into(), provenance: Provenance::NativeObserved,
-                adapter: ADAPTER.into(), binary_sha256: evidence::binary_digest()?, config, clock: clock.clone(),
+                adapter: native_adapter(&config).into(), binary_sha256: evidence::binary_digest()?, config, clock: clock.clone(),
                 clk_tck: ticks as u64, observer_started_us, observer_settled_us: observer_started_us,
                 measured: MeasuredInterval { clock: clock.id, started_us: observer_started_us, settled_us: observer_started_us },
                 snapshots: Vec::new(), failures: Vec::new(), raw_bytes: 0, read_overhead_us: 0,
@@ -456,6 +480,8 @@ impl Observer {
                 let late = elapsed(self.origin)? - self.observation.observer_started_us >= self.observation.config.deadline_us;
                 let entry = if late {
                     Raw { name: (*name).into(), bytes: Vec::new(), error: Some(Failure::Deadline) }
+                } else if let Some((uuid, memory)) = nvml::selected(&source.target) {
+                    self.nvml.read(uuid, memory, remaining as usize)
                 } else { read_source(open, name, remaining as usize) };
                 cycle_bytes += entry.bytes.len() as u64;
                 self.observation.raw_bytes += entry.bytes.len() as u64;
@@ -534,7 +560,7 @@ pub fn validate_observation(observation: &Observation) -> Result<()> {
         return Err("invalid resource observation identity/clock/bounds".into());
     }
     if o.provenance == Provenance::NativeObserved
-        && (o.adapter != ADAPTER || o.clock.kind != ClockKind::LinuxMonotonic
+        && (o.adapter != native_adapter(&o.config) || o.clock.kind != ClockKind::LinuxMonotonic
             || o.clock.synchronization != Synchronization::LocalOrigin
             || o.config.sources.iter().any(|s| matches!(s.target, Target::Imported { .. }))) {
         return Err("native resource source/clock mismatch".into());
@@ -557,7 +583,8 @@ pub fn validate_observation(observation: &Observation) -> Result<()> {
                 cycle_bytes = cycle_bytes.checked_add(raw.bytes.len() as u64).ok_or("resource raw overflow")?;
             }
             let mut metrics = BTreeSet::new();
-            if snapshot.readings.iter().any(|r| !metrics.insert(r.metric) || !valid_reading(r, matches!(source.target, Target::Imported { .. }))) {
+            if snapshot.readings.iter().any(|r| !metrics.insert(r.metric) || !valid_reading(r,
+                matches!(source.target, Target::Imported { .. } | Target::NvidiaPower { .. }))) {
                 return Err("duplicate resource metric or fabricated unit".into());
             }
             match parse_snapshot(source, &snapshot.raw, snapshot.incarnation.as_deref()) {
@@ -613,6 +640,8 @@ fn source_supports(source: &Source, metric: Metric) -> bool {
         Target::CgroupV2 { .. } => matches!(metric, Metric::CpuTime | Metric::MemoryUsed | Metric::LifetimePeakMemory | Metric::MemoryLimit),
         Target::HostCpu => metric == Metric::CpuTime,
         Target::HostMemory => matches!(metric, Metric::MemoryFree | Metric::MemoryLimit),
+        Target::NvidiaMemory { .. } => matches!(metric, Metric::MemoryUsed | Metric::MemoryFree | Metric::MemoryLimit),
+        Target::NvidiaPower { .. } => metric == Metric::Power,
         Target::Imported { .. } => true,
     }
 }
@@ -631,6 +660,10 @@ fn summary_value(o: &Observation, gate: &Gate) -> std::result::Result<Rational, 
     if start >= end || snapshots.len() < 2 { return Err(Failure::IncompleteExposure); }
     if snapshots[0].observed_us > start || snapshots.last().ok_or(Failure::Missing)?.observed_us < end {
         return Err(Failure::IncompleteExposure);
+    }
+    if nvml::selected(&source.target).is_some()
+        && let Some(failure) = snapshots.iter().find_map(|s| s.failure) {
+        return Err(failure);
     }
     let identity = snapshots[0].incarnation.as_ref().ok_or(Failure::SourceChanged)?;
     let mut values = Vec::with_capacity(snapshots.len());
@@ -853,7 +886,7 @@ pub fn capture(plan: &Path, role: Role, phase: Phase, index: u32, out: &Path) ->
     let acquisition_id = study.acquisition(role, phase, index)?.to_owned();
     let config = study.arm(role).config.clone();
     if config.sources.iter().any(|s| matches!(s.target, Target::Imported { .. })) {
-        return Err("resource capture is host-only; use resource import for device/provider bytes".into());
+        return Err("native capture cannot execute imported sources; use resource import".into());
     }
     evidence::fresh(out)?;
     evidence::write(&out.join("study.json"), &plan_bytes)?;
@@ -923,6 +956,7 @@ fn compare_inner(plan: &Path, groups: [&[PathBuf]; 3], result: &mut Decision) ->
     let mut binary: Option<String> = None;
     let mut last_unix = 0;
     let mut provenance = None;
+    let mut gpu_identities: Vec<Option<String>> = vec![None; study.gates.len()];
     for (arm_index, (arm, roots)) in study.arms.iter().zip(groups).enumerate() {
         let expected = arm.warmup_ids.len() + arm.measured_ids.len();
         if roots.len() > expected { return Err("extra resource acquisitions are not replacements".into()); }
@@ -957,7 +991,17 @@ fn compare_inner(plan: &Path, groups: [&[PathBuf]; 3], result: &mut Decision) ->
             let duration_ok = duration >= study.duration_us
                 && duration <= study.duration_us.checked_add(o.config.max_gap_us).ok_or("resource exposure overflow")?;
             for (gate_index, gate) in result.gates.iter_mut().enumerate() {
-                let value = if duration_ok { summary_value(o, &gate.gate) } else { Err(Failure::IncompleteExposure) };
+                let mut value = if duration_ok { summary_value(o, &gate.gate) } else { Err(Failure::IncompleteExposure) };
+                if value.is_ok() && arm.config.sources.iter().any(|s|
+                    s.id == gate.gate.source && nvml::selected(&s.target).is_some()) {
+                    let identity = o.snapshots.iter().find(|s| s.source == gate.gate.source)
+                        .and_then(|s| s.incarnation.as_ref()).ok_or("NVML source identity missing")?;
+                    if gpu_identities[gate_index].as_ref().is_some_and(|old| old != identity) {
+                        value = Err(Failure::SourceChanged);
+                    } else {
+                        gpu_identities[gate_index].get_or_insert_with(|| identity.clone());
+                    }
+                }
                 match value {
                     Ok(value) if phase == Phase::Measured => {
                         samples[arm_index][gate_index].push(value);
@@ -973,7 +1017,9 @@ fn compare_inner(plan: &Path, groups: [&[PathBuf]; 3], result: &mut Decision) ->
         }
     }
     result.claim = if provenance == Some(Provenance::NativeObserved) {
-        "native-host-observed-envelope-not-causal-or-live-qualified"
+        if study.arms[0].config.sources.iter().any(|s| nvml::selected(&s.target).is_some()) {
+            "native-resource-observed-envelope-not-causal-or-live-qualified"
+        } else { "native-host-observed-envelope-not-causal-or-live-qualified" }
     } else { "imported-or-declared-resource-comparison-not-native-execution" };
     for (i, gate) in result.gates.iter_mut().enumerate() {
         if gate.decision != Outcome::Pass { continue; }

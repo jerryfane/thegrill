@@ -1,0 +1,170 @@
+{
+  "version": 1,
+  "id": "synthetic-nvml-plan-replace-declarations-before-use",
+  "exposure_pin": "1111111111111111111111111111111111111111111111111111111111111111",
+  "collector_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "candidate_change": "explicit-operator-declared-serving-change",
+  "duration_us": 1000000,
+  "arms": [
+    {
+      "role": "a",
+      "deployment_pin": "2222222222222222222222222222222222222222222222222222222222222222",
+      "config": {
+        "version": 1,
+        "sources": [
+          {
+            "id": "gpu-memory",
+            "target": {
+              "kind": "nvidia_memory",
+              "uuid": "GPU-00000000-0000-0000-0000-000000000001",
+              "rank": 0
+            },
+            "ownership": {
+              "kind": "shared_memory",
+              "group": "declared-device-and-host-shared-scope"
+            }
+          },
+          {
+            "id": "gpu-power",
+            "target": {
+              "kind": "nvidia_power",
+              "uuid": "GPU-00000000-0000-0000-0000-000000000001",
+              "rank": 0
+            },
+            "ownership": {
+              "kind": "shared_memory",
+              "group": "declared-device-and-host-shared-scope"
+            }
+          }
+        ],
+        "cadence_us": 100000,
+        "max_gap_us": 250000,
+        "max_read_us": 200000,
+        "max_samples": 16,
+        "deadline_us": 5000000,
+        "per_sample_bytes": 32768,
+        "raw_total_bytes": 524288
+      },
+      "warmup_ids": [
+        "a-warmup-0"
+      ],
+      "measured_ids": [
+        "a-measured-0",
+        "a-measured-1",
+        "a-measured-2"
+      ]
+    },
+    {
+      "role": "b",
+      "deployment_pin": "3333333333333333333333333333333333333333333333333333333333333333",
+      "config": {
+        "version": 1,
+        "sources": [
+          {
+            "id": "gpu-memory",
+            "target": {
+              "kind": "nvidia_memory",
+              "uuid": "GPU-00000000-0000-0000-0000-000000000001",
+              "rank": 0
+            },
+            "ownership": {
+              "kind": "shared_memory",
+              "group": "declared-device-and-host-shared-scope"
+            }
+          },
+          {
+            "id": "gpu-power",
+            "target": {
+              "kind": "nvidia_power",
+              "uuid": "GPU-00000000-0000-0000-0000-000000000001",
+              "rank": 0
+            },
+            "ownership": {
+              "kind": "shared_memory",
+              "group": "declared-device-and-host-shared-scope"
+            }
+          }
+        ],
+        "cadence_us": 100000,
+        "max_gap_us": 250000,
+        "max_read_us": 200000,
+        "max_samples": 16,
+        "deadline_us": 5000000,
+        "per_sample_bytes": 32768,
+        "raw_total_bytes": 524288
+      },
+      "warmup_ids": [
+        "b-warmup-0"
+      ],
+      "measured_ids": [
+        "b-measured-0",
+        "b-measured-1",
+        "b-measured-2"
+      ]
+    },
+    {
+      "role": "a2",
+      "deployment_pin": "2222222222222222222222222222222222222222222222222222222222222222",
+      "config": {
+        "version": 1,
+        "sources": [
+          {
+            "id": "gpu-memory",
+            "target": {
+              "kind": "nvidia_memory",
+              "uuid": "GPU-00000000-0000-0000-0000-000000000001",
+              "rank": 0
+            },
+            "ownership": {
+              "kind": "shared_memory",
+              "group": "declared-device-and-host-shared-scope"
+            }
+          },
+          {
+            "id": "gpu-power",
+            "target": {
+              "kind": "nvidia_power",
+              "uuid": "GPU-00000000-0000-0000-0000-000000000001",
+              "rank": 0
+            },
+            "ownership": {
+              "kind": "shared_memory",
+              "group": "declared-device-and-host-shared-scope"
+            }
+          }
+        ],
+        "cadence_us": 100000,
+        "max_gap_us": 250000,
+        "max_read_us": 200000,
+        "max_samples": 16,
+        "deadline_us": 5000000,
+        "per_sample_bytes": 32768,
+        "raw_total_bytes": 524288
+      },
+      "warmup_ids": [
+        "a2-warmup-0"
+      ],
+      "measured_ids": [
+        "a2-measured-0",
+        "a2-measured-1",
+        "a2-measured-2"
+      ]
+    }
+  ],
+  "gates": [
+    {
+      "source": "gpu-memory",
+      "metric": "memory_used",
+      "statistic": "sampled_maximum",
+      "max_regression_bps": 100,
+      "max_reference_spread_bps": 500
+    },
+    {
+      "source": "gpu-power",
+      "metric": "power",
+      "statistic": "sampled_energy_estimate",
+      "max_regression_bps": 100,
+      "max_reference_spread_bps": 500
+    }
+  ]
+}
