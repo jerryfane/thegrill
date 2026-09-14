@@ -4,6 +4,11 @@
 It does not start servers, download models or grade answer quality. Performance
 capture and assessment are separate from `grill` quality evaluation.
 
+Explicit startup/bootstrap and operator-restart cache studies use the separate
+[`startup` domain commands](STARTUP.md), not serving Waves or the default
+baseline/check workflow. Their local-process producer and CPU fixtures do not
+qualify real recipe startup, hidden-warmup suppression or persistent model KV.
+
 ## Baseline, change, check
 
 Start with **[Install and first capture](INSTALL.md)** for the authoritative

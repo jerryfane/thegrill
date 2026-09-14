@@ -13,6 +13,7 @@ mod schedule;
 mod selection;
 mod sequence;
 mod study;
+mod startup;
 mod wire;
 
 use clap::{Parser, Subcommand};
@@ -35,6 +36,11 @@ enum Command {
     Resource {
         #[command(subcommand)]
         command: resources::Command,
+    },
+    /// Explicit bounded startup/restart-cache evidence; operator owns all lifecycle actions.
+    Startup {
+        #[command(subcommand)]
+        command: startup::Command,
     },
     /// Record the default or explicitly selected bounded workload with native evidence.
     Baseline(study::BaselineOptions),
@@ -121,6 +127,7 @@ fn print_json(value: &impl serde::Serialize) -> model::Result<()> {
 fn execute(cli: Cli) -> model::Result<u8> {
     match cli.command {
         Command::Resource { command } => resources::execute(command),
+        Command::Startup { command } => startup::execute(command),
         Command::Baseline(options) => {
             let report = study::baseline(&options)?;
             show_study(&report, options.json)
