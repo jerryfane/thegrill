@@ -1092,10 +1092,17 @@ measured acquisitions in each of the A, B and A2 roles**. Slots are declared
 before capture, membership is exact (an undeclared directory is an error, a
 declared but missing or failed acquisition withholds the verdict rather than
 being replaced or filtered), every pin except the declared revision axis must
-match, and the A/A2 statistics are pooled into the reference envelope. Each
-sample keeps the timer's own decimal representation and its exact rational
-nanosecond duration, so a fractional nanosecond and a scientific-notation
-device sample survive unrounded.
+match, and the A/A2 statistics are pooled into the reference envelope. A
+revision is the SHA-256 of the implementation descriptor the producing process
+actually observed — never a free-form operator label and never copied from the
+plan, so a mismatching expectation is retained and rejected at comparison
+rather than synthesized away. Identical revisions in all roles are an admitted
+A/A control, and the observed runtime descriptor is the only permitted change
+axis. Each sample keeps the timer's own decimal representation and its exact
+rational nanosecond duration, so a fractional nanosecond and a
+scientific-notation device sample survive unrounded, and the collective adapter
+is executed directly with an explicit process-group environment instead of
+being wrapped in a launcher.
 
 Frozen cells, clock/unit/synchronization contracts with declared timer
 resolution, the study and group-comparison contract, observed-source and

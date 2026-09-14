@@ -2,12 +2,12 @@
   "kind": "microbench-plan-v1",
   "version": 1,
   "adapter": "nccl-allreduce-sum",
-  "revision": "nccl-allreduce-sum-world2-v1",
-  "program_sha256": "e02a724b35d9cbef5cf13c90c75f8fd6963ed043974fae867006c21f4a557aca",
+  "revision": "0000000000000000000000000000000000000000000000000000000000000000",
+  "program_sha256": "5dfb5a9b38ffeb38965367e2abb2f9b9c93c0419536f69ae6eb76a521a850081",
   "sources": [
     {
       "path": "tools/microbench/nccl_allreduce_sum.py",
-      "sha256": "e02a724b35d9cbef5cf13c90c75f8fd6963ed043974fae867006c21f4a557aca"
+      "sha256": "5dfb5a9b38ffeb38965367e2abb2f9b9c93c0419536f69ae6eb76a521a850081"
     },
     {
       "path": "doc/PERFORMANCE.md",

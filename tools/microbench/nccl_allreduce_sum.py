@@ -1,11 +1,28 @@
 #!/usr/bin/env python3
 """Fixed all-reduce collective adapter for grill-perf microbenchmark evidence.
 
-Operator-owned launch. The collector never discovers ranks or places processes;
-either the operator runs this adapter under `torchrun` and imports the merged
-artifact, or the collector launches a bounded local `torchrun` explicitly. The
-process-group rendezvous timeout is the plan's declared deadline, so a missing
-rank is a retained failure rather than an unbounded wait.
+Operator-owned launch. The collector never discovers ranks, never places
+processes and never wraps this adapter in a launcher: whichever `--program` the
+collector is given is hashed and must equal `plan.program_sha256`, and this file
+verifies the same hash on itself, so the program must be this adapter file
+directly. A launcher such as `torchrun` has a different hash and is therefore
+not a valid `--program`.
+
+Participants are started explicitly, one process per rank, each executing this
+pinned file directly with the process-group environment already set:
+
+  RANK=<rank> WORLD_SIZE=<world> MASTER_ADDR=<host> MASTER_PORT=<port>
+  [LOCAL_RANK=<local device index>] python3 tools/microbench/nccl_allreduce_sum.py \
+      --plan plan.json [--stdout | --out <file>] [--checkout <bytes-source root>]
+
+Rank 0 emits the merged artifact (stdout for the collector, or `--out` for the
+operator-owned flow); the other ranks print nothing. MASTER_ADDR and MASTER_PORT
+are required for a rendezvous, and the process-group timeout is the plan's
+declared deadline, so a missing or dead participant fails inside a bounded wait
+instead of hanging. Any participant that fails init or passes the deadline
+exits non-zero with its traceback, the surviving ranks time out, and the
+missing ranks stay visible as retained `rank-missing` failures in rank 0's
+artifact. No launcher, cluster manager or remote control is invented here.
 
 Frozen collective: `torch.distributed` NCCL `all_reduce` SUM over `int64`
 tensors with `numel` elements per rank, world and rank list declared in the plan.
@@ -38,19 +55,38 @@ element shape it reduced, and how many declared sources it could verify from
 bytes versus echo as declarations). None of them is authenticated execution
 evidence and none is echoed from a declared implementation pin.
 
-Usage:
+Identity is observed, never declared. `kernel_revision` is the runtime
+descriptor this process actually produced (torch and NCCL versions plus the
+participating device names) and `revision` is the SHA-256 of that descriptor's
+UTF-8 bytes, computed here. The plan's `revision` is the operator's *expected*
+hash: it is validated structurally only, and a mismatch is left in the artifact
+for the collector to reject rather than being suppressed. A different loaded
+torch/NCCL build or device set is a legitimate observed axis; the measurement
+program itself must not change.
 
-    grill-perf microbench capture \
-      --adapter nccl-allreduce-sum \
-      --plan plan.json \
-      --program torchrun \
-      --authorize-device-window \
-      -- --nproc-per-node=2 --standalone tools/microbench/nccl_allreduce_sum.py --stdout
+Warmups are required repetitions whose timings never enter the measured
+samples, and whose correctness failures remain failures: a warmup mismatch is
+retained as a failure naming the warmup population, while only measured
+repetitions contribute to `correctness.mismatches`.
 
-or, for operator-owned multi-node placement:
+Usage, collector-launched participant (the collector's own environment supplies
+RANK/WORLD_SIZE/MASTER_*; peers are started by the operator):
 
-    torchrun --nnodes=2 --nproc-per-node=1 ... tools/microbench/nccl_allreduce_sum.py \
-      --plan plan.json --out rank0-artifact.json
+    RANK=0 WORLD_SIZE=2 MASTER_ADDR=127.0.0.1 MASTER_PORT=29500 \
+      grill-perf microbench capture \
+        --adapter nccl-allreduce-sum \
+        --plan plan.json \
+        --program tools/microbench/nccl_allreduce_sum.py \
+        --authorize-device-window \
+        -- --stdout --checkout /path/to/nccl-tests
+
+Operator-owned placement, where the collector only imports the result:
+
+    RANK=0 WORLD_SIZE=2 MASTER_ADDR=host-a MASTER_PORT=29500 python3 tools/microbench/nccl_allreduce_sum.py \
+      --plan plan.json --out rank0-artifact.json &
+    RANK=1 WORLD_SIZE=2 MASTER_ADDR=host-a MASTER_PORT=29500 python3 tools/microbench/nccl_allreduce_sum.py \
+      --plan plan.json &
+    wait
     grill-perf microbench import --artifact rank0-artifact.json --plan plan.json --out evidence/
 """
 
@@ -98,6 +134,7 @@ ARTIFACT_KEYS = {
     "submitted_provenance",
     "program_sha256",
     "kernel_revision",
+    "acquisition",
     "sources",
     "observations",
     "topology",
@@ -160,6 +197,11 @@ def abort(message: str) -> "NoReturn":  # type: ignore[name-defined]
     sys.exit(2)
 
 
+def canonical_revision(kernel_revision: str) -> str:
+    """SHA-256 of the UTF-8 bytes of the observed descriptor, no newline."""
+    return hashlib.sha256(kernel_revision.encode("utf-8")).hexdigest()
+
+
 def sha256_file(path: str) -> str:
     digest = hashlib.sha256()
     with open(path, "rb") as handle:
@@ -189,12 +231,17 @@ def artifact_body(
         "kind": KIND,
         "version": VERSION,
         "adapter": ADAPTER,
-        "revision": plan["revision"],
+        # The observed descriptor's digest, never the plan's expected hash.
+        "revision": canonical_revision(kernel_revision),
         "operation": plan["operation"],
         "provenance": "native_observed",
         "submitted_provenance": None,
         "program_sha256": plan["program_sha256"],
         "kernel_revision": kernel_revision,
+        # The complete prospective acquisition object, copied verbatim: it
+        # binds identical duration bodies to distinct acquisitions without
+        # synthesizing any timestamp.
+        "acquisition": plan["acquisition"],
         "sources": sources,
         "observations": observations,
         "topology": {
@@ -219,8 +266,15 @@ def validate_body(body: dict, plan: dict) -> None:
         )
     if body["kind"] != KIND or body["version"] != VERSION or body["adapter"] != ADAPTER:
         abort("artifact kind/version/adapter mismatch")
-    if body["revision"] != plan.get("revision"):
-        abort("artifact revision does not match the plan")
+    # The artifact revision is the digest of the observed descriptor. The
+    # plan's expected hash is only structurally validated: a mismatch is
+    # retained for the collector to reject, never suppressed here.
+    if not isinstance(body["revision"], str) or len(body["revision"]) != 64:
+        abort("artifact revision must be the SHA-256 hex of the observed descriptor")
+    if body["revision"] != canonical_revision(body["kernel_revision"]):
+        abort("artifact revision is not the SHA-256 of artifact.kernel_revision")
+    if body["acquisition"] != plan.get("acquisition"):
+        abort("artifact acquisition must be the plan's prospective acquisition object")
     if body["operation"] != plan.get("operation"):
         abort("artifact operation does not match the plan")
     if body["clock"] != CLOCK:
@@ -300,6 +354,11 @@ def check_plan(plan: dict) -> None:
         abort("plan must list a fixed world >= 2 and exactly ranks 0..world-1")
     if plan.get("clock") != CLOCK:
         abort("plan clock is not the pinned rank-monotonic-ns contract")
+    revision = plan.get("revision")
+    if not isinstance(revision, str) or len(revision) != 64 or not all(
+        character in "0123456789abcdef" for character in revision
+    ):
+        abort("plan revision must be the expected SHA-256 hex of the observed descriptor")
     if not plan.get("program_sha256"):
         abort("plan must pin program_sha256 for an external adapter")
     if not plan.get("sources"):
@@ -372,8 +431,18 @@ def main() -> int:
     check_plan(plan)
     sources, verified, declared_count = verify_sources(plan, args.checkout)
 
-    if "RANK" not in os.environ or "WORLD_SIZE" not in os.environ:
-        abort("this adapter must be launched by torchrun so rank and world are explicit")
+    # Explicit process-group environment. No launcher is required or wrapped:
+    # whoever starts this pinned file sets these variables, for the participant
+    # the collector launches and for every peer participant alike.
+    required = ["RANK", "WORLD_SIZE", "MASTER_ADDR", "MASTER_PORT"]
+    missing = [name for name in required if not os.environ.get(name)]
+    if missing:
+        abort(
+            "the process-group environment must set "
+            + ", ".join(missing)
+            + " explicitly (RANK, WORLD_SIZE, MASTER_ADDR, MASTER_PORT; LOCAL_RANK selects the "
+            "device when present); this adapter is executed directly, never through a launcher"
+        )
     operation = plan["operation"]
     world = int(operation["world"])
     iterations = int(plan["iterations"])
@@ -384,6 +453,11 @@ def main() -> int:
             f"launched world {os.environ['WORLD_SIZE']} does not match the declared world {world}; "
             "re-pin the plan instead of running a different topology"
         )
+    rank_index = int(os.environ["RANK"]) if os.environ["RANK"].isdigit() else -1
+    if not 0 <= rank_index < world:
+        abort(f"RANK {os.environ['RANK']!r} is outside the declared world {world}")
+    if not os.environ["MASTER_PORT"].isdigit():
+        abort(f"MASTER_PORT {os.environ['MASTER_PORT']!r} is not a port number")
     started = time.monotonic()
     rank = None
     failures = []
@@ -395,16 +469,19 @@ def main() -> int:
         import torch
         import torch.distributed as distributed
 
+        local_index = (
+            int(os.environ["LOCAL_RANK"]) if os.environ.get("LOCAL_RANK") else torch.cuda.current_device()
+        )
+        local = torch.device("cuda", local_index)
         distributed.init_process_group(
             "nccl",
             timeout=datetime.timedelta(milliseconds=deadline_ms),
-            device_id=torch.device("cuda", torch.cuda.current_device()),
+            device_id=local,
         )
         rank = distributed.get_rank()
         observed_world = distributed.get_world_size()
         if observed_world != world:
             abort(f"process group world {observed_world} does not match the declared {world}")
-        local = torch.device("cuda", torch.cuda.current_device())
 
         numel = int(operation["numel"])
         index = torch.arange(numel, dtype=torch.int64, device=local)
@@ -420,8 +497,13 @@ def main() -> int:
         buffer = torch.empty(numel, dtype=torch.int64, device=local)
         mismatches = 0
 
-        def run_once() -> int:
-            nonlocal mismatches
+        def run_once() -> tuple[int, int]:
+            """Run one complete repetition; return (elapsed_ns, mismatches).
+
+            Nothing is recorded here: the caller decides whether the repetition
+            is a warmup (required, timed but excluded from the samples) or a
+            measured repetition (sample plus measured correctness population).
+            """
             reset(buffer)
             torch.cuda.synchronize()
             distributed.barrier()
@@ -430,19 +512,28 @@ def main() -> int:
             torch.cuda.synchronize()
             elapsed = time.perf_counter_ns() - origin
             distributed.barrier()
+            local_mismatch = 0
             if not bool(torch.equal(buffer, expected)):
                 local_mismatch = int((buffer != expected).sum().item())
-                mismatches += local_mismatch
-                failures.append(
-                    {
-                        "kind": "correctness-failed",
-                        "detail": f"rank {rank} result differed in {local_mismatch} elements",
-                    }
-                )
-            return elapsed
+            return elapsed, local_mismatch
 
+        warmup_mismatches = 0
         for _ in range(warmups):
-            run_once()
+            _, local_mismatch = run_once()
+            warmup_mismatches += local_mismatch
+        if warmup_mismatches:
+            # Required warmups are part of the cell: a warmup correctness
+            # failure stays a retained failure and never becomes a measured
+            # observation, but it is not discarded either.
+            failures.append(
+                {
+                    "kind": "correctness-failed",
+                    "detail": (
+                        f"rank {rank} warmup repetitions differed in {warmup_mismatches} elements "
+                        "(warmup population, excluded from the measured samples)"
+                    ),
+                }
+            )
         times = []
         for _ in range(iterations):
             if time.monotonic() - started > deadline_ms / 1000.0:
@@ -454,7 +545,16 @@ def main() -> int:
                     }
                 )
                 break
-            times.append(run_once())
+            elapsed, local_mismatch = run_once()
+            mismatches += local_mismatch
+            times.append(elapsed)
+        if mismatches:
+            failures.append(
+                {
+                    "kind": "correctness-failed",
+                    "detail": f"rank {rank} measured repetitions differed in {mismatches} elements",
+                }
+            )
 
         gathered = [None for _ in range(world)]
         distributed.gather_object(
@@ -466,14 +566,6 @@ def main() -> int:
             },
             object_list=gathered if rank == 0 else None,
         )
-        kernel_revision = (
-            f"torch:{torch.__version__};"
-            f"nccl:{'.'.join(str(part) for part in torch.cuda.nccl.version())}"
-        )
-        if rank == 0:
-            devices = sorted(
-                {str(entry["device"]) for entry in gathered if entry is not None}
-            )
     except SystemExit:
         raise
     except BaseException:  # noqa: BLE001  (retain the traceback; missing ranks stay failures)
@@ -490,6 +582,17 @@ def main() -> int:
 
     if rank != 0:
         return 0
+
+    # The observed runtime descriptor: the versions actually loaded in this
+    # process plus the participating device names reported by the gather. Its
+    # SHA-256 is the artifact revision, so a different loaded build or device
+    # set is a different observed identity while the program stays pinned.
+    devices = sorted({str(entry["device"]) for entry in gathered if entry is not None})
+    kernel_revision = (
+        f"torch:{torch.__version__};"
+        f"nccl:{'.'.join(str(part) for part in torch.cuda.nccl.version())};"
+        f"devices:{','.join(devices) if devices else 'unavailable'}"
+    )
 
     # Canonical grid: repetition-major, one entry per rank per repetition.
     indexed = {int(entry["rank"]): entry for entry in gathered if entry is not None}
@@ -523,7 +626,7 @@ def main() -> int:
         )
     total_mismatches = sum(int(entry["mismatches"]) for entry in indexed.values())
     complete = not missing and not timed_out and len(samples) == world * iterations
-    if not complete and not failures:
+    if len(samples) != world * iterations:
         failures.append(
             {
                 "kind": "incomplete-samples",
@@ -546,14 +649,6 @@ def main() -> int:
                 "detail": f"memory {memory_bytes} exceeds declared {plan['allowance']['memory_bytes']}",
             }
         )
-    if total_mismatches != 0:
-        failures.append(
-            {
-                "kind": "correctness-failed",
-                "detail": f"{total_mismatches} elements differed from the exact reduction reference",
-            }
-        )
-
     observations = [
         {"name": "torch-version", "value": str(torch.__version__)},
         {"name": "nccl-version", "value": ".".join(str(part) for part in torch.cuda.nccl.version())},

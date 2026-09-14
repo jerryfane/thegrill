@@ -24,7 +24,23 @@ nanosecond and no digit is rejected for being finer than the declared clock
 resolution: the declared resolution describes the advertised timer class, not a
 quantization of the reported value. Non-finite or negative samples cannot be
 represented as a duration, so they are retained as a failure and the grid stays
-incomplete rather than being silently repaired.
+incomplete rather than being silently repaired. The same rule applies to the
+parity statistics: they are emitted as `repr(float(value))` of the values the
+pinned parity helpers returned, never re-rounded to a fixed number of decimals.
+The reference maximum `ref_max` is the E2 value, because the pinned
+`_assert_e3_within` derives both the per-key floor and the coarse bound from
+`e2["ref_max"]`.
+
+Identity is observed, never declared. `kernel_revision` is the runtime
+descriptor this process actually produced (installed torch and NCCL versions
+plus the SHA-256 of the loaded exl3 module file), and `revision` is the SHA-256
+of that descriptor's UTF-8 bytes, computed here. The plan's `revision` is the
+operator's *expected* hash: it is validated structurally only, and a mismatch is
+left in the artifact for the collector to reject rather than being suppressed.
+The fallback observation carries the actual raw overlay token (`grouped`,
+`kernel` or `unavailable`), while `execution.observed_fallback` is the
+normalized wire value (`e3-grouped`, `e2-kernel` or absent). A lower tier or an
+unavailable tier is a retained failure, not a reason to withhold the document.
 
 Every runtime pin is reported as an observation of what the process actually
 saw (installed torch/NCCL versions, the loaded exl3 module file hash, the device
@@ -120,6 +136,7 @@ ARTIFACT_KEYS = {
     "submitted_provenance",
     "program_sha256",
     "kernel_revision",
+    "acquisition",
     "sources",
     "observations",
     "topology",
@@ -163,6 +180,11 @@ OBSERVATION_NAMES = {
     "sources-verified",
     "sources-declared",
 }
+RAW_FALLBACK_TOKENS = {"grouped", "kernel", "unavailable"}
+NORMALIZED_FALLBACK = {"grouped": "e3-grouped", "kernel": "e2-kernel"}
+U64_MAX = (1 << 64) - 1
+COLLECTOR_DECIMAL_DIGITS = 32
+COLLECTOR_DECIMAL_EXPONENT = 30
 REQUIRED_OBSERVATIONS = {
     "torch-version",
     "nccl-version",
@@ -183,6 +205,10 @@ REQUIRED_OBSERVATIONS = {
     "sources-verified",
     "sources-declared",
 }
+# Values the collector pins against the frozen cell. `fallback-tier` is not
+# pinned here: it is an observed raw token whose admissible values are checked
+# separately, because a lower or unavailable tier must still produce a
+# parseable, retained-failure document.
 PINNED_OBSERVATIONS = {
     "experts": "288",
     "topk": "8",
@@ -195,13 +221,49 @@ PINNED_OBSERVATIONS = {
     "layer-seed": "0",
     "parity-routing-seed": "3",
     "activation-seed": "3",
-    "fallback-tier": "e3-grouped",
 }
 
 
 def abort(message: str) -> "NoReturn":  # type: ignore[name-defined]
     print(f"{ADAPTER}: {message}", file=sys.stderr, flush=True)
     sys.exit(2)
+
+
+def canonical_revision(kernel_revision: str) -> str:
+    """SHA-256 of the UTF-8 bytes of the observed descriptor, no newline."""
+    return hashlib.sha256(kernel_revision.encode("utf-8")).hexdigest()
+
+
+def normalize_fallback(raw: str) -> str | None:
+    """Normalize the ACTUAL overlay token for the wire; unknown stays absent."""
+    return NORMALIZED_FALLBACK.get(raw)
+
+
+def collector_decimal(text: str) -> bool:
+    """Mirror the collector's bounded decimal grammar for retained strings.
+
+    Mirrors `microbench::exact_decimal`: no sign, no empty integer part, at most
+    32 mantissa digits, an optional `e`/`E` exponent of magnitude at most 30, and
+    at most 64 characters.
+    """
+    if not text or len(text) > 64:
+        return False
+    mantissa = text
+    exponent = ""
+    for marker in ("e", "E"):
+        if marker in mantissa:
+            mantissa, _, exponent = mantissa.partition(marker)
+            break
+    if exponent:
+        digits = exponent[1:] if exponent[:1] in "+-" else exponent
+        if not digits.isdigit() or int(digits) > COLLECTOR_DECIMAL_EXPONENT:
+            return False
+    whole, _, fraction = mantissa.partition(".")
+    if not whole.isdigit():
+        return False
+    if fraction and not fraction.isdigit():
+        return False
+    return len(whole) + len(fraction) <= COLLECTOR_DECIMAL_DIGITS
 
 
 def sha256_file(path: str) -> str:
@@ -228,6 +290,10 @@ def sample_duration(value: object) -> tuple[str, dict] | str:
     text = repr(milliseconds)
     nanoseconds = decimal.Decimal(text) * CLOCK_UNIT_NS
     numerator, denominator = nanoseconds.as_integer_ratio()
+    if numerator < 0 or numerator > U64_MAX or denominator < 1 or denominator > U64_MAX:
+        # The collector retains exact rationals as two u64 members; a value
+        # outside that range is retained as a failure, never truncated.
+        return "unrepresentable"
     return text, {"numerator": numerator, "denominator": denominator}
 
 
@@ -247,12 +313,17 @@ def artifact_body(
         "kind": KIND,
         "version": VERSION,
         "adapter": ADAPTER,
-        "revision": plan["revision"],
+        # The observed descriptor's digest, never the plan's expected hash.
+        "revision": canonical_revision(kernel_revision),
         "operation": FROZEN_OPERATION,
         "provenance": "native_observed",
         "submitted_provenance": None,
         "program_sha256": plan["program_sha256"],
         "kernel_revision": kernel_revision,
+        # The complete prospective acquisition object, copied verbatim: it
+        # binds identical duration bodies to distinct acquisitions without
+        # synthesizing any timestamp.
+        "acquisition": plan["acquisition"],
         "sources": sources,
         "observations": observations,
         "topology": {
@@ -277,8 +348,15 @@ def validate_body(body: dict, plan: dict) -> None:
         )
     if body["kind"] != KIND or body["version"] != VERSION or body["adapter"] != ADAPTER:
         abort("artifact kind/version/adapter mismatch")
-    if body["revision"] != plan.get("revision"):
-        abort("artifact revision does not match the plan")
+    # The artifact revision is the digest of the observed descriptor. The
+    # plan's expected hash is only structurally validated: a mismatch is
+    # retained for the collector to reject, never suppressed here.
+    if not isinstance(body["revision"], str) or len(body["revision"]) != 64:
+        abort("artifact revision must be the SHA-256 hex of the observed descriptor")
+    if body["revision"] != canonical_revision(body["kernel_revision"]):
+        abort("artifact revision is not the SHA-256 of artifact.kernel_revision")
+    if body["acquisition"] != plan.get("acquisition"):
+        abort("artifact acquisition must be the plan's prospective acquisition object")
     if body["operation"] != FROZEN_OPERATION:
         abort("artifact operation is not the frozen cell")
     if body["clock"] != CLOCK:
@@ -299,6 +377,20 @@ def validate_body(body: dict, plan: dict) -> None:
         expected = PINNED_OBSERVATIONS.get(observation["name"])
         if expected is not None and observation["value"] != expected:
             abort(f"observation {observation['name']} is {observation['value']!r}, expected {expected!r}")
+    raw_fallback = dict((o["name"], o["value"]) for o in body["observations"])["fallback-tier"]
+    if not isinstance(raw_fallback, str) or not raw_fallback or len(raw_fallback) > 256:
+        abort("fallback-tier must preserve the actual raw overlay token")
+    normalized = normalize_fallback(raw_fallback)
+    execution_fallback = body["execution"]["observed_fallback"]
+    if normalized != execution_fallback:
+        abort(
+            f"execution.observed_fallback {execution_fallback!r} is not the normalization "
+            f"of the raw token {raw_fallback!r}"
+        )
+    if normalized is None and not any(
+        failure["kind"] == "tier-fallback" for failure in body["failures"]
+    ):
+        abort("an unavailable or unknown fallback token requires a retained tier-fallback failure")
     topology = body["topology"]
     if topology.get("scope") != "device" or len(topology.get("ranks", [])) != 1:
         abort("device topology must declare exactly one rank")
@@ -322,6 +414,13 @@ def validate_body(body: dict, plan: dict) -> None:
     correctness = body["correctness"]
     if correctness.get("kind") != "e3-parity" or correctness.get("reference") != REFERENCE_ID:
         abort("correctness record is not the pinned E3 parity check")
+    for field in ("ref_max",):
+        if not collector_decimal(str(correctness.get(field))):
+            abort(f"correctness {field} is not a bounded decimal the collector accepts")
+    for block in ("e2", "e3"):
+        for field in ("maxabs", "per_token_max", "per_token_p99", "nrmse"):
+            if not collector_decimal(str(correctness.get(block, {}).get(field))):
+                abort(f"correctness {block}.{field} is not a bounded decimal the collector accepts")
     if correctness.get("tolerance") != dict({"kind": "e3-rel"}, **TOLERANCE_MILLI):
         abort("correctness tolerance is not the frozen E3 tolerance")
     for failure in body["failures"]:
@@ -352,6 +451,11 @@ def check_plan(plan: dict) -> None:
     for key in ("work_units", "memory_bytes", "deadline_ms"):
         if not isinstance(allowance.get(key), int) or allowance[key] <= 0:
             abort(f"plan allowance {key} must be a positive integer")
+    revision = plan.get("revision")
+    if not isinstance(revision, str) or len(revision) != 64 or not all(
+        character in "0123456789abcdef" for character in revision
+    ):
+        abort("plan revision must be the expected SHA-256 hex of the observed descriptor")
     if not plan.get("program_sha256"):
         abort("plan must pin program_sha256 for an external adapter")
     if not plan.get("sources"):
@@ -464,9 +568,14 @@ def parity(anchor, parity_module, torch, apply_exl3_experts, apply_exl3_python_l
     return {"e2": e2, "e3": e3, "passed": passed, "finite": finite, "detail": detail}
 
 
-def decimal9(value: float) -> str:
-    """Plain fixed-point text; fixed exponent form is rejected by the collector."""
-    return f"{value:.9f}"
+def observed_decimal(value: float) -> str:
+    """The float's own representation, never re-rounded to fixed decimals.
+
+    `repr` of a Python float is the shortest round-trip decimal for that value,
+    so the retained text is exactly what the pinned parity helper produced; it
+    may use scientific notation, which the collector accepts.
+    """
+    return repr(float(value))
 
 
 def main() -> int:
@@ -574,14 +683,14 @@ def main() -> int:
         failures = []
         timed_out = time.monotonic() - started > deadline_ms / 1000.0
         samples = []
-        observed_fallback = None
+        raw_fallback = None
         if not timed_out:
             times_ms = anchor.time_fn(
                 lambda: apply_exl3_experts(activation, ids, weights, layer),
                 iters=ITERATIONS,
                 warm=WARMUPS,
             )
-            observed_fallback = layer._exl3_last_fat_fallback
+            raw_fallback = layer._exl3_last_fat_fallback
             for index, value in enumerate(times_ms):
                 converted = sample_duration(value)
                 if isinstance(converted, str):
@@ -616,11 +725,18 @@ def main() -> int:
             * FROZEN_OPERATION["intermediate"]
         )
         memory_bytes = int(max(peak_bytes, before_bytes))
-        if observed_fallback is not None and observed_fallback != "e3-grouped":
+        # The pinned source token for a grouped E3 fallback is the literal
+        # "grouped"; "e3-grouped" is only this collector's normalized spelling.
+        normalized_fallback = normalize_fallback(raw_fallback) if raw_fallback else None
+        if raw_fallback != "grouped":
             failures.append(
                 {
                     "kind": "tier-fallback",
-                    "detail": f"last fallback after timing was {observed_fallback!r}, not 'e3-grouped'",
+                    "detail": (
+                        "last fallback after timing was "
+                        f"{raw_fallback if raw_fallback is not None else 'unavailable'!r}, "
+                        "not the pinned 'grouped' token"
+                    ),
                 }
             )
         if work_units > plan["allowance"]["work_units"]:
@@ -683,7 +799,8 @@ def main() -> int:
                 # did not run there is nothing observed to report, and the
                 # collector rejects an unavailable value rather than passing it.
                 "name": "fallback-tier",
-                "value": observed_fallback if observed_fallback is not None else "unavailable",
+                # The actual raw overlay token, preserved verbatim.
+                "value": raw_fallback if raw_fallback is not None else "unavailable",
             },
             {"name": "sources-verified", "value": str(verified)},
             {"name": "sources-declared", "value": str(declared)},
@@ -704,24 +821,27 @@ def main() -> int:
                 "memory_bytes": memory_bytes,
                 "completed": not timed_out and len(samples) == ITERATIONS,
                 "timed_out": timed_out,
-                "observed_fallback": observed_fallback,
+                "observed_fallback": normalized_fallback,
             },
             {
                 "kind": "e3-parity",
                 "reference": REFERENCE_ID,
                 "finite": grade["finite"],
-                "ref_max": decimal9(grade["e3"]["ref_max"]),
+                # The pinned `_assert_e3_within` derives the per-key floor and
+                # the coarse bound from e2["ref_max"], so that is the reference
+                # maximum retained here.
+                "ref_max": observed_decimal(grade["e2"]["ref_max"]),
                 "e2": {
-                    "maxabs": decimal9(grade["e2"]["maxabs"]),
-                    "per_token_max": decimal9(grade["e2"]["per_token_max"]),
-                    "per_token_p99": decimal9(grade["e2"]["per_token_p99"]),
-                    "nrmse": decimal9(grade["e2"]["nrmse"]),
+                    "maxabs": observed_decimal(grade["e2"]["maxabs"]),
+                    "per_token_max": observed_decimal(grade["e2"]["per_token_max"]),
+                    "per_token_p99": observed_decimal(grade["e2"]["per_token_p99"]),
+                    "nrmse": observed_decimal(grade["e2"]["nrmse"]),
                 },
                 "e3": {
-                    "maxabs": decimal9(grade["e3"]["maxabs"]),
-                    "per_token_max": decimal9(grade["e3"]["per_token_max"]),
-                    "per_token_p99": decimal9(grade["e3"]["per_token_p99"]),
-                    "nrmse": decimal9(grade["e3"]["nrmse"]),
+                    "maxabs": observed_decimal(grade["e3"]["maxabs"]),
+                    "per_token_max": observed_decimal(grade["e3"]["per_token_max"]),
+                    "per_token_p99": observed_decimal(grade["e3"]["per_token_p99"]),
+                    "nrmse": observed_decimal(grade["e3"]["nrmse"]),
                 },
                 "tolerance": dict({"kind": "e3-rel"}, **TOLERANCE_MILLI),
                 "passed": bool(grade["passed"]),

@@ -46,21 +46,55 @@ and no floating-point decision path.
 |---|---|---|---|
 | `cpu-sum-u64-reference` | CPU | This binary, in process | `sum_u64` over `0..4096`, exact reference `n*(n-1)/2`, warmups 2, measured iterations 5 |
 | `exl3-e3-grouped` | Device | Operator program, explicitly launched | `apply_exl3_experts`, hidden 4096, intermediate 1024, experts 288, topk 8, tokens 1024, layer_seed 0, routing_seed 1, parity routing seed 3, activation seed 3, skew 1.0, tier E3 grouped, cap 32, warmups 2, measured iterations 5 |
-| `nccl-allreduce-sum` | Ranks | Operator program under `torchrun` | `all_reduce` SUM, `int64`, numel 262144, declared world and ranks 0..world-1, warmups 1, measured iterations 5 |
+| `nccl-allreduce-sum` | Ranks | Operator program, explicitly launched | `all_reduce` SUM, `int64`, numel 262144, declared world and ranks 0..world-1, warmups 1, measured iterations 5 |
 
 The frozen cells are checked in code, not only documented: a plan that changes
 the shape, cap, skew, tier, dtype, routing, clock, warmup count or bit-width is
-rejected with `IdentityDrift` / `WarmupCountMismatch` / `IterationCountMismatch`
-before anything runs. There is no shape, cap, skew, tier or world search, no
-best-median summary, no `torch.cuda.empty_cache()`, no remote discovery and no
-script-hook framework. A plan names one adapter; the device adapters
-additionally name one explicit `--program` whose SHA-256 the collector hashes
-and checks against `plan.program_sha256`.
+rejected before anything runs. There is no shape, cap, skew, tier or world
+search, no best-median summary, no `torch.cuda.empty_cache()`, no remote
+discovery and no script-hook framework. A plan names one adapter; the device
+adapters additionally name one explicit `--program` whose SHA-256 the collector
+hashes and checks against `plan.program_sha256`.
 
 Device and collective capture is behind `--authorize-device-window`. Without
 it, `capture` refuses before creating any output directory. Under the current
 CPU-only authorization only the in-process CPU reference is exercised natively;
 the device adapters are delivered callable code and remain unexercised.
+
+## Observed identity versus declared expectations
+
+`revision` is an **identity**, not a label:
+
+* `kernel_revision` is the descriptor the producing process actually observed.
+* `revision` is the SHA-256 hex of that descriptor's UTF-8 bytes (ASCII
+  descriptor, no trailing newline), computed by the producer.
+* A plan's `revision` is the operator's **expected** hash. It is validated
+  structurally (64 lowercase hex characters). A mismatching expectation is
+  *retained*: the artifact carries the hash it actually observed, and the
+  collector rejects the mismatch when it compares evidence. It is never
+  synthesized, copied from the plan, or used to suppress an otherwise valid
+  body.
+
+Descriptors:
+
+| Adapter | `kernel_revision` descriptor |
+|---|---|
+| `cpu-sum-u64-reference` | `cpu-sum-u64-reference-v1;collector:<collector_binary_sha256>` (implemented by the collector in Rust; ASCII, no newline) |
+| `exl3-e3-grouped` | `torch:<version>;nccl:<version>;exl3-module:<sha256 of the loaded exl3 module file>` |
+| `nccl-allreduce-sum` | `torch:<version>;nccl:<version>;devices:<comma-joined participating device names>` |
+
+The observed descriptor is the only admitted change axis: every other plan pin
+(adapter, program hash, source pin set, operation, clock, warmups, iterations,
+allowance, correctness contract, thresholds) must match across a study, and the
+measurement *program* must not change. An A/A control that declares the same
+revision for all three roles is admitted and is reported as a control; inventing
+a second revision to look like a candidate is not permitted.
+
+Every artifact also carries the complete `plan.acquisition` object verbatim, so
+two acquisitions with identical duration bodies are still bound to distinct
+prospective acquisitions. That object is a **declaration**, not chronology:
+native chronology comes from the collector receipt's observed start and end
+times, never from the declared `acquisition.started_unix_ms`.
 
 ## Pinned public sources
 
@@ -98,16 +132,35 @@ it launched.
 
 `exl3-e3-grouped` runs the production-geometry parity check *before* any timing
 with the frozen tolerances (`E3_TOL_FACTOR = 1.5`, `E3_TOL_ABS_REL = 1e-3`,
-`E3_TOL_NRMSE_ABS = 1e-4`, coarse bound `max(0.15, 0.08 * max(1.0, ref_max))`).
-The collector recomputes every bound exactly from the retained `ref_max` and E2
-statistics and compares the E3 statistics against them, so a widened tolerance
-or an out-of-contract tolerance value is an identity error rather than a
-tolerated difference. Non-finite statistics fail closed; the coarse bound is
-strict, the others inclusive.
+`E3_TOL_NRMSE_ABS = 1e-4`, coarse bound
+`max(0.15, 0.08 * max(1.0, ref_max))`). The collector recomputes every bound
+exactly from the retained reference maximum and E2 statistics and compares the
+E3 statistics against them, so a widened tolerance or an out-of-contract
+tolerance value is an identity error rather than a tolerated difference.
+Non-finite statistics fail closed; the coarse bound is strict, the others
+inclusive.
 
-The effective tier and the last observed fallback must both be `grouped`, and
-the reported `fallback-tier` observation must say so; a silent lower-tier
-fallback is withheld (`TierFallback`) or rejected as drift, never timed as E3.
+The retained reference maximum is the **E2** value, because the pinned public
+`_assert_e3_within` derives both the per-key floor `1e-3 * e2["ref_max"]` and
+the coarse bound `max(0.15, 0.08 * max(1.0, e2["ref_max"]))` from
+`e2["ref_max"]`. Parity statistics are emitted as the float's own
+representation (`repr(float(value))`), never re-rounded to a fixed number of
+decimals; scientific notation is accepted on the wire.
+
+The effective tier must be the pinned `grouped` token, and the raw fallback
+token is preserved as observed:
+
+| Raw overlay token (`fallback-tier`) | Normalized `execution.observed_fallback` | Meaning |
+|---|---|---|
+| `grouped` | `e3-grouped` | the grouped tier performed the timed work |
+| `kernel` | `e2-kernel` | a lower tier performed it: retained failure, withheld |
+| `unavailable` (or any unknown token) | absent (`null`) | nothing usable was observed: retained failure, withheld |
+
+A lower or unavailable tier still produces a parseable artifact: the raw token
+is retained verbatim in the observation, a `tier-fallback` failure is retained,
+and the collector withholds the measurement. The adapter never substitutes a
+declared tier or the collector's own spelling for what the overlay actually
+reported, and never aborts emission merely because the tier was not grouped.
 Numerical work uses synthetic Zipf routing, labelled synthetic in the operation
 identity — it is not the served routing distribution.
 
@@ -116,6 +169,13 @@ against `world*(i%251) + world*(world-1)/2`; the reduction reference has no
 tolerance. Faster timing can never outweigh a correctness failure: a failed
 parity or a nonzero mismatch count makes the acquisition ineligible and the
 comparison ERROR or INCONCLUSIVE, never PASS.
+
+**Warmups.** Required warmups are executed and their timings never enter the
+measured samples. A correctness failure during a warmup remains a failure: it
+is retained with a detail that names the warmup population, while only measured
+repetitions contribute to the measured mismatch count. Warmups are required
+work, not disposable work, and they are not a licence to hide a failure that
+happened while the cell was warming.
 
 ## Clocks, units and samples
 
@@ -151,8 +211,10 @@ The declared clock resolution describes the advertised timer class. It **never**
 rounds, quantizes or gates a retained value: a digit finer than the declared
 resolution is preserved rather than rejected, and the exact decimal expansion
 of a value a timer returned as a float is not a precision or accuracy claim.
-Zero, negative, non-finite, over-long and non-representable values fail closed
-(`DurationOutOfRange`, `SamplePrecision`, `SampleOverflow`).
+Zero, negative, non-finite, over-long, out-of-range and non-representable values
+fail closed (`DurationOutOfRange`, `SamplePrecision`, `SampleOverflow`); a
+duration that cannot be represented as two `u64` members is retained as a
+failure rather than truncated, and the sample grid then stays incomplete.
 
 Durations from different clock identities are never subtracted. Rank scope
 records only per-rank durations; one completed world repetition is one sample,
@@ -178,27 +240,78 @@ substituted for the algorithm payload. `microbench inspect` prints both.
 Every plan declares finite `work_units`, `memory_bytes` and `deadline_ms`
 before execution. The collector rejects a plan whose declared allowance cannot
 cover the frozen cell, and withholds evidence whose observed work or memory
-exceeds the declaration. An operator program is killed at the declared
-Grill-side deadline; the partial run is retained as a failed receipt with no
-artifact, so a timeout can never masquerade as an empty successful measurement.
+exceeds the declaration. A producer is killed at the declared Grill-side
+deadline; the partial run is retained as a failed receipt with no artifact, so a
+timeout can never masquerade as an empty successful measurement.
+
+## Launching the collective: direct pinned execution, explicit environment
+
+The collector hashes whatever `--program` names and requires it to equal
+`plan.program_sha256`, and this adapter verifies the same hash on itself. A
+launcher such as `torchrun` has a different hash, so it is **not** a valid
+`--program`: the program must be the pinned adapter file, executed directly.
+
+Each participant is started explicitly, one process per rank, with the
+process-group environment already set:
+
+```sh
+RANK=<rank> WORLD_SIZE=<world> MASTER_ADDR=<host> MASTER_PORT=<port> \
+  [LOCAL_RANK=<local device index>] \
+  python3 tools/microbench/nccl_allreduce_sum.py \
+    --plan plan.json [--stdout | --out <file>] [--checkout <bytes-source root>]
+```
+
+* `RANK`, `WORLD_SIZE`, `MASTER_ADDR` and `MASTER_PORT` are required; a missing
+  variable is a bounded refusal, not a hang. `LOCAL_RANK` selects the device
+  when supplied (otherwise `CUDA_VISIBLE_DEVICES` decides).
+* The process-group rendezvous timeout is the plan's declared deadline, so a
+  missing or dead peer fails inside a bounded wait instead of hanging.
+* Rank 0 emits the merged artifact — to stdout when the collector launched it,
+  or to `--out` for the operator-owned flow. Other ranks print nothing.
+* A participant that fails init or passes its deadline exits non-zero with its
+  traceback; the survivors time out; rank 0's artifact retains the missing
+  participants as `rank-missing` failures. Failed participants stay visible.
+* No launcher, cluster manager, remote control or discovery is invented here or
+  by the collector. Placement and process ownership belong to the operator.
+
+Collector-launched local pair (the operator starts the peer; the collector
+inherits its own environment and launches rank 0):
+
+```sh
+RANK=0 WORLD_SIZE=2 MASTER_ADDR=127.0.0.1 MASTER_PORT=29500 \
+  grill-perf microbench capture --adapter nccl-allreduce-sum \
+    --plan plan.json --program tools/microbench/nccl_allreduce_sum.py \
+    --authorize-device-window -- --stdout --checkout /path/to/nccl-tests
+```
+
+Operator-owned placement, where the collector only imports the result:
+
+```sh
+RANK=0 WORLD_SIZE=2 MASTER_ADDR=host-a MASTER_PORT=29500 \
+  python3 tools/microbench/nccl_allreduce_sum.py --plan plan.json --out rank0-artifact.json &
+RANK=1 WORLD_SIZE=2 MASTER_ADDR=host-a MASTER_PORT=29500 \
+  python3 tools/microbench/nccl_allreduce_sum.py --plan plan.json &
+wait
+grill-perf microbench import --artifact rank0-artifact.json --plan plan.json --out evidence/
+```
 
 ## Study shape: at least three complete acquisitions per role
 
 A native domain comparison needs a **prospectively declared study**, written
-before any acquisition runs:
+before the measured acquisitions run:
 
 ```json
 {
   "kind": "microbench-study-v1",
   "version": 1,
   "adapter": "cpu-sum-u64-reference",
-  "revision_axis": { "baseline": "cpu-sum-u64-reference-v1", "candidate": "cpu-sum-u64-reference-v2" },
+  "revision_axis": { "baseline": "<sha256 hex>", "candidate": "<sha256 hex>" },
   "thresholds": { "adverse_bps": 500, "spread_bps": 2000 },
   "minimum_acquisitions": 3,
   "roles": {
-    "baseline": ["baseline00", "baseline01", "baseline02"],
-    "candidate": ["candidate00", "candidate01", "candidate02"],
-    "reference": ["reference00", "reference01", "reference02"]
+    "baseline": ["a01", "a02", "a03"],
+    "candidate": ["b01", "b02", "b03"],
+    "reference": ["r01", "r02", "r03"]
   },
   "started_unix_ms": 1757000000000
 }
@@ -210,10 +323,9 @@ before any acquisition runs:
   `acquisition.id`.
 * The declared `revision_axis` is the only permitted difference between the
   arms: baseline and reference members must carry `baseline`, candidate members
-  `candidate`, and every other pin (adapter, program hash, source pin set,
-  operation, clock, warmups, iterations, allowance, correctness contract,
-  thresholds) must match across the entire study. A study whose two revisions
-  are identical is an A/A control and is rejected.
+  `candidate`, and every other pin must match across the entire study. Both
+  entries may be the same observed hash — that is an A/A control, which the
+  collector admits and labels as a control.
 * Declared starts must be strictly increasing inside each role, and every
   baseline start must precede every candidate start, which must precede every
   reference start. No acquisition may start before `started_unix_ms`.
@@ -225,9 +337,9 @@ Each acquisition directory is exactly what `capture`/`import` produce
 
 ```
 baseline/
-  baseline00/{plan.json,artifact.json,receipt.json}
-  baseline01/...
-  baseline02/...
+  a01/{plan.json,artifact.json,receipt.json}
+  a02/...
+  a03/...
 ```
 
 `compare` loads exactly the declared membership. A directory that is present but
@@ -256,53 +368,117 @@ finite empirical statistics of one declared cell, not precision, confidence,
 IID or production-percentile guarantees, and not universal capacity or adoption
 verdicts.
 
+## Shipped examples: placeholders versus observed identity
+
+The example documents under `crates/grill-perf/examples/` are **templates**, and
+every identity field in them is a placeholder:
+
+| Document | Placeholder | Becomes observed when |
+|---|---|---|
+| `microbench-cpu-sum-u64.json` | `revision` all zeros | the first CPU capture records the collector's actual descriptor hash |
+| `microbench-exl3-e3-grouped.json`, `microbench-nccl-allreduce-sum.json` | `revision` all zeros | the first device capture records the loaded runtime descriptor hash |
+| `microbench-study-cpu.json` | both `revision_axis` entries all zeros, `started_unix_ms` fixed | the smoke writes its study from the observed hash and a real clock reading |
+| all plans | `acquisition.id`, `acquisition.started_unix_ms` | the smoke writes one plan per acquisition |
+
+`program_sha256` and the adapter's own `sources` entry are **not** placeholders:
+they are the shipped adapter's real hash and are re-pinned whenever the adapter
+changes. A plan whose `revision` does not match the observed descriptor is not
+refused at capture time — the capture retains the actual revision and the
+comparison rejects the mismatch.
+
 ## CPU reference smoke plan
 
 Authoritative CPU exercise, to be run by the integrator on a stable head that
-includes this slice (never during concurrent writers):
+includes this slice (never during concurrent writers). It is written to be
+executed as-is: it observes the implementation hash, builds every plan and the
+study from that observation and from the real clock, runs all baseline
+acquisitions, then all candidate, then all reference (matching the shipped slot
+ids `a01..a03`, `b01..b03`, `r01..r03`), and never invents a date or a revision
+as observed chronology.
 
 ```sh
-cd <checkout>
+cd "<checkout>"
 cargo test -p grill-perf --locked --bin grill-perf microbench_model -- --test-threads=1
 cargo test -p grill-perf --locked --test cli microbench -- --test-threads=1
 
+cargo build --workspace --locked
+GRILL=target/debug/grill-perf
 TMP=$(mktemp -d)
-# Nine real native CPU captures: three baseline, three candidate, three
-# reference. Copy the example plan and change only acquisition.id,
-# acquisition.started_unix_ms and (for the candidate arm) revision.
-plan() { # $1=slot $2=started $3=revision
-  sed -e "s/\"a01\"/\"$1\"/" -e "s/1757000000000/$2/" \
-      -e "s/cpu-sum-u64-reference-v1/$3/" \
-      crates/grill-perf/examples/microbench-cpu-sum-u64.json > "$TMP/$1.json"
+
+# 1. Observe the implementation descriptor. The shipped plan carries a
+#    placeholder revision; the mismatch is retained, the artifact records the
+#    hash this build actually observed, and this throwaway capture is NOT a
+#    study member.
+mkdir -p "$TMP/observe"
+"$GRILL" microbench capture --adapter cpu-sum-u64-reference \
+  --plan crates/grill-perf/examples/microbench-cpu-sum-u64.json \
+  --out "$TMP/observe/a01" --json
+REVISION=$(python3 -c "import json;print(json.load(open('$TMP/observe/a01/artifact.json'))['revision'])")
+
+# 2. Write every plan AND the study prospectively, before any measured
+#    acquisition runs, from the observed revision and a real clock reading.
+plan() { # slot started_ms
+  python3 - "$1" "$2" "$REVISION" "$TMP" <<'PY'
+import json, sys
+slot, started, revision, out = sys.argv[1:5]
+plan = json.load(open("crates/grill-perf/examples/microbench-cpu-sum-u64.json"))
+plan["revision"] = revision
+plan["acquisition"] = {"id": slot, "started_unix_ms": int(started)}
+json.dump(plan, open(f"{out}/{slot}.json", "w"), indent=2)
+PY
 }
-mkdir -p "$TMP/baseline" "$TMP/candidate" "$TMP/reference"
-for index in 00 01 02; do
-  plan "baseline$index" $((1757000000000 + 10#$index * 1000)) cpu-sum-u64-reference-v1
-  plan "candidate$index" $((1757000060000 + 10#$index * 1000)) cpu-sum-u64-reference-v2
-  plan "reference$index" $((1757000120000 + 10#$index * 1000)) cpu-sum-u64-reference-v1
-  for role in baseline candidate reference; do
-    grill-perf microbench capture --adapter cpu-sum-u64-reference \
-      --plan "$TMP/$role$index.json" --out "$TMP/$role/$role$index" --json
-    grill-perf microbench inspect "$TMP/$role/$role$index" --json
+study() { # first_declared_ms
+  python3 - "$REVISION" "$TMP" "$1" <<'PY'
+import json, sys
+revision, out, started = sys.argv[1:4]
+study = json.load(open("crates/grill-perf/examples/microbench-study-cpu.json"))
+# The same observed descriptor on every arm: this build's CPU code is one
+# program, so the smoke is an A/A control, reported as a control, not as a v2.
+study["revision_axis"] = {"baseline": revision, "candidate": revision}
+study["started_unix_ms"] = int(started)
+json.dump(study, open(f"{out}/study.json", "w"), indent=2)
+PY
+}
+DECLARED=$(date +%s%3N)
+for slot in a01 a02 a03 b01 b02 b03 r01 r02 r03; do plan "$slot" "$DECLARED"; done
+study "$DECLARED"
+
+# 3. Run all baseline, then all candidate, then all reference. Each slot gets
+#    its own real start reading, so declared starts are strictly increasing in
+#    the declared order and the arms cannot interleave. Failures are retained:
+#    inspect every directory and keep whatever it recorded.
+for arm in baseline candidate reference; do
+  mkdir -p "$TMP/$arm"
+  for index in 01 02 03; do
+    case "$arm" in baseline) slot="a$index";; candidate) slot="b$index";; reference) slot="r$index";; esac
+    NOW=$(date +%s%3N)
+    plan "$slot" "$NOW"
+    "$GRILL" microbench capture --adapter cpu-sum-u64-reference \
+      --plan "$TMP/$slot.json" --out "$TMP/$arm/$slot" --json || true
+    "$GRILL" microbench inspect "$TMP/$arm/$slot" --json || true
+    sleep 0.05   # real time must pass, so the next declared start is greater
   done
 done
-grill-perf microbench compare \
-  --study crates/grill-perf/examples/microbench-study-cpu.json \
+
+# 4. Compare. A mismatch between the study's expected revision and any
+#    artifact's observed revision is rejected here by the collector.
+"$GRILL" microbench compare --study "$TMP/study.json" \
   --baseline "$TMP/baseline" --candidate "$TMP/candidate" --reference "$TMP/reference" --json
 ```
 
-The study example must be edited to match the slot ids and start times used
-above (its `started_unix_ms` must not be later than any capture). Each capture
-runs a real `sum_u64` reduction over `0..4096` with warmups 2 and five measured
-iterations, records exact nanosecond rational samples on the process monotonic
-clock, and validates the exact `n*(n-1)/2` reference. The candidate arm should
-differ only in `revision` for an A/A control, or in the declared code change
-under test; the tool does not care which, it enforces that everything else
-matches.
+Each capture runs a real `sum_u64` reduction over `0..4096` with warmups 2 and
+five measured iterations, records exact nanosecond rational samples on the
+process monotonic clock, and validates the exact `n*(n-1)/2` reference. Because
+this build's descriptor is the same for every arm, the smoke is an A/A control:
+a PASS says the three arms agree within the declared envelope, which is exactly
+what an unmodified-code control should say, and it is not evidence of a kernel
+change. A device or kernel change is exercised only in a separately authorized
+window, where the observed descriptor changes and the plan's expected revision
+is updated from the observation.
 
-Device adapters are *not* exercised by this plan. A device window additionally
-requires the pinned checkout paths, `--authorize-device-window`, and the
-operator's own launch placement:
+Device adapters are *not* exercised by this plan; the collective launch contract
+is above, and the E3 adapter is launched the same way as a single explicit
+program:
 
 ```sh
 grill-perf microbench capture --adapter exl3-e3-grouped \
@@ -310,16 +486,7 @@ grill-perf microbench capture --adapter exl3-e3-grouped \
   --program tools/microbench/exl3_e3_grouped.py \
   --authorize-device-window \
   -- --checkout /path/to/GLM-5.3-Flash-EXL3-2x-DGX-Sparks
-
-grill-perf microbench capture --adapter nccl-allreduce-sum \
-  --plan crates/grill-perf/examples/microbench-nccl-allreduce-sum.json \
-  --program torchrun --authorize-device-window \
-  -- --nproc-per-node=2 --standalone tools/microbench/nccl_allreduce_sum.py --stdout
 ```
-
-The pinned example plans carry the shipped adapter hashes; editing an adapter
-without re-pinning its plan is rejected by design, and each adapter refuses to
-run when its own bytes do not match `plan.program_sha256`.
 
 ## What this protocol deliberately does not claim
 
@@ -333,3 +500,7 @@ run when its own bytes do not match `plan.program_sha256`.
   program and retained its bytes within a bounded deadline, and that the
   program's own observations were structurally consistent with the frozen cell;
   it cannot attest what that program actually did.
+* Any executed result on this branch. The collector-side Rust that parses these
+  documents, hashes revisions and runs the comparison is Main's; this document
+  describes the contract the adapters and examples implement, and the smoke
+  above is a plan to execute, not a captured result.

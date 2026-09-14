@@ -2,7 +2,7 @@
   "kind": "microbench-plan-v1",
   "version": 1,
   "adapter": "cpu-sum-u64-reference",
-  "revision": "cpu-sum-u64-reference-v1",
+  "revision": "0000000000000000000000000000000000000000000000000000000000000000",
   "program_sha256": null,
   "sources": [],
   "operation": {
