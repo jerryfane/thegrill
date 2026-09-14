@@ -1,0 +1,55 @@
+{
+  "kind": "microbench-plan-v1",
+  "version": 1,
+  "adapter": "nccl-allreduce-sum",
+  "revision": "nccl-allreduce-sum-world2-v1",
+  "program_sha256": "fedf362bde05e67b4076b3e3bf2b8b4546a5ec37a2bcdba8534d1e8859f51b46",
+  "sources": [
+    {
+      "path": "tools/microbench/nccl_allreduce_sum.py",
+      "sha256": "fedf362bde05e67b4076b3e3bf2b8b4546a5ec37a2bcdba8534d1e8859f51b46"
+    },
+    {
+      "path": "doc/PERFORMANCE.md",
+      "sha256": "2242493053a6f9d5db1c6542a8ce7740be919778645125b94eeae440efd31edf"
+    }
+  ],
+  "operation": {
+    "kind": "all-reduce",
+    "op": "sum",
+    "dtype": "int64",
+    "numel": 262144,
+    "world": 2,
+    "ranks": [0, 1],
+    "input": "input[i]=(i%251)+rank",
+    "reference": "world*(i%251)+world*(world-1)/2"
+  },
+  "clock": {
+    "id": "rank-monotonic-ns",
+    "kind": "host_monotonic",
+    "units": "nanoseconds",
+    "resolution_ns": 1,
+    "synchronization": "collective-barrier-before-after"
+  },
+  "warmups": 1,
+  "iterations": 5,
+  "allowance": {
+    "work_units": 2000000,
+    "memory_bytes": 8388608,
+    "deadline_ms": 120000
+  },
+  "correctness": {
+    "reference": "world*(i%251)+world*(world-1)/2",
+    "tolerance": {
+      "kind": "exact-int64"
+    }
+  },
+  "thresholds": {
+    "adverse_bps": 500,
+    "spread_bps": 2000
+  },
+  "acquisition": {
+    "id": "a01",
+    "started_unix_ms": 1757000000000
+  }
+}

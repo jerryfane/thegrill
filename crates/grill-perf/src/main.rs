@@ -4,6 +4,7 @@ mod envelope;
 mod evidence;
 mod lifecycle;
 mod metrics;
+mod microbench;
 mod model;
 mod policy;
 mod resources;
@@ -74,6 +75,22 @@ enum Command {
         #[command(subcommand)]
         command: BundleCommand,
     },
+    /// Capture, import, inspect and compare kernel or collective evidence.
+    Microbench {
+        #[command(subcommand)]
+        command: MicrobenchCommand,
+    },
+}
+#[derive(Subcommand)]
+enum MicrobenchCommand {
+    /// Run the in-process CPU reference, or one explicitly declared program.
+    Capture(microbench::CaptureOptions),
+    /// Validate retained artifact bytes and record them with imported provenance.
+    Import(microbench::ImportOptions),
+    /// Validate and print artifact identity, samples and retained failures.
+    Inspect(microbench::InspectOptions),
+    /// Compare compatible A/B/A2 acquisitions with exact envelope arithmetic.
+    Compare(microbench::CompareOptions),
 }
 #[derive(Subcommand)]
 enum BundleCommand {
@@ -157,6 +174,51 @@ fn execute(cli: Cli) -> model::Result<u8> {
         }
         Command::Resume { run, json } => show_summary(run::resume(&run, json)?, json)
             .map(|complete| if complete { 0 } else { 2 }),
+        Command::Microbench {
+            command: MicrobenchCommand::Capture(options),
+        } => {
+            let report = microbench::capture(&options)?;
+            if options.json {
+                print_json(&report)?;
+            } else {
+                print!("{}", microbench::human_capture(&report));
+            }
+            Ok(report.exit())
+        }
+        Command::Microbench {
+            command: MicrobenchCommand::Import(options),
+        } => {
+            let report = microbench::import(&options)?;
+            if options.json {
+                print_json(&report)?;
+            } else {
+                print!("{}", microbench::human_capture(&report));
+            }
+            Ok(report.exit())
+        }
+        Command::Microbench {
+            command: MicrobenchCommand::Inspect(options),
+        } => {
+            let inspection = microbench::inspect(&options)?;
+            if options.json {
+                print_json(&inspection)?;
+            } else {
+                print!("{}", microbench::human_inspection(&inspection));
+            }
+            Ok(inspection.exit())
+        }
+        Command::Microbench {
+            command: MicrobenchCommand::Compare(options),
+        } => {
+            let decision =
+                microbench::compare(&options.baseline, &options.candidate, options.reference.as_deref());
+            if options.json {
+                print_json(&decision)?;
+            } else {
+                print!("{}", microbench::human_decision(&decision));
+            }
+            Ok(decision.exit())
+        }
         Command::Decide {
             baseline,
             candidate,

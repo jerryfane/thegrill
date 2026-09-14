@@ -1062,6 +1062,33 @@ not fairness, mixed-load nonregression or backend-qualification verdicts.
 Prospective named-lane gates use the policy2 contract above through `decide`.
 No GLM/DeepSeek schedule qualification is implied by CPU fixture coverage.
 
+## Kernel and collective microbenchmarks
+
+`grill-perf microbench` keeps kernel and fabric observations in their own
+closed artifact family, because HTTP output speed cannot prove that an isolated
+kernel or collective changed. The subcommands are `capture` (run the
+in-process CPU reference, or one explicitly declared adapter program), `import`
+(validate retained producer bytes and record them with imported provenance),
+`inspect` (validate and print identity, samples, byte definitions and retained
+failures) and `compare` (A/B/A2 with the shared exact envelope arithmetic).
+
+Provenance is `declared`, `imported` or `native_observed`, and importing never
+upgrades it: a payload that claims native execution keeps that claim only in
+`submitted_provenance`. A kernel or collective result never sets a
+serving-speed claim; that requires a separately linked serving acquisition.
+Device and collective capture is behind `--authorize-device-window`, and under
+the current CPU-only authorization only the in-process `sum_u64` reference runs:
+it proves native operation execution, sample recording, inspection and exact
+comparison, not GPU support.
+
+Frozen cells, clock/unit/synchronization contracts, the pinned public E3 and
+nccl-tests sources with their hashes, the exact-decimal sample rule, the
+collective rank-scope sample unit, and the corrected byte definitions
+(`payload_bytes = numel * sizeof(dtype)`; `2*(world-1)/world` is the labelled
+nccl-tests bus normalization, never measured link traffic) are specified in
+[the kernel and collective protocol](KERNEL-FABRIC.md), together with the CPU
+smoke plan and the explicitly unexercised device gaps.
+
 ## Optional provider snapshots
 
 Add `--metrics-url https://your-server.example/metrics` to `run` to retain bounded

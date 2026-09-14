@@ -3843,3 +3843,5 @@ mod schedule_tests;
 
 #[path = "support/acquisitions.rs"]
 mod acquisition_tests;
+#[path = "support/microbench.rs"]
+mod microbench_tests;
