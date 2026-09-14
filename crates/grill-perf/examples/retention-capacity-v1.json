@@ -171,7 +171,7 @@
         "intended_pressure": "One declared independent root history; no assumption that this exhausts a real pool",
         "condition": "observe_only",
         "source": "vllm-0.27.0-block-pool-v1",
-        "producer_sha256": "0b7bf5dfd49a1aba8afe0aa7e8776c3d9091f330eb27e939c083903bb5d2564b",
+        "producer_sha256": "893168a967453e4e668ab0dd94b4a2ad73189942fc215f81ce7d7ff7431b0179",
         "metrics_labels": {
           "model_name": "operator-selected-model",
           "engine": "0"

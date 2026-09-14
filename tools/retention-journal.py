@@ -111,7 +111,7 @@ class Journal:
                 os.fsync(self.fd)
             except OSError:
                 self.failed = True  # Partial last line is rejected by replay.
-                raise
+                return  # Observation failure must not change the serving result.
             self.sequence += 1
             self.bytes += len(encoded)
             self.overhead_ns += time.monotonic_ns() - started
@@ -130,9 +130,10 @@ class Journal:
         os.close(self.fd)
 
 
-def key_hash(value):
+def key_hash(value, journal):
     if not isinstance(value, bytes) or len(value) > 1024:
-        raise ValueError("unsupported block hash representation")
+        journal.emit("failure", reason="unsupported_block_hash_representation")
+        return None
     return hashlib.sha256(value).hexdigest()
 
 
@@ -182,7 +183,7 @@ def install(journal, pool_class, manager_class):
             if removed:
                 context = caching.get()
                 if context == ("eviction", True):
-                    absent = [key_hash(k) for k in removed
+                    absent = [key_hash(k, journal) for k in removed
                               if pool.cached_block_hash_to_block.get_one_block(k) is None]
                     if absent:
                         journal.emit("evict", keys=absent)
@@ -213,7 +214,7 @@ def install(journal, pool_class, manager_class):
                 if not isinstance(salt, str):
                     journal.emit("failure", reason="unattributed_cache_insertion")
                 else:
-                    journal.emit("store", cache_salt=salt, keys=[key_hash(block_hash)])
+                    journal.emit("store", cache_salt=salt, keys=[key_hash(block_hash, journal)])
             return result
         return call
 
@@ -223,7 +224,7 @@ def install(journal, pool_class, manager_class):
             result = original(manager, request)
             blocks, cached_tokens, _ = result
             salt = getattr(request, "cache_salt", None)
-            keys = [key_hash(block.block_hash) for group in blocks.blocks for block in group
+            keys = [key_hash(block.block_hash, journal) for group in blocks.blocks for block in group
                     if block.block_hash is not None and not block.is_null]
             if len(keys) > 1024 or not isinstance(salt, str) or len(salt) > 256:
                 journal.emit("failure", reason="unbounded_or_unattributed_lookup")
@@ -246,7 +247,7 @@ def install(journal, pool_class, manager_class):
     wrap(pool_class, "reset_prefix_cache", reset)
     wrap(manager_class, "get_computed_blocks", lookup)
     pool_class._grill_retention_hook = True
-    journal.check_hooks = lambda: all(getattr(cls, name) is fn for cls, name, fn in hooked)
+    journal.check_hooks = lambda: all(getattr(cls, name, None) is fn for cls, name, fn in hooked)
     journal.emit("installed", hook="allocation-remove-store-lookup-v1")
 
 
