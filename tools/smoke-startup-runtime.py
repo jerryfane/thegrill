@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from unittest.mock import patch
 
 
 def module(name, path):
@@ -166,6 +167,64 @@ def restart_unavailable(binary, root):
         assert identities[0] != identities[1], identities
 
 
+def source_sets(root):
+    # Tiny synthetic PUBLIC-source stand-ins, not serving code or qualified
+    # runtime evidence. Only the two expected pin tables are substituted;
+    # selection, regular-file reads, hashing and rechecking are real.
+    names = tuple(bridge.SOURCE_PINS)
+    shared = "vllm/entrypoints/openai/api_server.py"
+    sources = []
+    pins = []
+    for revision in ["old", "new"]:
+        directory = root / revision
+        directory.mkdir()
+        paths, expected = {}, {}
+        for index, name in enumerate(names):
+            raw = ("shared-api\n" if name == shared else f"{revision}-{name}\n").encode()
+            path = directory / f"source-{index}.py"
+            path.write_bytes(raw)
+            paths[name] = path
+            expected[name] = old.digest(raw)
+        sources.append(paths)
+        pins.append(expected)
+
+    adapters = ["runtime_vllm_v1", "runtime_vllm_487ecf187_v1"]
+    contracts = ["vllm-0.27.0-uvicorn-0.34.0-sha256-v1",
+                 "vllm-487ecf187-uvicorn-0.52.4-sha256-v1"]
+
+    def rejected(paths, adapter):
+        try:
+            bridge.verify_sources(paths, adapter)
+        except ValueError:
+            return
+        raise AssertionError(("unreviewed source set admitted", adapter, paths))
+
+    with patch.object(bridge, "SOURCE_PINS", pins[0]), patch.object(bridge, "SOURCE_PINS_487", pins[1]):
+        for index, adapter in enumerate(adapters):
+            assert bridge.verify_sources(sources[index], adapter) == contracts[index]
+            rejected(sources[1 - index], adapter)  # Whole valid set, wrong prospective contract.
+        # API bytes are identical across sets. Every mixture of the three changed
+        # files must fail both contracts even though each file is individually known.
+        changed = tuple(name for name in names if name != shared)
+        for mask in range(1, (1 << len(changed)) - 1):
+            mixed = dict(sources[0])
+            for index, name in enumerate(changed):
+                mixed[name] = sources[(mask >> index) & 1][name]
+            for adapter in adapters:
+                rejected(mixed, adapter)
+        for index, adapter in enumerate(adapters):
+            rejected({name: path for name, path in sources[index].items() if name != shared}, adapter)
+            rejected({**sources[index], "unreviewed.py": sources[index][shared]}, adapter)
+            rejected(sources[index], "runtime_asgi_fixture_v1")
+            rejected(sources[index], "runtime_vllm_latest")
+            assert bridge.verify_sources(sources[index], adapter) == contracts[index]
+            sources[index][changed[0]].write_bytes(b"drift after initial admission\n")
+            rejected(sources[index], adapter)  # The same selected set must fail recheck.
+    # Also exercise the actual public pins against wrong bytes (no table replacement).
+    for adapter in adapters:
+        rejected(sources[0], adapter)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", type=Path, required=True)
@@ -186,16 +245,7 @@ def main():
             case.mkdir()
             run(binary, case, fault, extra, delays)
         restart_unavailable(binary, root)
-        # Execute the actual source validator against wrong installed-file bytes,
-        # without importing vLLM or mocking its hash function.
-        wrong = root / "wrong-source.py"
-        wrong.write_bytes(b"# synthetic source drift\n")
-        try:
-            bridge.verify_sources({name: wrong for name in bridge.SOURCE_PINS})
-        except ValueError as error:
-            assert "runtime source drift" in str(error)
-        else:
-            raise AssertionError("source drift accepted")
+        source_sets(root)
     print("runtime ASGI: native/replay, three delays, external before/after, internal admissions, bad readiness, namespace mismatch, source drift and missing seal")
 
 

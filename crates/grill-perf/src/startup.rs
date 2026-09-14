@@ -59,15 +59,25 @@ pub struct CaptureArgs {
 pub enum Provenance { NativeObserved, Imported, Declared }
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum Adapter { NeutralJournalV1, RuntimeVllmV1, RuntimeAsgiFixtureV1, UninstrumentedRecipeLogs }
+pub enum Adapter {
+    NeutralJournalV1,
+    RuntimeVllmV1,
+    #[serde(rename = "runtime_vllm_487ecf187_v1")]
+    RuntimeVllm487V1,
+    RuntimeAsgiFixtureV1,
+    UninstrumentedRecipeLogs,
+}
 impl Adapter {
-    fn runtime(self) -> bool { matches!(self, Self::RuntimeVllmV1 | Self::RuntimeAsgiFixtureV1) }
+    fn runtime(self) -> bool { matches!(self, Self::RuntimeVllmV1 | Self::RuntimeVllm487V1 | Self::RuntimeAsgiFixtureV1) }
     fn ready_contract(self) -> &'static str {
         if self.runtime() { "asgi-lifespan-startup-complete-v1" } else { "neutral-ready-v1" }
     }
     fn source_contract(self) -> &'static str {
-        if self == Self::RuntimeVllmV1 { "vllm-0.27.0-uvicorn-0.34.0-sha256-v1" }
-        else { "ordinary-asgi-fixture-v1" }
+        match self {
+            Self::RuntimeVllmV1 => "vllm-0.27.0-uvicorn-0.34.0-sha256-v1",
+            Self::RuntimeVllm487V1 => "vllm-487ecf187-uvicorn-0.52.4-sha256-v1",
+            _ => "ordinary-asgi-fixture-v1",
+        }
     }
 }
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, ValueEnum)]
@@ -832,7 +842,7 @@ fn analyze(root: &Path, plan: &Plan, c: &Capture, raw: &[u8]) -> Result<Inspecti
             EventKind::RuntimeCoverage { window_us, admission_closed, active_requests, engine_hook } => {
                 if !plan.adapter.runtime() || runtime_coverage.replace(event).is_some()
                     || Some(*window_us) != plan.runtime_window_us || !admission_closed || *active_requests != 0
-                    || (plan.adapter == Adapter::RuntimeVllmV1 && !engine_hook)
+                    || (matches!(plan.adapter, Adapter::RuntimeVllmV1 | Adapter::RuntimeVllm487V1) && !engine_hook)
                     || starts.len() != finishes.len() || listening.is_none()
                     || ready.is_none_or(|start: &Event| start.clock != event.clock || start.engine != event.engine
                         || event.offset_us.checked_sub(start.offset_us).is_none_or(|elapsed| elapsed < *window_us)) {

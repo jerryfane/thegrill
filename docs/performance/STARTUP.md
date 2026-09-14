@@ -81,13 +81,19 @@ must be source-observed; an operator attestation cannot replace them.
 
 ## Opt-in serving-runtime bridge
 
-`tools/startup-runtime.py` implements `runtime_vllm_v1`. It is an explicit
+`tools/startup-runtime.py` implements the two closed public source variants
+`runtime_vllm_v1` and `runtime_vllm_487ecf187_v1`. It is an explicit
 **operator-invoked, in-process entrypoint**, not a command that Grill launches.
 It calls the existing single-worker `api_server.run_server` with ASGI lifespan
 enabled; there is no subprocess, restart, service manager or arbitrary-module
 hook. The neutral producer above remains a separate CPU fixture.
 
 Supported public source is byte-pinned, not selected by model name or image tag:
+The plan selects **one whole set**; there is no per-file fallback or automatic
+version detection. Version/revision names are source metadata, not qualification.
+
+Original set: `adapter:"runtime_vllm_v1"`,
+event contract `vllm-0.27.0-uvicorn-0.34.0-sha256-v1`:
 
 | Source | Revision | Required SHA-256 |
 |---|---|---|
@@ -96,14 +102,50 @@ Supported public source is byte-pinned, not selected by model name or image tag:
 | [vLLM async_llm.py](https://github.com/vllm-project/vllm/blob/v0.27.0/vllm/v1/engine/async_llm.py) | `v0.27.0` | `81a0cae6d5da22140f509a59d6c6bb8fc6ee1572da2a2cd793b5830222d18bcc` |
 | [Uvicorn server.py](https://github.com/encode/uvicorn/blob/0.34.0/uvicorn/server.py) | `0.34.0` | `8dd3d150523fd140a9981c41f0fae963b869b20c064dd94ab7422bc453748e6f` |
 
+Additional reviewed set: `adapter:"runtime_vllm_487ecf187_v1"`,
+event contract `vllm-487ecf187-uvicorn-0.52.4-sha256-v1`:
+
+| Source | Revision | Required SHA-256 |
+|---|---|---|
+| [vLLM api_server.py](https://github.com/vllm-project/vllm/blob/487ecf187/vllm/entrypoints/openai/api_server.py) | `487ecf187` | `cd4b83e85dc9d5aae808348d336e59b3064bee697012750d23c786de082a1c53` |
+| [vLLM launcher.py](https://github.com/vllm-project/vllm/blob/487ecf187/vllm/entrypoints/launcher.py) | `487ecf187` | `94566e08afbe40aef653184aa49bb1cfc6bdc8e9bf10881ae05cab65475bcd2e` |
+| [vLLM async_llm.py](https://github.com/vllm-project/vllm/blob/487ecf187/vllm/v1/engine/async_llm.py) | `487ecf187` | `bceed0b3f5f0c834fef79525f2462a092f082390f0070526280abc95945837dd` |
+| [Uvicorn server.py](https://github.com/encode/uvicorn/blob/0.52.4/uvicorn/server.py) | `0.52.4` | `7c1dbd656835c9cdd6f92078ffc80bcc6007824ab322aff15435bd89c068e0be` |
+
+The API source is shared, but the other three files must all belong to the
+selected set. A mixed old/new installation, a complete set under the other
+adapter, missing/extra source members, or any changed bytes are rejected.
+Rechecking uses the same prospective selection; it never switches contracts.
+The ordinary CPU ASGI fixture remains `runtime_asgi_fixture_v1` and cannot
+select either public runtime set through the real entrypoint.
+
 Pins are checked against bounded installed source files before serving imports
 and again before sealing. Imported module locations must match those files.
-The producer source retained as `producer.bin` binds these exact pins and the
-`vllm-0.27.0-uvicorn-0.34.0-sha256-v1` event contract. This is native
+The producer source retained as `producer.bin` binds both exact pin sets and
+the plan-selected event contract. Replay requires that precise contract. This is native
 **unauthenticated** source observation, not execution authentication or proof
 that every dependency is unmodified. Different upstream/recipe-patched bytes
 are unsupported; do not replace a pin with the local hash to make it pass.
 Review a source-contract revision instead. No deployment-local source is copied.
+
+The additional set was reviewed at its concrete hook boundaries:
+
+- `launcher.serve_http` creates `NoSignalServer`, a subclass that overrides
+  only `capture_signals`; it inherits the hooked `uvicorn.Server.startup`.
+  The bridge does not replace or infer the launcher's signal/shutdown policy.
+- Uvicorn 0.52.4 retains `startup(self, sockets=None)`, awaits ASGI lifespan
+  before creating listeners, retains `config.loaded_app`, `servers`, and
+  `started`, and sets `started` only after listener creation. Failed lifespan
+  now raises `SystemExit(STARTUP_FAILURE)` rather than returning with
+  `should_exit`: the existing entrypoint's `BaseException` path retains failure,
+  and the post-startup listening hook is not reached.
+- `AsyncLLM.add_request` remains an awaited coroutine returning an output
+  collector and adds optional `session_id`; the existing `*args, **kwargs`
+  wrapper forwards it without changing the request. Its event observes entry
+  to the frontend API, not downstream scheduler completion, cache transfer or
+  backend-worker coverage. Successful inference still requires collected wire
+  evidence. Streaming input, multi-choice expansion and direct engine-core
+  traffic do not acquire new qualification from this source revision.
 
 ### Launch, readiness and inference
 
@@ -192,9 +234,12 @@ inferred transfer. Store/reload remain callable and honestly nonqualifying for
 these missing predicates.
 
 For a separately authorized launch, prepare the normal complete startup plan,
-set `adapter:"runtime_vllm_v1"`, pin `adapter_sha256` to the exact bridge file
-and `collector_sha256` to the exact binary, and prospectively set the complete
-runtime window/deadline/request allowances. Source-only example:
+select `adapter:"runtime_vllm_v1"` for the original whole source set or
+`adapter:"runtime_vllm_487ecf187_v1"` for the additional reviewed whole set.
+Pin `adapter_sha256` to the exact bridge file and `collector_sha256` to the
+exact binary, and prospectively set the complete runtime window/deadline/request
+allowances. The invocation is identical for either plan; no extra source-version
+flag or package-version string can override its selection. Source-only example:
 
 ```sh
 # Operator-owned serving invocation, not a Grill action:
@@ -220,9 +265,10 @@ required fields are:
 
 - `study_id`, collector binary SHA-256, adapter enum and exact adapter source
   SHA-256; every capture rechecks these pins.
-- `runtime_window_us` is required only for `runtime_vllm_v1` and
-  `runtime_asgi_fixture_v1`; it is absent for existing adapters. These explicit
-  adapter contracts extend the closed plan without reinterpreting old bytes.
+- `runtime_window_us` is required only for `runtime_vllm_v1`,
+  `runtime_vllm_487ecf187_v1`, and `runtime_asgi_fixture_v1`; it is absent for
+  existing non-runtime adapters. These explicit adapter contracts extend the
+  closed plan without reinterpreting old bytes.
 - `setup_axis` and `setup_sha256:[A,B,A2]`: prospectively declared setup
   fingerprints. A and A2 must match. These remain declarations, not observed
   proof that the only effective difference was that axis.
@@ -427,3 +473,12 @@ request identity and verifies unavailable KV accounting never becomes PASS.
 It compares actual CLI capture with offline replay. Both CPU execution and
 pinned-library/live qualification remain separate checks; authoring these
 fixtures is not a pass.
+
+The runtime smoke also authors source-set distinction cases using tiny
+synthetic file bytes and substituted expected pin tables (never substituted
+hash/read/selection functions): both exact sets, a valid set under the wrong
+plan adapter, every mixture of the three changed files, missing/extra members,
+unsupported/fixture selectors, and drift on recheck. Actual public pins are
+also checked against wrong synthetic bytes. These CPU cases do not execute or
+qualify either real serving library; the complete smoke command above remains
+the Main-owned verification entrypoint.

@@ -24,6 +24,13 @@ SOURCE_PINS = {
     "vllm/v1/engine/async_llm.py": "81a0cae6d5da22140f509a59d6c6bb8fc6ee1572da2a2cd793b5830222d18bcc",
     "uvicorn/server.py": "8dd3d150523fd140a9981c41f0fae963b869b20c064dd94ab7422bc453748e6f",
 }
+SOURCE_CONTRACT_487 = "vllm-487ecf187-uvicorn-0.52.4-sha256-v1"
+SOURCE_PINS_487 = {
+    "vllm/entrypoints/openai/api_server.py": "cd4b83e85dc9d5aae808348d336e59b3064bee697012750d23c786de082a1c53",
+    "vllm/entrypoints/launcher.py": "94566e08afbe40aef653184aa49bb1cfc6bdc8e9bf10881ae05cab65475bcd2e",
+    "vllm/v1/engine/async_llm.py": "bceed0b3f5f0c834fef79525f2462a092f082390f0070526280abc95945837dd",
+    "uvicorn/server.py": "7c1dbd656835c9cdd6f92078ffc80bcc6007824ab322aff15435bd89c068e0be",
+}
 CAP = 4 * 1024 * 1024
 BODY_CAP = 2 * 1024 * 1024
 REQUEST = contextvars.ContextVar("startup_runtime_request", default=None)
@@ -56,12 +63,23 @@ def process():
             "boot_id": Path("/proc/sys/kernel/random/boot_id").read_text().strip()}
 
 
-def verify_sources(paths):
-    if set(paths) != set(SOURCE_PINS):
+def source_contract(adapter):
+    # Two closed, whole source sets. Never select a version separately per file.
+    if adapter == "runtime_vllm_v1":
+        return SOURCE_CONTRACT, SOURCE_PINS
+    if adapter == "runtime_vllm_487ecf187_v1":
+        return SOURCE_CONTRACT_487, SOURCE_PINS_487
+    raise ValueError("unsupported real runtime source contract")
+
+
+def verify_sources(paths, adapter):
+    contract, pins = source_contract(adapter)
+    if set(paths) != set(pins):
         raise ValueError("runtime source membership mismatch")
-    for name, expected in SOURCE_PINS.items():
+    for name, expected in pins.items():
         if digest(bounded_read(paths[name])) != expected:
             raise ValueError("runtime source drift: " + name)
+    return contract
 
 
 class Journal:
@@ -344,14 +362,17 @@ def main():
     serving_args = args.serving_args
     if serving_args[:1] != ["--"]:
         parser.error("use -- followed by the existing vLLM api_server arguments")
-    # Locate public source bytes without importing vLLM or touching devices.
+    # Select the complete prospective source set before any serving import.
+    plan_raw = bounded_read(args.plan)
+    adapter = json.loads(plan_raw)["adapter"]
+    _, pins = source_contract(adapter)
     paths = {name: importlib.metadata.distribution(name.split("/")[0]).locate_file(name)
-             for name in SOURCE_PINS}
-    verify_sources(paths)
-    journal = Journal(args.plan, args.events, args.stage, SOURCE_CONTRACT, lambda: verify_sources(paths))
+             for name in pins}
+    contract = verify_sources(paths, adapter)
+    journal = Journal(args.plan, args.events, args.stage, contract, lambda: verify_sources(paths, adapter))
     try:
-        if journal.plan["adapter"] != "runtime_vllm_v1":
-            raise ValueError("real runtime requires runtime_vllm_v1 plan")
+        if journal.plan_hash != digest(plan_raw):
+            raise ValueError("runtime plan changed during source selection")
         # Imports execute only on explicit operator launch, never during fixture import.
         import uvicorn.server
         import vllm.v1.engine.async_llm
@@ -369,7 +390,7 @@ def main():
         launcher = sys.modules[api.serve_http.__module__]
         if Path(launcher.__file__).resolve() != Path(paths["vllm/entrypoints/launcher.py"]).resolve():
             raise ValueError("imported launcher source mismatch")
-        verify_sources(paths)
+        verify_sources(paths, adapter)
         api.cli_env_setup()
         parsed = api.make_arg_parser(api.FlexibleArgumentParser()).parse_args()
         api.validate_parsed_serve_args(parsed)
