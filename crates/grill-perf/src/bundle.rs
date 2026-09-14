@@ -183,12 +183,14 @@ pub fn verify(path: &Path) -> Result<Verification> {
                 limits,
                 cases,
                 cells,
+                schedule,
             } = variant;
             if *version != base.version
                 || *variant_request != request
                 || *limits != base.limits
                 || *cases != base.cases
                 || *cells != base.cells
+                || *schedule != base.schedule
             {
                 return Err("GLM variant differs beyond its name and thinking control".into());
             }

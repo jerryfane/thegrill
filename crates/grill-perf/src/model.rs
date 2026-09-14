@@ -82,6 +82,34 @@ impl RequestSettings {
             Phase::Measured => &self.output,
         }
     }
+
+    pub(crate) fn validate(&self) -> Result<()> {
+        let r = self;
+        if std::iter::once(&r.output)
+            .chain(r.warmup_output.as_ref())
+            .any(|output| !(1..=32_768).contains(&output.tokens))
+            || r.temperature_milli.is_some_and(|n| n > 2000)
+            || r.top_p_milli.is_some_and(|n| n == 0 || n > 1000)
+        {
+            return Err("invalid output budget or sampling controls".into());
+        }
+        if r.thinking.is_some() && r.thinking_control.is_some() {
+            return Err("request.thinking and request.thinking_control are mutually exclusive".into());
+        }
+        if r.profile == Profile::PortableChatV1
+            && (r.output.mode == OutputMode::Exact
+                || r.warmup_output.as_ref().is_some_and(|output| output.mode == OutputMode::Exact)
+                || r.cache != Cache::Observe
+                || r.thinking_control.is_some()
+                || r.thinking.is_some())
+        {
+            return Err("exact output, required prefix evidence, and thinking controls need the explicit vllm-fixed-v1 request profile".into());
+        }
+        if let Some(seed) = r.seed {
+            seed.checked_add(100 * 64 + 63).ok_or("seed range overflows i64")?;
+        }
+        Ok(())
+    }
 }
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(tag = "kind", deny_unknown_fields)]
@@ -131,6 +159,8 @@ pub struct Workload {
     pub limits: Limits,
     pub cases: Vec<Case>,
     pub cells: Vec<Cell>,
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "present")]
+    pub schedule: Option<Vec<crate::schedule::Scenario>>,
 }
 pub(crate) fn identifier(s: &str) -> bool {
     !s.is_empty()
@@ -138,13 +168,29 @@ pub(crate) fn identifier(s: &str) -> bool {
         && s.bytes()
             .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
 }
+
+pub(crate) fn present<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
+    deserializer: D,
+) -> Result<Option<T>, D::Error> {
+    T::deserialize(deserializer).map(Some)
+}
 impl Workload {
     pub fn salted(&self) -> bool {
         matches!(self.version, 2 | 5) || self.cases.iter().any(|case| case.fill.is_some())
     }
+    pub fn cache_namespace_required(&self) -> bool {
+        self.request.cache != Cache::Observe || self.salted()
+            || self.schedule.iter().flatten().flat_map(|s| &s.lanes)
+                .any(|l| l.request.as_ref().is_some_and(|r| r.cache != Cache::Observe))
+    }
+    pub fn cache_mechanism_required(&self) -> bool {
+        self.request.profile != Profile::PortableChatV1
+            || self.schedule.iter().flatten().flat_map(|s| &s.lanes)
+                .any(|l| l.request.as_ref().is_some_and(|r| r.profile != Profile::PortableChatV1))
+    }
     pub fn validate(&self) -> Result<()> {
-        if !matches!(self.version, 1..=3 | 5) || !identifier(&self.name) {
-            return Err("expected workload version 1, 2, 3 or 5 and a short ASCII name".into());
+        if !matches!(self.version, 1..=5) || !identifier(&self.name) {
+            return Err("expected workload version 1 through 5 and a short ASCII name".into());
         }
         if self.version < 3 && self.request.warmup_output.is_some() {
             return Err("request.warmup_output requires workload version 3".into());
@@ -152,10 +198,13 @@ impl Workload {
         if self.version == 5 && self.request.warmup_output.is_some() {
             return Err("conversation workload 5 has no warmup output override".into());
         }
+        if self.version != 4 && self.schedule.is_some() {
+            return Err("schedule requires workload version 4".into());
+        }
         crate::sequence::validate(self)?;
         if self.cases.is_empty()
             || self.cases.len() > 128
-            || self.cells.is_empty()
+            || (self.version != 4 && self.cells.is_empty())
             || self.cells.len() > 64
         {
             return Err("workload requires 1..128 cases and 1..64 cells".into());
@@ -205,30 +254,7 @@ impl Workload {
             }
         }
         let r = &self.request;
-        if std::iter::once(&r.output)
-            .chain(r.warmup_output.as_ref())
-            .any(|output| !(1..=32_768).contains(&output.tokens))
-            || r.temperature_milli.is_some_and(|n| n > 2000)
-            || r.top_p_milli.is_some_and(|n| n == 0 || n > 1000)
-        {
-            return Err("invalid output budget or sampling controls".into());
-        }
-        if r.thinking.is_some() && r.thinking_control.is_some() {
-            return Err(
-                "request.thinking and request.thinking_control are mutually exclusive".into(),
-            );
-        }
-        if r.profile == Profile::PortableChatV1
-            && (r.output.mode == OutputMode::Exact
-                || r.warmup_output
-                    .as_ref()
-                    .is_some_and(|output| output.mode == OutputMode::Exact)
-                || r.cache != Cache::Observe
-                || r.thinking_control.is_some()
-                || r.thinking.is_some())
-        {
-            return Err("exact output, required prefix evidence, and thinking controls need the explicit vllm-fixed-v1 request profile".into());
-        }
+        r.validate()?;
         let l = &self.limits;
         if l.total_ms == 0 || l.total_ms > 3_600_000 {
             return Err(format!(
@@ -256,6 +282,9 @@ impl Workload {
                 "limits.wave_buffer_bytes={} must be <= 536870912",
                 l.wave_buffer_bytes
             ));
+        }
+        if self.version == 4 {
+            return crate::schedule::validate(self);
         }
         let mut names = std::collections::HashSet::new();
         let mut attempts = 0u64;
@@ -306,13 +335,12 @@ impl Workload {
         if attempts > MAX_ATTEMPTS || waves > 1024 {
             return Err("workload exceeds 10,000 attempts or 1,024 waves".into());
         }
-        if let Some(seed) = r.seed {
-            seed.checked_add(100 * 64 + 63)
-                .ok_or("seed range overflows i64")?;
-        }
         Ok(())
     }
     pub fn waves(&self) -> Vec<WaveSpec> {
+        if self.version == 4 {
+            return crate::schedule::waves(self);
+        }
         let mut waves = Vec::new();
         for phase in [Phase::Warmup, Phase::Measured] {
             for cell in &self.cells {
@@ -326,9 +354,10 @@ impl Workload {
                         index: waves.len() as u32,
                         phase,
                         cell: cell.id.clone(),
-                        case: cell.case.clone(),
+                        case: Some(cell.case.clone()),
                         trial,
                         concurrency: cell.concurrency,
+                        lanes: None,
                     });
                 }
             }
@@ -348,9 +377,12 @@ pub struct WaveSpec {
     pub index: u32,
     pub phase: Phase,
     pub cell: String,
-    pub case: String,
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "present")]
+    pub case: Option<String>,
     pub trial: u32,
     pub concurrency: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "present")]
+    pub lanes: Option<Vec<crate::schedule::ResolvedLane>>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -632,6 +664,8 @@ pub struct Wave {
     pub eligible: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metrics: Option<crate::metrics::Reference>,
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "present")]
+    pub schedule: Option<crate::schedule::Observation>,
 }
 pub fn eligibility(a: &Attempt, r: &RequestSettings, phase: Phase) -> Vec<String> {
     let mut errors = Vec::new();

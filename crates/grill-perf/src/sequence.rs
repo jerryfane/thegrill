@@ -293,7 +293,7 @@ pub fn settings(workload: &Workload, spec: &WaveSpec) -> RequestSettings {
     if let Some(step) = workload
         .cases
         .iter()
-        .find(|c| c.id == spec.case)
+        .find(|c| Some(c.id.as_str()) == spec.case.as_deref())
         .and_then(|c| c.step.as_ref())
     {
         settings.cache = step.cache;
@@ -336,7 +336,7 @@ impl State {
         if workload.version != 5 {
             return Ok(None);
         }
-        let case = workload.cases.iter().find(|case| case.id == spec.case)
+        let case = workload.cases.iter().find(|case| Some(case.id.as_str()) == spec.case.as_deref())
             .ok_or("unknown sequence case")?;
         let Some(Step { expect: Expected::Tool { key, result }, .. }) = &case.step else {
             return Ok(None);
@@ -382,7 +382,7 @@ impl State {
             .workload
             .cases
             .iter()
-            .find(|c| c.id == spec.case)
+            .find(|c| Some(c.id.as_str()) == spec.case.as_deref())
             .ok_or("unknown sequence case")?;
         let step = case.step.as_ref().ok_or("missing step")?;
         let mut body: Value =
@@ -442,7 +442,7 @@ impl State {
             .workload
             .cases
             .iter()
-            .find(|c| c.id == spec.case)
+            .find(|c| Some(c.id.as_str()) == spec.case.as_deref())
             .ok_or("unknown sequence case")?;
         let step = case.step.as_ref().ok_or("missing step")?;
         let streamed_tool = self.tool_expectation(&plan.workload, spec)?

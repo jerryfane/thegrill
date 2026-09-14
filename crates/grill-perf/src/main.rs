@@ -6,6 +6,7 @@ mod metrics;
 mod model;
 mod policy;
 mod run;
+mod schedule;
 mod selection;
 mod sequence;
 mod study;
@@ -186,6 +187,11 @@ fn execute(cli: Cli) -> model::Result<u8> {
                 return show_study(&report, json);
             }
             let comparison = evidence::compare(&baseline, &candidate, reference.as_deref())?;
+            if let Some(schedule) = &comparison.schedule {
+                if !json { println!("Named-lane schedule observations; descriptive only, not a mixed-load or fairness verdict."); }
+                print_json(&comparison)?;
+                return Ok(if schedule.complete_eligible { 0 } else { 2 });
+            }
             if json {
                 print_json(&comparison)?;
             } else {

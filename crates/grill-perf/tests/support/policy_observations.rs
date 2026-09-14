@@ -60,8 +60,8 @@ fn fairness_requires_the_whole_admitted_population() {
         plan_sha256: String::new(),
         reservation_sha256: String::new(),
         spec: WaveSpec {
-            index: 0, phase: Phase::Measured, cell: "cell".into(), case: "case".into(),
-            trial: 0, concurrency: 2,
+            index: 0, phase: Phase::Measured, cell: "cell".into(), case: Some("case".into()),
+            trial: 0, concurrency: 2, lanes: None,
         },
         attempts: vec![attempt(0), attempt(1)],
         elapsed_us: u64::MAX,
@@ -73,6 +73,7 @@ fn fairness_requires_the_whole_admitted_population() {
         achieved_completion_tokens_per_second: None,
         eligible: true,
         metrics: None,
+        schedule: None,
     };
     wave.attempts[1].timing.first_answer_text_us = Some(10);
     wave.attempts[1].timing.last_generated_text_us = Some(10);

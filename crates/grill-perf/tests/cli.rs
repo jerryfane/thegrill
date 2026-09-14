@@ -3840,3 +3840,5 @@ mod preflight_tests;
 
 #[path = "support/phase_output.rs"]
 mod phase_output_tests;
+#[path = "support/schedules.rs"]
+mod schedule_tests;

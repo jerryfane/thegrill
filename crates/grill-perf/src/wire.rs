@@ -56,12 +56,13 @@ impl<'a> From<&'a Plan> for BodyContext<'a> {
 }
 
 pub fn request_body(context: &BodyContext<'_>, wave: &WaveSpec, lane: u32) -> Result<String> {
-    let r = crate::sequence::settings(context.workload, wave);
+    let r = crate::schedule::settings(context.workload, wave, lane)?;
+    let case_id = crate::schedule::case(wave, lane)?;
     let case = context
         .workload
         .cases
         .iter()
-        .find(|c| c.id == wave.case)
+        .find(|c| c.id == case_id)
         .ok_or("unknown case")?;
     let exact = r.profile == Profile::VllmFixedV1 && r.output.mode == OutputMode::Exact;
     let salt = match r.cache {
@@ -122,7 +123,7 @@ pub fn request_body(context: &BodyContext<'_>, wave: &WaveSpec, lane: u32) -> Re
         top_p: r.top_p_milli.map(|n| f64::from(n) / 1000.0),
         seed: r
             .seed
-            .map(|seed| seed + i64::from(wave.trial) * 64 + i64::from(lane)),
+            .map(|seed| seed + i64::from(wave.trial) * 64 + if wave.lanes.is_some() { 0 } else { i64::from(lane) }),
         chat_template_kwargs: match (r.thinking, r.thinking_control) {
             (Some(thinking), None) => Some(ChatTemplateKwargs::Legacy { thinking }),
             (None, Some(ThinkingControl::VllmEnableThinkingV1 { enabled })) => {
@@ -808,17 +809,22 @@ pub struct Collected {
     pub attempt: Attempt,
     pub body: Vec<u8>,
 }
+pub struct CollectContext {
+    pub lane: u32,
+    pub origin: Instant,
+    pub deadline: Option<Instant>,
+    pub cancel: watch::Receiver<bool>,
+    pub first_generated: Option<tokio::sync::mpsc::Sender<crate::schedule::FirstGenerated>>,
+    pub tool_expectation: Option<crate::sequence::ToolExpectation>,
+}
 pub async fn collect(
     client: reqwest::Client,
     request: reqwest::Request,
     limits: Limits,
     settings: RequestSettings,
-    lane: u32,
-    window: (Instant, Option<Instant>),
-    mut cancel: watch::Receiver<bool>,
-    tool_expectation: Option<crate::sequence::ToolExpectation>,
+    context: CollectContext,
 ) -> Collected {
-    let (origin, deadline) = window;
+    let CollectContext { lane, origin, deadline, mut cancel, first_generated, tool_expectation } = context;
     let stream = settings.stream;
     let sent = Instant::now();
     let tool_step = tool_expectation.is_some();
@@ -971,8 +977,16 @@ pub async fn collect(
                 let mut done = false;
                 if parse && stream {
                     let mut output_exceeded = false;
+                    let mut notification_failed = false;
                     match parser.feed(&chunk[..retained], |event| {
+                        let had_first = a.timing.first_generated_text_us.is_some();
                         let result = semantic.event(event, true, observed, &mut a.timing);
+                        if !had_first && let Some(first) = a.timing.first_generated_text_us
+                            && let Some(sender) = &first_generated
+                        {
+                            notification_failed = a.timing.dispatch_offset_us.checked_add(first)
+                                .is_none_or(|offset| sender.try_send(crate::schedule::FirstGenerated { lane, offset_us: offset }).is_err());
+                        }
                         output_exceeded |= semantic
                             .usage
                             .completion_tokens
@@ -997,6 +1011,13 @@ pub async fn collect(
                             a.detail = "SSE framing or UTF-8 limit violated".into();
                             done = true;
                         }
+                    }
+                    // Keep replayable semantic facts from this retained chunk.
+                    // A local channel failure must not impersonate a wire parse error.
+                    if notification_failed {
+                        a.status = Status::Unsupported;
+                        a.detail = "schedule first-generated notification failed".into();
+                        done = true;
                     }
                     if output_exceeded {
                         a.status = Status::Unsupported;
@@ -1077,6 +1098,10 @@ pub async fn collect(
         a.timing.first_validated_tool_call_us = None;
     }
     a.response_bytes = body.len();
+    if !a.dispatched && first_generated.is_some() {
+        // Scheduling cancellation before the future's first poll is not dispatch.
+        a.timing = Timing::default();
+    }
     Collected { attempt: a, body }
 }
 

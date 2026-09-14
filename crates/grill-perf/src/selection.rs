@@ -102,6 +102,22 @@ pub fn load(path: &Path) -> Result<Selected> {
 }
 
 pub fn budgets(workload: &Workload, acquisitions: usize) -> Result<(usize, usize, usize)> {
+    if workload.version == 4 {
+        let (mut warmup, mut measured, mut tokens) = (0usize, 0usize, 0usize);
+        for scenario in workload.schedule.iter().flatten() {
+            for lane in &scenario.lanes {
+                let request = lane.request.as_ref().unwrap_or(&workload.request);
+                for (phase, trials) in [(Phase::Warmup, scenario.warmup_trials), (Phase::Measured, scenario.trials)] {
+                    let n = (trials as usize).checked_mul(acquisitions).ok_or("schedule request ceiling overflows")?;
+                    let count = if phase == Phase::Warmup { &mut warmup } else { &mut measured };
+                    *count = count.checked_add(n).ok_or("schedule request ceiling overflows")?;
+                    tokens = n.checked_mul(request.effective_output(phase).tokens as usize)
+                        .and_then(|n| tokens.checked_add(n)).ok_or("schedule output ceiling overflows")?;
+                }
+            }
+        }
+        return Ok((warmup, measured, tokens));
+    }
     let (mut warmup, mut measured) = (0usize, 0usize);
     for cell in &workload.cells {
         let lanes = (cell.concurrency as usize)

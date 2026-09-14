@@ -230,8 +230,8 @@ pub(crate) fn load_verified(root: &Path) -> Result<Loaded, LoadError> {
     if plan.workload.version == 3 && plan.version != 3 {
         return Err("workload version 3 requires native performance plan version 3".into());
     }
-    if (plan.version == 4) != (plan.workload.version == 5) {
-        return Err("workload 5 requires plan 4, and plan 4 requires workload 5".into());
+    if (plan.version == 4) != matches!(plan.workload.version, 4 | 5) {
+        return Err("workloads 4 and 5 require plan 4; plan 4 requires workload 4 or 5".into());
     }
     if plan.workload.version == 5 && plan.policy_sha256.is_some() {
         return Err("workload 5 has no performance policy contract".into());
@@ -245,7 +245,7 @@ pub(crate) fn load_verified(root: &Path) -> Result<Loaded, LoadError> {
         }
         config.validate(plan.waves.len(), plan.local_http, plan.auth_env.as_deref())?;
     }
-    let expected_mechanism = (plan.workload.request.profile != Profile::PortableChatV1)
+    let expected_mechanism = plan.workload.cache_mechanism_required()
         .then_some("declared-vllm-prefix-cache");
     if plan.cache_mechanism.as_deref() != expected_mechanism
         || plan.cache_evidence_source
@@ -253,19 +253,13 @@ pub(crate) fn load_verified(root: &Path) -> Result<Loaded, LoadError> {
     {
         return Err("cache observation source does not match the request profile".into());
     }
-    let expected_pool = plan
-        .workload
-        .cells
-        .iter()
-        .map(|c| c.concurrency as usize)
-        .max()
-        .unwrap_or(1);
+    let expected_pool = plan.waves.iter().map(|s| s.concurrency as usize).max().unwrap_or(1);
     if plan.pool_max_idle_per_host != expected_pool || plan.collector_sha256.len() != 64 {
         return Err("invalid declared collector or connection-pool policy".into());
     }
     match (
         &plan.cache_namespace,
-        plan.workload.request.cache != Cache::Observe || plan.workload.salted(),
+        plan.workload.cache_namespace_required(),
     ) {
         (None, false) => (),
         (Some(n), true) if n.len() == 64 && n.bytes().all(|b| b.is_ascii_hexdigit()) => {}
@@ -324,6 +318,7 @@ pub(crate) fn load_verified(root: &Path) -> Result<Loaded, LoadError> {
     let mut metrics_waves = Vec::new();
     let mut sequence = crate::sequence::State::default();
     let body_context = crate::wire::BodyContext::from(&plan);
+    let mut fatal_schedule = false;
     for spec in &plan.waves {
         let dir = wave_dir(root, spec.index);
         if !exists(&dir)? {
@@ -332,6 +327,7 @@ pub(crate) fn load_verified(root: &Path) -> Result<Loaded, LoadError> {
             states.push("not_started");
             continue;
         }
+        if fatal_schedule { return Err("later scenario admitted after fatal schedule outcome".into()); }
         directory(&dir)?;
         let reservation_bytes = read(&dir.join("reservation.json"), 40 * 1024 * 1024)?;
         let reservation: Reservation = decode(&reservation_bytes)?;
@@ -415,12 +411,12 @@ pub(crate) fn load_verified(root: &Path) -> Result<Loaded, LoadError> {
             (None, None) => (),
             _ => return Err("missing or undeclared metrics companion evidence".into()),
         }
-        let settings = crate::sequence::settings(&workload, spec);
         let tool_step = workload.version == 5 && workload.cases.iter()
-            .find(|case| case.id == spec.case)
+            .find(|case| Some(case.id.as_str()) == spec.case.as_deref())
             .and_then(|case| case.step.as_ref())
             .is_some_and(|step| matches!(step.expect, crate::sequence::Expected::Tool { .. }));
         for (lane, a) in wave.attempts.iter().enumerate() {
+            let settings = crate::schedule::settings(&workload, spec, lane as u32)?;
             if a.lane as usize != lane
                 || a.response_bytes > workload.limits.response_bytes
                 || a.terminal_offset.is_some_and(|n| n > a.response_bytes)
@@ -494,30 +490,18 @@ pub(crate) fn load_verified(root: &Path) -> Result<Loaded, LoadError> {
                 return Err("undispatched attempt contains response facts".into());
             }
         }
-        let first = wave
-            .attempts
-            .iter()
-            .map(|a| a.timing.dispatch_offset_us)
-            .min()
-            .unwrap_or(0);
-        let last_dispatch = wave
-            .attempts
-            .iter()
-            .map(|a| a.timing.dispatch_offset_us)
-            .max()
-            .unwrap_or(0);
-        let mut last = first;
-        for a in &wave.attempts {
-            last = last.max(
-                a.timing
-                    .dispatch_offset_us
-                    .checked_add(a.timing.settle_us)
-                    .ok_or("timing overflow")?,
-            );
+        match (&spec.lanes, &wave.schedule) {
+            (Some(_), Some(observation)) => {
+                crate::schedule::verify(spec, &wave.attempts, observation, workload.limits.total_ms)?;
+                fatal_schedule = observation.fatal.is_some();
+            }
+            (None, None) => (),
+            _ => return Err("missing or undeclared schedule observations".into()),
         }
-        if wave.dispatch_spread_us != last_dispatch - first
-            || wave.elapsed_us != last - first
-            || throughput(&wave.attempts, wave.elapsed_us)
+        let (elapsed_us, dispatch_spread_us) = crate::schedule::bounds(wave.attempts.iter(), wave.schedule.as_ref().map(|s| s.settled_offset_us))?;
+        if wave.dispatch_spread_us != dispatch_spread_us
+            || wave.elapsed_us != elapsed_us
+            || crate::schedule::throughput(&wave.attempts, wave.elapsed_us, wave.schedule.as_ref())
                 != (
                     wave.eligible,
                     wave.completion_tokens,
@@ -808,6 +792,8 @@ pub struct Comparison {
     pub candidate_metrics: Option<crate::metrics::Summary>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reference_metrics: Option<crate::metrics::Summary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schedule: Option<crate::schedule::Comparison>,
 }
 fn change(a: Option<f64>, b: Option<f64>) -> Option<f64> {
     a.zip(b)
@@ -933,6 +919,15 @@ pub fn compare(a: &Path, b: &Path, reference: Option<&Path>) -> Result<Compariso
             ));
         }
     }
+    let schedule = (left.plan.workload.version == 4).then(|| crate::schedule::Comparison {
+        scope: "named-lane descriptive schedule observations; complete-schedule throughput is not a mixed-load or fairness verdict; actual overlap and matched solo evidence are required for such claims",
+        complete_eligible: crate::schedule::complete_eligible(&left)
+            && crate::schedule::complete_eligible(&right)
+            && reference.as_ref().is_none_or(crate::schedule::complete_eligible),
+        baseline: crate::schedule::summarize(&left),
+        candidate: crate::schedule::summarize(&right),
+        reference: reference.as_ref().map(crate::schedule::summarize),
+    });
     let baseline = summarize(&left);
     let candidate = summarize(&right);
     let reference_identity = reference
@@ -1167,7 +1162,7 @@ pub fn compare(a: &Path, b: &Path, reference: Option<&Path>) -> Result<Compariso
             .collect()
     });
     Ok(Comparison {
-        version: 3,
+        version: if schedule.is_some() { 4 } else { 3 },
         claim: "descriptive-deployment-comparison-not-causal-or-steady-state-capacity",
         baseline_model: left.plan.model,
         candidate_model: right.plan.model,
@@ -1184,5 +1179,6 @@ pub fn compare(a: &Path, b: &Path, reference: Option<&Path>) -> Result<Compariso
         reference,
         drift,
         changes,
+        schedule,
     })
 }

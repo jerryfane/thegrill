@@ -920,6 +920,9 @@ fn preflight(
     workload: &Workload,
     selected: Option<&selection::Manifest>,
 ) -> Result<()> {
+    if workload.version == 4 {
+        return Err("schedule workload4 uses raw run/preflight/compare; capture-v2 selections retain their existing flat/conversation contract".into());
+    }
     wire::endpoint(&options.endpoint, options.local_http)?;
     wire::credential(options.auth_env.as_deref())?;
     if options.model.is_empty()
@@ -952,9 +955,10 @@ fn preflight(
                 index: 0,
                 phase: Phase::Measured,
                 cell: cell.id.clone(),
-                case: cell.case.clone(),
+                case: Some(cell.case.clone()),
                 trial: 0,
                 concurrency: cell.concurrency,
+                lanes: None,
             };
             let effective = crate::sequence::settings(workload, &spec);
             text.push_str(&format!(

@@ -771,6 +771,138 @@ Changing either phase's controls changes workload identity and prevents a
 matched comparison. Existing exact400 recipes and hashes remain unchanged.
 Matching token counts alone is [not sparkDash protocol equivalence](SHARED-RECIPES.md#phase-counts-are-not-protocol-equivalence).
 
+## Finite heterogeneous schedules
+
+Workload **version 4** is the schedule-only contract for raw `preflight`, `run`,
+`pause`/`resume`, and offline raw-run `compare`. It does not change existing
+workload1/2/3 inputs or historical receipts. Capture-v2 `baseline`/`check`
+selections and policy1 do not admit schedule4; no empty `cells` result is treated
+as a successful legacy comparison. Native plan4 pins workload4 and uses
+reservation2/wave2, while preserving `generated-text-arrival-v2`.
+
+Keep `cases` as the existing flat cases and set `cells: []`. Add a nonempty
+`schedule` array of at most 64 scenarios:
+
+```json
+{
+  "version": 4,
+  "name": "synthetic-mixed",
+  "request": {
+    "profile": "portable-chat-v1", "stream": true,
+    "output": {"tokens": 8, "mode": "cap"}, "cache": "observe"
+  },
+  "limits": {
+    "total_ms": 3000, "idle_ms": 1000,
+    "response_bytes": 65536, "wave_buffer_bytes": 33554432
+  },
+  "cases": [
+    {"id": "a", "messages": [{"role": "user", "content": "Write a short sentence."}]},
+    {"id": "b", "messages": [{"role": "user", "content": "Read this synthetic repetition: {fill} Then say done."}],
+     "fill": {"unit": "word ", "repeat": 10000}}
+  ],
+  "cells": [],
+  "schedule": [
+    {"id": "solo-a", "kind": "solo", "warmup_trials": 1, "trials": 3,
+     "lanes": [{"id": "a", "case": "a", "arrival": {"kind": "fixed_offset", "offset_us": 0}}]},
+    {"id": "solo-b", "kind": "solo", "warmup_trials": 1, "trials": 3,
+     "lanes": [{"id": "b", "case": "b",
+       "request": {"profile": "portable-chat-v1", "stream": true, "output": {"tokens": 3, "mode": "cap"}, "cache": "observe"},
+       "arrival": {"kind": "fixed_offset", "offset_us": 0}}]},
+    {"id": "mixed", "kind": "overlap", "warmup_trials": 1, "trials": 3,
+     "lanes": [
+       {"id": "decode", "case": "a",
+        "arrival": {"kind": "fixed_offset", "offset_us": 0},
+        "control": {"scenario": "solo-a", "lane": "a"}},
+       {"id": "prefill", "case": "b",
+        "request": {"profile": "portable-chat-v1", "stream": true, "output": {"tokens": 3, "mode": "cap"}, "cache": "observe"},
+        "arrival": {"kind": "after_first_generated", "lane": "decode", "offset_us": 40000},
+        "control": {"scenario": "solo-b", "lane": "b"}}
+     ]}
+  ]
+}
+```
+
+This is synthetic schedule data, not a tokenizer-qualified long-prefill study.
+Each scenario has 1..64 unique named lanes, 0..20 warmup repetitions and 1..100
+measured repetitions. A solo has exactly one fixed-offset-zero lane and no
+control. Every overlap lane explicitly names a solo lane in the same workload
+with the identical case, complete resolved request settings, and repetition
+counts. Missing solo observations cannot be borrowed from another acquisition.
+Scenario/lane/repetition identities, not completion order, align comparison arms.
+
+An absent lane `request` uses the complete workload request. A present request
+**replaces it entirely**; fields are never merged. Both default and replacement
+must use `portable-chat-v1` or `vllm-fixed-v1`, never conversation profiles or
+steps. The existing phase-output and cache-eligibility rules apply per lane.
+Scheduled seeds use `seed + trial * 64`, without positional lane increments, so
+the same declared lane settings resolve to the same seed in its solo control.
+
+Arrivals are either `fixed_offset {offset_us}` from the admitted scenario's
+single monotonic origin, or `after_first_generated {lane, offset_us}` from an
+earlier-declared lane's first accepted generated text. Any scenario with a text
+trigger requires all lanes to stream. Headers, role-only events, body arrival,
+tool fragments and terminal frames are not generated-text triggers. A missing
+trigger or a source that settles before its dependent dispatch is retained as
+failure, not replaced by fixed-delay traffic.
+
+Admission checks all named lane bodies, settings, seeds, memory, trials and
+warmups prospectively. Existing hard limits remain: 10,000 total attempts, 1,024
+scenario repetitions, 2 MiB encoded requests, 8 MiB response caps and 512 MiB
+maximum wave buffer. `limits.total_ms` additionally bounds the **whole
+scenario**, including every arrival wait; it is not restarted for each new lane.
+There are no retries, replacement lanes, or subsequent scenario admission after
+fatal failure. All admitted peers settle before response/receipt publication.
+Cooperative pause takes effect only after this whole-scenario barrier; explicit
+resume admits only never-started scenarios and remains a continued acquisition,
+not uninterrupted comparison evidence.
+
+For outside-checkout use, point at the exact staged binary and new workload:
+
+```sh
+PERF=/absolute/path/to/staged/bin/grill-perf
+WORK=/absolute/path/to/synthetic-mixed.json
+"$PERF" preflight "$WORK" --endpoint https://your-server.example/v1/chat/completions \
+  --model YOUR_MODEL
+# Only in a separately approved, prospectively budgeted endpoint window:
+"$PERF" run "$WORK" --endpoint https://your-server.example/v1/chat/completions \
+  --model YOUR_MODEL --out /absolute/path/to/new-schedule-run --json
+"$PERF" compare /absolute/path/to/baseline-run /absolute/path/to/candidate-run --json
+```
+
+The example allows **16 requests / 88 output tokens / 1,048,576 response bytes**
+including warmups, at most two admitted lanes, and twelve scenario deadlines
+(36 seconds of network/arrival allowance, not a bound on filesystem stalls).
+Preflight also prints the actual summed encoded request-body bytes and maximum
+admitted lanes. No preflight command performs endpoint discovery or requests.
+Prompt bytes are not tokenizer token counts.
+
+Wave2 retains every lane position, including undispatched failures. In schedule
+observations, `settled_offset_us` and `wave.elapsed_us` both retain actual
+origin-to-barrier duration, including initial waits and cancellation settlement
+tail; the tail is never truncated to manufacture a deadline success.
+Undispatched attempts have zero/default response timings, not fictional
+dispatch or service intervals. Dispatch spread uses dispatched lanes only.
+
+Offline replay verifies the exact deterministic lane spec, request/body hashes,
+per-lane controls/usage, trigger offsets, deadlines and all overlap booleans:
+
+- `request_inflight`: positive intersection of dispatch-to-settlement intervals.
+- `generated_text`: positive intersection of first-to-last generated-text intervals.
+- `left_decode_right_prefill` / `right_decode_left_prefill`: positive intersection
+  of one lane's generated-text interval with the other's dispatch-to-first-text
+  interval. Terminal/settlement tails never substitute for last generated text.
+
+Missing or zero-span text intervals do not establish overlap. False actual
+overlap remains visible even when every request completed. The report keeps
+named per-lane first-generated/first-answer/completion observations, matched-solo
+availability, all missing/failing repetitions and descriptive complete-scenario
+throughput. It never pools unlike lane decode/prefill rates into a verdict.
+Exit 0 means complete eligible **descriptive** evidence; incomplete or continued
+evidence gives exit 2, and corrupt/incompatible evidence gives exit 1. These are
+not fairness, mixed-load nonregression or backend-qualification verdicts.
+Prospective named-lane gates belong to policy2 integration, not this producer.
+No GLM/DeepSeek schedule qualification is implied by CPU fixture coverage.
+
 ## Optional provider snapshots
 
 Add `--metrics-url https://your-server.example/metrics` to `run` to retain bounded
