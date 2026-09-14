@@ -1,5 +1,20 @@
 # Performance release notes
 
+## Unreleased — initial policy2 decisions
+
+- Add explicit policy2 first-generated, first-answer and client-completion
+  latency gates on homogeneous flat workloads, plus complete-wave worst-lane
+  first-answer and max/min ratio gates. Correlated peers are observations,
+  not extra independent trials.
+- Share checked rational envelope arithmetic without changing policy1
+  serialization, tolerance boundaries, reason precedence or exit meanings.
+- Preserve all A/B/A2, warmup, output amount and cache eligibility requirements.
+  Actual-hit latency never fabricates cold-prefill throughput.
+- This is the first issue #50 slice, not issue closure. Schedule selectors,
+  required telemetry, tool exposure, repeated conversations, larger histories,
+  tails, independent arithmetic review and live qualification remain separate
+  delivery gates. Released v0.1.0 artifacts and fixed examples are unchanged.
+
 ## Version 0.1.0 — published prerelease
 
 [v0.1.0 is published](https://github.com/plotarmordev/thegrill/releases/tag/v0.1.0)

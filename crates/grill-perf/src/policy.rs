@@ -1,4 +1,8 @@
-use crate::{evidence, model::*};
+use crate::{
+    envelope::{self, Direction, EnvelopeDecision, EnvelopeReason, Rational, range},
+    evidence,
+    model::*,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::Path;
@@ -25,8 +29,17 @@ struct CellPolicy {
 #[serde(deny_unknown_fields)]
 struct MetricPolicy {
     metric: Metric,
+    #[serde(default, deserialize_with = "MetricPolicy::deserialize_lane")]
+    lane: Option<String>,
     max_regression_bps: u32,
     max_reference_spread_bps: u32,
+}
+impl MetricPolicy {
+    fn deserialize_lane<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<String>, D::Error> {
+        String::deserialize(deserializer).map(Some)
+    }
 }
 #[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
@@ -35,6 +48,45 @@ enum Metric {
     AchievedCompletionTokensPerSecond,
     DecodeTokensPerSecond,
     PrefillTokensPerSecond,
+    FirstGeneratedTextUs,
+    FirstAnswerTextUs,
+    CompletionLatencyUs,
+    WorstLaneFirstAnswerUs,
+    FirstAnswerMaxMinRatio,
+}
+impl Metric {
+    fn legacy(self) -> bool {
+        matches!(
+            self,
+            Self::WaveLatencyUs
+                | Self::AchievedCompletionTokensPerSecond
+                | Self::DecodeTokensPerSecond
+                | Self::PrefillTokensPerSecond
+        )
+    }
+
+    fn aggregate(self) -> bool {
+        matches!(self, Self::WorstLaneFirstAnswerUs | Self::FirstAnswerMaxMinRatio)
+    }
+
+    fn per_wave(self) -> bool {
+        self.aggregate()
+            || matches!(self, Self::WaveLatencyUs | Self::AchievedCompletionTokensPerSecond)
+    }
+
+    fn direction(self) -> Direction {
+        match self {
+            Self::WaveLatencyUs
+            | Self::FirstGeneratedTextUs
+            | Self::FirstAnswerTextUs
+            | Self::CompletionLatencyUs
+            | Self::WorstLaneFirstAnswerUs
+            | Self::FirstAnswerMaxMinRatio => Direction::LowerBetter,
+            Self::AchievedCompletionTokensPerSecond
+            | Self::DecodeTokensPerSecond
+            | Self::PrefillTokensPerSecond => Direction::HigherBetter,
+        }
+    }
 }
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -107,8 +159,10 @@ pub fn parse(
         return Err(Reason::InvalidPolicy);
     }
     let policy: Policy = serde_json::from_slice(bytes).map_err(|_| Reason::InvalidPolicy)?;
-    if policy.version != 1
-        || policy.method != "observed-envelope-v1"
+    if !matches!(
+        (policy.version, policy.method.as_str()),
+        (1, "observed-envelope-v1") | (2, "observed-envelope-v2")
+    )
         || !identifier(&policy.id)
         || !sha(&policy.collector_sha256)
         || !sha(&policy.workload_source_sha256)
@@ -122,6 +176,13 @@ pub fn parse(
     if policy.workload_source_sha256 != source_sha256 {
         return Err(Reason::PolicySourceMismatch);
     }
+    // This first policy2 slice admits homogeneous flat workloads only.
+    // Schedule selectors and repeated conversations require their own integration.
+    if (policy.version == 1 && workload.version >= 4)
+        || (policy.version == 2 && !matches!(workload.version, 1 | 3))
+    {
+        return Err(Reason::PolicyScopeMismatch);
+    }
     if policy.cells.len() != workload.cells.len() {
         return Err(Reason::PolicyScopeMismatch);
     }
@@ -134,7 +195,7 @@ pub fn parse(
             .ok_or(Reason::PolicyScopeMismatch)?;
         if !cells.insert(&declared.cell)
             || declared.metrics.is_empty()
-            || declared.metrics.len() > 4
+            || declared.metrics.len() > if policy.version == 1 { 4 } else { 9 }
         {
             return Err(Reason::PolicyScopeMismatch);
         }
@@ -146,6 +207,9 @@ pub fn parse(
             if !metrics.insert(metric.metric)
                 || metric.max_regression_bps > 9999
                 || metric.max_reference_spread_bps > 1_000_000
+                || (policy.version == 1 && !metric.metric.legacy())
+                || metric.lane.is_some()
+                || (metric.metric.aggregate() && cell.concurrency < 2)
             {
                 return Err(Reason::InvalidPolicy);
             }
@@ -172,43 +236,6 @@ impl Outcome {
             Self::Regression => 3,
         }
     }
-}
-#[derive(Clone, Copy, Serialize)]
-struct Rational {
-    numerator: u64,
-    denominator: u64,
-}
-impl From<(u64, u64)> for Rational {
-    fn from((numerator, denominator): (u64, u64)) -> Self {
-        Self {
-            numerator,
-            denominator,
-        }
-    }
-}
-fn order(a: Rational, b: Rational) -> std::cmp::Ordering {
-    (u128::from(a.numerator) * u128::from(b.denominator))
-        .cmp(&(u128::from(b.numerator) * u128::from(a.denominator)))
-}
-fn scaled(a: Rational, scale: u32, b: Rational) -> Result<u128, Reason> {
-    u128::from(a.numerator)
-        .checked_mul(u128::from(scale))
-        .and_then(|n| n.checked_mul(u128::from(b.denominator)))
-        .ok_or(Reason::ArithmeticOverflow)
-}
-fn range(values: &[Rational]) -> Option<[Rational; 2]> {
-    let first = *values.first()?;
-    Some(
-        values
-            .iter()
-            .copied()
-            .fold([first, first], |[low, high], v| {
-                [
-                    if order(v, low).is_lt() { v } else { low },
-                    if order(v, high).is_gt() { v } else { high },
-                ]
-            }),
-    )
 }
 #[derive(Serialize)]
 struct Coverage {
@@ -238,6 +265,8 @@ struct RoleIdentity {
 struct Gate {
     cell: String,
     metric: Metric,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sample_unit: Option<&'static str>,
     max_regression_bps: u32,
     max_reference_spread_bps: u32,
     coverage: Roles<Coverage>,
@@ -271,14 +300,7 @@ fn observations(
         observed_waves: 0,
         eligible_waves: 0,
         expected_observations: cell.trials
-            * if matches!(
-                metric,
-                Metric::WaveLatencyUs | Metric::AchievedCompletionTokensPerSecond
-            ) {
-                1
-            } else {
-                cell.concurrency
-            },
+            * if metric.per_wave() { 1 } else { cell.concurrency },
         observed_observations: 0,
         expected_warmups: cell.warmup_trials,
         eligible_warmups: 0,
@@ -325,11 +347,62 @@ fn observations(
                             .map(Rational::from),
                     );
                 }
+                Metric::FirstGeneratedTextUs
+                | Metric::FirstAnswerTextUs
+                | Metric::CompletionLatencyUs => {
+                    values.extend(wave.attempts.iter().filter_map(|a| latency_sample(a, metric)));
+                }
+                Metric::WorstLaneFirstAnswerUs | Metric::FirstAnswerMaxMinRatio => {
+                    if let Some(sample) = fairness_sample(wave, metric) {
+                        values.push(sample);
+                    }
+                }
             }
         }
     }
     coverage.observed_observations = values.len();
     (coverage, values)
+}
+
+fn latency_sample(attempt: &Attempt, metric: Metric) -> Option<Rational> {
+    if !attempt.dispatched
+        || attempt.status != Status::Complete
+        || !attempt.eligibility_errors.is_empty()
+    {
+        return None;
+    }
+    let value = match metric {
+        Metric::FirstGeneratedTextUs => attempt.timing.first_generated_text_us?,
+        Metric::FirstAnswerTextUs => attempt.timing.first_answer_text_us?,
+        Metric::CompletionLatencyUs => attempt.timing.settle_us,
+        _ => return None,
+    };
+    (value > 0).then(|| (value, 1).into())
+}
+
+fn fairness_sample(wave: &Wave, metric: Metric) -> Option<Rational> {
+    if !wave.eligible
+        || wave.spec.concurrency < 2
+        || wave.attempts.len() != wave.spec.concurrency as usize
+    {
+        return None;
+    }
+    let mut low = u64::MAX;
+    let mut high = 0;
+    for (lane, attempt) in wave.attempts.iter().enumerate() {
+        // Full admitted-lane coverage, never a ratio over surviving peers.
+        if attempt.lane as usize != lane {
+            return None;
+        }
+        let value = latency_sample(attempt, Metric::FirstAnswerTextUs)?.numerator;
+        low = low.min(value);
+        high = high.max(value);
+    }
+    match metric {
+        Metric::WorstLaneFirstAnswerUs => Some((high, 1).into()),
+        Metric::FirstAnswerMaxMinRatio => Some((high, low).into()),
+        _ => None,
+    }
 }
 fn amounts_match(a: &evidence::Loaded, b: &evidence::Loaded, cell: &str) -> bool {
     a.plan
@@ -345,49 +418,46 @@ fn amounts_match(a: &evidence::Loaded, b: &evidence::Loaded, cell: &str) -> bool
             _ => false,
         })
 }
+fn envelope_reason(reason: EnvelopeReason) -> Reason {
+    match reason {
+        EnvelopeReason::InvalidRational | EnvelopeReason::InvalidBounds => Reason::InvalidEvidence,
+        EnvelopeReason::ArithmeticOverflow { .. } => Reason::ArithmeticOverflow,
+        EnvelopeReason::NonpositiveReference => Reason::NonpositiveReference,
+        EnvelopeReason::ReferenceSpreadExceeded => Reason::ReferenceSpreadExceeded,
+        EnvelopeReason::EnvelopeStraddlesTolerance { .. } => Reason::EnvelopeStraddlesTolerance,
+    }
+}
+
 fn evaluate(
     gate: &mut Gate,
     pooled: [Rational; 2],
     candidate: [Rational; 2],
 ) -> Result<(), Reason> {
-    let [low, high] = pooled;
-    let [c_low, c_high] = candidate;
     gate.pooled_reference_range = Some(pooled);
-    if low.numerator == 0 {
-        return Err(Reason::NonpositiveReference);
+    match envelope::assess(
+        pooled,
+        candidate,
+        gate.max_regression_bps,
+        gate.max_reference_spread_bps,
+        gate.metric.direction(),
+    ) {
+        Ok(assessment) => {
+            gate.adverse_bounds = Some(assessment.adverse_bounds);
+            gate.decision = match assessment.decision {
+                EnvelopeDecision::Pass => Outcome::Pass,
+                EnvelopeDecision::Regression => Outcome::Regression,
+            };
+            Ok(())
+        }
+        Err(reason) => {
+            gate.adverse_bounds = match reason {
+                EnvelopeReason::ArithmeticOverflow { adverse_bounds } => adverse_bounds,
+                EnvelopeReason::EnvelopeStraddlesTolerance { adverse_bounds } => Some(adverse_bounds),
+                _ => None,
+            };
+            Err(envelope_reason(reason))
+        }
     }
-    if scaled(high, 10000, low)? > scaled(low, 10000 + gate.max_reference_spread_bps, high)? {
-        return Err(Reason::ReferenceSpreadExceeded);
-    }
-    let ratio = |a: Rational, b: Rational| {
-        (a.numerator as f64 / a.denominator as f64) / (b.numerator as f64 / b.denominator as f64)
-    };
-    let latency = gate.metric == Metric::WaveLatencyUs;
-    gate.adverse_bounds = Some(if latency {
-        [ratio(c_low, high) - 1.0, ratio(c_high, low) - 1.0]
-    } else {
-        [1.0 - ratio(c_high, low), 1.0 - ratio(c_low, high)]
-    });
-    let tolerance = gate.max_regression_bps;
-    let (pass, regression) = if latency {
-        (
-            scaled(c_high, 10000, low)? <= scaled(low, 10000 + tolerance, c_high)?,
-            scaled(c_low, 10000, high)? > scaled(high, 10000 + tolerance, c_low)?,
-        )
-    } else {
-        (
-            scaled(c_low, 10000, high)? >= scaled(high, 10000 - tolerance, c_low)?,
-            scaled(c_high, 10000, low)? < scaled(low, 10000 - tolerance, c_high)?,
-        )
-    };
-    gate.decision = if pass {
-        Outcome::Pass
-    } else if regression {
-        Outcome::Regression
-    } else {
-        return Err(Reason::EnvelopeStraddlesTolerance);
-    };
-    Ok(())
 }
 fn add(reasons: &mut Vec<Reason>, reason: Reason) {
     if !reasons.contains(&reason) {
@@ -505,6 +575,7 @@ pub fn decide(a: &Path, b: &Path, reference: Option<&Path>) -> Decision {
     if let Some(a) = &left {
         result.policy_sha256 = a.plan.policy_sha256.clone();
         if let Some(policy) = &a.policy {
+            result.version = policy.version;
             result.policy_id = Some(policy.id.clone());
             result.min_trials = Some(policy.min_trials);
             for declared in &policy.cells {
@@ -519,9 +590,15 @@ pub fn decide(a: &Path, b: &Path, reference: Option<&Path>) -> Decision {
                 for metric in &declared.metrics {
                     let [(ac, av), (bc, bv), (rc, rv)] =
                         runs.map(|r| observations(r, cell, metric.metric));
+                    let sampled_ranges = [&av, &bv, &rv].map(|values| range(values));
                     let mut gate = Gate {
                         cell: cell.id.clone(),
                         metric: metric.metric,
+                        sample_unit: (policy.version == 2).then_some(if metric.metric.per_wave() {
+                            "wave-repetition"
+                        } else {
+                            "lane-observations-within-wave-repetitions"
+                        }),
                         max_regression_bps: metric.max_regression_bps,
                         max_reference_spread_bps: metric.max_reference_spread_bps,
                         coverage: Roles {
@@ -530,15 +607,19 @@ pub fn decide(a: &Path, b: &Path, reference: Option<&Path>) -> Decision {
                             reference: rc,
                         },
                         ranges: Roles {
-                            baseline: range(&av),
-                            candidate: range(&bv),
-                            reference: range(&rv),
+                            baseline: sampled_ranges[0].unwrap_or(None),
+                            candidate: sampled_ranges[1].unwrap_or(None),
+                            reference: sampled_ranges[2].unwrap_or(None),
                         },
                         pooled_reference_range: None,
                         adverse_bounds: None,
                         decision: Outcome::Inconclusive,
                         reason_codes: result.reason_codes.clone(),
                     };
+                    for reason in sampled_ranges.into_iter().filter_map(|result| result.err()) {
+                        gate.decision = Outcome::Error;
+                        add(&mut gate.reason_codes, envelope_reason(reason));
+                    }
                     for coverage in [
                         &gate.coverage.baseline,
                         &gate.coverage.candidate,
@@ -570,9 +651,12 @@ pub fn decide(a: &Path, b: &Path, reference: Option<&Path>) -> Decision {
                             gate.ranges.candidate,
                         )
                     {
-                        let pooled = range(&[ar[0], ar[1], rr[0], rr[1]]).unwrap();
-                        if let Err(reason) = evaluate(&mut gate, pooled, br) {
-                            gate.decision = if reason == Reason::ArithmeticOverflow {
+                        let assessment = range(&[ar[0], ar[1], rr[0], rr[1]])
+                            .map_err(envelope_reason)
+                            .and_then(|pooled| pooled.ok_or(Reason::InvalidEvidence))
+                            .and_then(|pooled| evaluate(&mut gate, pooled, br));
+                        if let Err(reason) = assessment {
+                            gate.decision = if matches!(reason, Reason::ArithmeticOverflow | Reason::InvalidEvidence) {
                                 Outcome::Error
                             } else {
                                 Outcome::Inconclusive
@@ -605,3 +689,7 @@ pub fn decide(a: &Path, b: &Path, reference: Option<&Path>) -> Decision {
 #[cfg(test)]
 #[path = "../tests/support/policy_calibration.rs"]
 mod policy_calibration;
+
+#[cfg(test)]
+#[path = "../tests/support/policy_observations.rs"]
+mod policy_observations;

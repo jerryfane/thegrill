@@ -1,4 +1,5 @@
 mod bundle;
+mod envelope;
 mod evidence;
 mod lifecycle;
 mod metrics;

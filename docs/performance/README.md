@@ -386,6 +386,57 @@ Parsing or output failures can share exit values without producing a decision.
 Raw-run `compare` exit 0 remains an eligibility-only result, never `PASS`.
 Capture comparison uses the result vocabulary above, not this policy envelope.
 
+### Policy2 first-output and finite fairness gates
+
+Policy `"version": 2` with `"method": "observed-envelope-v2"` uses the same
+prospective pins, A/B/A2 qualification, complete warmups and measured repetitions,
+exact ordered completion-token matching, tolerance arithmetic and exit meanings.
+It emits decision JSON version 2. Policy1 remains version 1 with its original
+four metrics and output shape; the default C1 and selected descriptive workflows
+are unchanged.
+
+This first policy2 slice supports homogeneous flat workload versions 1 and 3.
+In addition to the four old metrics, each cell may declare these lower-is-better
+gates:
+
+| Metric | Exact sample and population |
+|---|---|
+| `first_generated_text_us` | `(first_generated_text_us, 1)` per eligible measured lane, including generated reasoning text |
+| `first_answer_text_us` | `(first_answer_text_us, 1)` per eligible measured lane, distinct from first generated reasoning |
+| `completion_latency_us` | `(settle_us, 1)` per eligible measured lane: client completion, not terminal, last text or whole-wave elapsed time |
+| `worst_lane_first_answer_us` | `(max(first_answer_text_us), 1)` once per complete measured wave |
+| `first_answer_max_min_ratio` | `(max(first_answer_text_us), min(first_answer_text_us))` once per complete measured wave |
+
+All times are relative to that lane's dispatch. Dispatch offsets are never added
+to service latencies. Missing or zero observations are unavailable; headers,
+first body, terminal and settlement cannot substitute for missing first text.
+Worst-lane and max/min require at least two admitted lanes, every lane complete
+and eligible, and every first-answer latency positive. Admission rejects these
+two gates on a single-lane cell. No survivor-only maximum or ratio is evaluated.
+
+Coverage distinguishes wave repetitions from lane observations. The three-trial
+minimum counts acquired waves, never three peers inside one wave. Each fairness
+gate produces one sample per repetition; per-lane extrema remain descriptive
+observations within those repetitions, not an independent-lane confidence model.
+Policy2 gate `sample_unit` states this distinction. Max/min is dimensionless:
+its numerator is the slowest first-answer service latency and denominator the
+fastest within the same wave; a smaller ratio does not alone establish a better
+worst latency, so declare both gates when both properties matter.
+
+Actual reported-hit eligibility permits first-generated/answer latency gates.
+It does not create a cold-prefill sample: positive reported cached tokens still
+make `prefill_tokens_per_second` unavailable. Equal latency or passing a narrowly
+declared gate does not prove cache attribution, semantic correctness or general
+fairness. Failed output/cache eligibility and unequal ordered output amounts
+remain blocking reasons rather than exclusions.
+
+The optional `lane` selector is reserved for the separately integrated schedule
+contract; this homogeneous slice rejects any provided selector, including null.
+Policy1 rejects all new metric names and lane fields. Schedule gates, required
+telemetry, streamed-tool gates, whole-conversation repetitions, larger histories,
+empirical p95/p99 and claim-profile qualification remain separate work. This
+slice does not complete issue #50 or qualify mixed-load, tail or adoption claims.
+
 ## Build and use
 
 Requirements match the workspace: Linux, Rust/Cargo 1.98 and the native build
