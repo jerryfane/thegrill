@@ -38,6 +38,8 @@ pub(crate) struct ToolExpectation {
     pub result: String,
     pub history_bytes: usize,
     pub history_messages: usize,
+    pub history_cap: usize,
+    pub message_cap: usize,
 }
 
 #[derive(Deserialize)]
@@ -154,7 +156,7 @@ impl ToolStream {
                 .and_then(|bytes| bytes.checked_sub(1))
                 .ok_or("tool retained history size overflow")?
         };
-        if self.expected.history_messages > 62 || retained_bytes > 128 * 1024 {
+        if self.expected.history_messages > self.expected.message_cap.saturating_sub(2) || retained_bytes > self.expected.history_cap {
             return Err("fixed tool call exceeds retained history bounds".into());
         }
         self.candidate_us.ok_or_else(|| "missing valid tool call boundary".into())
@@ -190,7 +192,7 @@ pub fn passed(check: &Check) -> bool {
 }
 
 pub fn validate(workload: &Workload) -> Result<()> {
-    let sequence = matches!(workload.version, 2 | 5);
+    let sequence = crate::acquisition::conversation(workload);
     if !sequence {
         if workload.cases.iter().any(|case| case.step.is_some())
             || matches!(workload.request.profile, Profile::VllmConversationV2 | Profile::VllmConversationV3)
@@ -201,7 +203,7 @@ pub fn validate(workload: &Workload) -> Result<()> {
         }
         return Ok(());
     }
-    let profile = if workload.version == 5 {
+    let profile = if matches!(workload.version, 5 | 6) {
         Profile::VllmConversationV3
     } else {
         Profile::VllmConversationV2
@@ -210,7 +212,7 @@ pub fn validate(workload: &Workload) -> Result<()> {
         || !workload.request.stream
         || workload.request.output.mode != OutputMode::Cap
         || workload.request.cache != Cache::Observe
-        || workload.cases.len() > 16
+        || workload.cases.len() > if workload.version == 6 { 128 } else { 16 }
         || workload.cells.len() != workload.cases.len()
         || workload.limits.response_bytes > 64 * 1024
     {
@@ -297,7 +299,7 @@ pub fn settings(workload: &Workload, spec: &WaveSpec) -> RequestSettings {
         .and_then(|c| c.step.as_ref())
     {
         settings.cache = step.cache;
-        settings.stream = workload.version == 5 || matches!(step.expect, Expected::Json { .. });
+        settings.stream = matches!(workload.version, 5 | 6) || matches!(step.expect, Expected::Json { .. });
     }
     settings
 }
@@ -325,6 +327,9 @@ pub struct State {
     pending: Option<(String, Vec<Rc<Value>>)>,
     next_wave: u32,
     stopped: bool,
+    acquisition: Option<crate::acquisition::AcquisitionIdentity>,
+    retained_bytes: usize,
+    retained_messages: std::collections::HashSet<*const Value>,
 }
 
 impl State {
@@ -333,7 +338,7 @@ impl State {
         workload: &Workload,
         spec: &WaveSpec,
     ) -> Result<Option<ToolExpectation>> {
-        if workload.version != 5 {
+        if !matches!(workload.version, 5 | 6) || !crate::acquisition::conversation(workload) {
             return Ok(None);
         }
         let case = workload.cases.iter().find(|case| Some(case.id.as_str()) == spec.case.as_deref())
@@ -358,6 +363,8 @@ impl State {
             result: result.clone(),
             history_bytes: serde_json::to_vec(&Messages(messages)).map_err(|e| e.to_string())?.len(),
             history_messages: messages.len(),
+            history_cap: history_cap(workload),
+            message_cap: message_cap(workload),
         }))
     }
 
@@ -367,7 +374,7 @@ impl State {
         spec: &WaveSpec,
         lane: u32,
     ) -> Result<String> {
-        if !matches!(context.workload.version, 2 | 5) {
+        if !crate::acquisition::conversation(context.workload) {
             return crate::wire::request_body(context, spec, lane);
         }
         if self.stopped {
@@ -377,6 +384,15 @@ impl State {
             return Err(
                 "sequence admission must follow each settled declared step exactly once".into(),
             );
+        }
+        if context.workload.version == 6 && self.acquisition != spec.acquisition {
+            if context.workload.cells.first().map(|c| c.id.as_str()) != Some(spec.cell.as_str()) {
+                return Err("acquisition must begin at its first required step".into());
+            }
+            self.histories.clear();
+            self.retained_bytes = 0;
+            self.retained_messages.clear();
+            self.acquisition = spec.acquisition;
         }
         let case = context
             .workload
@@ -405,12 +421,14 @@ impl State {
             Vec::new()
         };
         messages.extend(inputs.into_iter().map(Rc::new));
-        if messages.len() > 64 {
-            return Err("sequence accumulated history exceeds 64 messages".into());
+        if messages.len() > message_cap(context.workload) {
+            return Err(if context.workload.version == 6 { "sequence accumulated history exceeds declared message bound" } else { "sequence accumulated history exceeds 64 messages" }.into());
         }
         let namespace = context
             .cache_namespace
             .ok_or("sequence needs a private cache namespace")?;
+        let acquired_namespace = spec.acquisition.map(|id| crate::acquisition::namespace(namespace, id));
+        let namespace = acquired_namespace.as_deref().unwrap_or(namespace);
         body["cache_salt"] = Value::String(format!("{namespace}-{}", step.history));
         if let Expected::Tool { .. } = step.expect {
             body["tools"] = json!([{"type":"function","function":{"name":"lookup_fact","description":"Return the declared local fixture value for one key.","parameters":{"type":"object","properties":{"key":{"type":"string"}},"required":["key"],"additionalProperties":false}}}]);
@@ -421,9 +439,10 @@ impl State {
             messages: Messages(&messages),
         })
         .map_err(|e| e.to_string())?;
-        if encoded.len() > 128 * 1024 {
-            return Err("sequence accumulated input exceeds 128 KiB".into());
+        if encoded.len() > input_cap(context.workload) {
+            return Err(if context.workload.version == 6 { "sequence accumulated input exceeds declared encoded input cap" } else { "sequence accumulated input exceeds 128 KiB" }.into());
         }
+        self.check_retention(context.workload, &messages)?;
         self.pending = Some((case.id.clone(), messages));
         Ok(encoded)
     }
@@ -435,7 +454,7 @@ impl State {
         attempt: &Attempt,
         body: &[u8],
     ) -> Result<Option<Check>> {
-        if !matches!(plan.workload.version, 2 | 5) {
+        if !crate::acquisition::conversation(&plan.workload) {
             return Ok(None);
         }
         let case = plan
@@ -472,7 +491,7 @@ impl State {
             let message = if let Some(message) = streamed_tool {
                 message
             } else if settings(&plan.workload, spec).stream {
-                let content = crate::wire::sequence_answer(attempt, body, matches!(plan.version, 3 | 4))?;
+                let content = crate::wire::sequence_answer(attempt, body, matches!(plan.version, 3 | 4 | 5))?;
                 json!({"role":"assistant","content":content})
             } else {
                 let mut response: Value =
@@ -572,20 +591,25 @@ impl State {
                     check.correct = true;
                 }
             }
-            if messages.len() > 64
+            if messages.len() > message_cap(&plan.workload)
                 || serde_json::to_vec(&Messages(&messages))
                     .map_err(|e| e.to_string())?
                     .len()
-                    > 128 * 1024
+                    > history_cap(&plan.workload)
             {
-                return Err("retained sequence history exceeds 128 KiB".into());
+                return Err(if plan.workload.version == 6 { "retained sequence history exceeds declared history cap" } else { "retained sequence history exceeds 128 KiB" }.into());
             }
+            self.check_retention(&plan.workload, &messages)?;
             Ok(messages)
         })();
         match observed {
             Ok(history) => {
                 check.correct = true;
-                if eligibility(attempt, &settings(&plan.workload, spec), spec.phase).is_empty() {
+                if eligibility(attempt, &settings(&plan.workload, spec), crate::acquisition::eligibility_phase(&plan.workload, spec.phase)).is_empty() {
+                    if plan.workload.version == 6 {
+                        self.retained_bytes = self.retention_size(&history)?;
+                        self.retained_messages.extend(history.iter().map(Rc::as_ptr));
+                    }
                     self.histories.push((case.id.clone(), history));
                 } else {
                     self.stopped = true;
@@ -598,4 +622,30 @@ impl State {
         }
         Ok(Some(check))
     }
+
+    fn check_retention(&self, workload: &Workload, active: &[Rc<Value>]) -> Result<()> {
+        if workload.version != 6 { return Ok(()); }
+        if self.retention_size(active)? > history_cap(workload) { return Err("shared retained history exceeds declared budget".into()); }
+        Ok(())
+    }
+    fn retention_size(&self, active: &[Rc<Value>]) -> Result<usize> {
+        // Each retained Rc payload is charged once across branches, plus every
+        // pointer array. Do not reserialize previously retained prefixes.
+        let mut bytes = self.retained_bytes.checked_add(std::mem::size_of_val(active)).ok_or("history budget overflow")?;
+        for message in active {
+            if !self.retained_messages.contains(&Rc::as_ptr(message)) {
+                bytes = bytes.checked_add(serde_json::to_vec(message.as_ref()).map_err(|e| e.to_string())?.len()).ok_or("history budget overflow")?;
+            }
+        }
+        Ok(bytes)
+    }
+}
+fn input_cap(workload: &Workload) -> usize {
+    workload.acquisition.as_ref().map_or(128 * 1024, crate::acquisition::Protocol::input_bytes)
+}
+fn history_cap(workload: &Workload) -> usize {
+    workload.acquisition.as_ref().map_or(128 * 1024, crate::acquisition::Protocol::history_bytes)
+}
+fn message_cap(workload: &Workload) -> usize {
+    if workload.version == 6 { 128 * 67 } else { 64 }
 }

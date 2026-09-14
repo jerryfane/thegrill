@@ -104,6 +104,7 @@ fn crosscheck_corpus() {
         let mut gate = Gate {
             cell: row["id"].as_str().unwrap().to_owned(),
             metric,
+            lane: None, target: None, percentile: None,
             sample_unit: None,
             max_regression_bps,
             max_reference_spread_bps,

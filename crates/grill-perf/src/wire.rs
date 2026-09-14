@@ -146,7 +146,7 @@ pub fn request_body(context: &BodyContext<'_>, wave: &WaveSpec, lane: u32) -> Re
         cache_salt: salt,
     })
     .map_err(|e| e.to_string())?;
-    if body.len() > REQUEST_CAP {
+    if body.len() > crate::acquisition::input_cap(context.workload) {
         return Err("encoded request exceeds 2 MiB".into());
     }
     Ok(body)

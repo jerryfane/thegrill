@@ -108,7 +108,7 @@ pub fn history(
 ) -> Result<History> {
     let mut indices = Vec::new();
     for (entry_count, entry) in fs::read_dir(root).map_err(|e| e.to_string())?.enumerate() {
-        if entry_count > SESSION_CAP + 1024 + 16 {
+        if entry_count > SESSION_CAP + (if plan.workload.version == 6 { crate::acquisition::WAVE_CAP } else { 1024 }) + 16 {
             return Err("run directory entry count exceeds bound".into());
         }
         let entry = entry.map_err(|e| e.to_string())?;
@@ -177,7 +177,7 @@ pub fn history(
         {
             return Err("execution session lineage mismatch".into());
         }
-        if plan.workload.version == 5 && index != 0 {
+        if matches!(plan.workload.version, 5 | 6) && index != 0 {
             return Err("streamed conversation workload cannot contain continuation sessions".into());
         }
         if index != 0 && last_status.as_deref() != Some("paused") {
@@ -263,7 +263,7 @@ pub fn history(
                         end.status.as_str(),
                         "budget-exhausted" | "stopped-after-ineligible-response"
                     ))
-                || (end.status == "stopped-after-sequence-check" && !matches!(plan.workload.version, 2 | 5))
+                || (end.status == "stopped-after-sequence-check" && !crate::acquisition::conversation(&plan.workload))
             {
                 return Err("invalid session terminal status".into());
             }
@@ -316,7 +316,7 @@ pub fn pause(root: &Path) -> Result<()> {
     let plan: Plan =
         serde_json::from_slice(&evidence::read(&root.join("plan.json"), 8 * 1024 * 1024)?)
             .map_err(|e| format!("invalid plan: {e}"))?;
-    if !matches!(plan.version, 2 | 3 | 4) {
+    if !matches!(plan.version, 2 | 3 | 4 | 5) {
         return Err("pause requires a lifecycle-enabled performance run".into());
     }
     let mut active = None;

@@ -5,6 +5,7 @@ fn expected() -> crate::sequence::ToolExpectation {
     crate::sequence::ToolExpectation {
         key: "harbor".into(), prior_ids: Vec::new(),
         result: "sapphire".into(), history_bytes: 2, history_messages: 0,
+        history_cap: 128 * 1024, message_cap: 64,
     }
 }
 

@@ -184,6 +184,7 @@ pub fn verify(path: &Path) -> Result<Verification> {
                 cases,
                 cells,
                 schedule,
+                acquisition,
             } = variant;
             if *version != base.version
                 || *variant_request != request
@@ -191,6 +192,7 @@ pub fn verify(path: &Path) -> Result<Verification> {
                 || *cases != base.cases
                 || *cells != base.cells
                 || *schedule != base.schedule
+                || *acquisition != base.acquisition
             {
                 return Err("GLM variant differs beyond its name and thinking control".into());
             }

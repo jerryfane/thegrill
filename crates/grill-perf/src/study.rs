@@ -920,8 +920,8 @@ fn preflight(
     workload: &Workload,
     selected: Option<&selection::Manifest>,
 ) -> Result<()> {
-    if workload.version == 4 {
-        return Err("schedule workload4 uses raw run/preflight/compare; capture-v2 selections retain their existing flat/conversation contract".into());
+    if matches!(workload.version, 4 | 5 | 6) {
+        return Err("workloads4..6 require native run/preflight/compare/decide; legacy selected capture is unsupported".into());
     }
     wire::endpoint(&options.endpoint, options.local_http)?;
     wire::credential(options.auth_env.as_deref())?;
@@ -959,6 +959,7 @@ fn preflight(
                 trial: 0,
                 concurrency: cell.concurrency,
                 lanes: None,
+                acquisition: None,
             };
             let effective = crate::sequence::settings(workload, &spec);
             text.push_str(&format!(

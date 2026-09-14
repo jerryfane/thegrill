@@ -102,6 +102,11 @@ pub fn load(path: &Path) -> Result<Selected> {
 }
 
 pub fn budgets(workload: &Workload, acquisitions: usize) -> Result<(usize, usize, usize)> {
+    if workload.version == 6 {
+        let b = crate::acquisition::budget(workload)?;
+        let scale = |n: u64| usize::try_from(n).ok().and_then(|n| n.checked_mul(acquisitions)).ok_or_else(|| "acquisition budget overflow".to_string());
+        return Ok((scale(b.warmup_requests)?, scale(b.measured_requests.checked_add(b.control_requests).ok_or("request budget overflow")?)?, scale(b.output_token_ceiling)?));
+    }
     if workload.version == 4 {
         let (mut warmup, mut measured, mut tokens) = (0usize, 0usize, 0usize);
         for scenario in workload.schedule.iter().flatten() {

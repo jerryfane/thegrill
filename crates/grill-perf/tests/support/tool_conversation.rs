@@ -166,3 +166,24 @@ fn tool_conversation_cancel_retains_partial_without_resume_or_replacement() {
     assert!(!resume.status.success());
     assert_eq!(server.count.load(Ordering::SeqCst), 1);
 }
+
+#[test]
+fn tool_acquisition6_repeats_actual_calls_and_per_acquisition_id_namespace() {
+    let temp=Temp::new();
+    let server=fixture(Some("reuse-id"));
+    let mut source=read_json(&workload());
+    source["version"]=json!(6);
+    source["limits"]["wave_buffer_bytes"]=json!(16*1024*1024);
+    source["acquisition"]=json!({"kind":"conversation","repetitions":3,"warmup_repetitions":1,
+        "measured_steps":["lookup","followup"],"input_bytes":1048576,"retained_history_bytes":1048576});
+    write_json(&temp.path("workload.json"),&source);
+    assert_eq!(decoded(&run(&temp,&server,&temp.path("workload.json")))["status"],"completed");
+    assert_eq!(server.count.load(Ordering::SeqCst),8);
+    let report=decoded(&replay(&temp));
+    assert_eq!(report["acquisition"]["baseline"]["records"].as_array().unwrap().len(),4);
+    for index in [0,2,4,6] {
+        let wave=read_json(&temp.path(&format!("run/wave-{index:06}/wave.json")));
+        assert!(wave["attempts"][0]["timing"]["first_tool_delta_us"].is_u64());
+        assert!(wave["attempts"][0]["timing"]["first_validated_tool_call_us"].is_u64());
+    }
+}

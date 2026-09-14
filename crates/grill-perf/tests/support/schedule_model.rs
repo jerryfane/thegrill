@@ -5,6 +5,7 @@ fn spec() -> WaveSpec {
     let request: RequestSettings = serde_json::from_value(json!({"profile":"portable-chat-v1","stream":true,"output":{"tokens":8,"mode":"cap"},"cache":"observe"})).unwrap();
     WaveSpec {
         index: 0, phase: Phase::Measured, cell: "mixed".into(), case: None, trial: 0, concurrency: 2,
+        acquisition: None,
         lanes: Some(vec![
             ResolvedLane { id: "a".into(), case: "a".into(), arrival: Arrival::FixedOffset { offset_us: 0 }, request: request.clone(), control: None },
             ResolvedLane { id: "b".into(), case: "b".into(), arrival: Arrival::AfterFirstGenerated { lane: "a".into(), offset_us: 3 }, request, control: None },

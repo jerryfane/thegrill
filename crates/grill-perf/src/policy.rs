@@ -20,6 +20,10 @@ pub struct Policy {
     #[serde(default, deserialize_with = "Policy::deserialize_telemetry")]
     required_telemetry: Option<Vec<crate::metrics::v2::Requirement>>,
     cells: Vec<CellPolicy>,
+    #[serde(default, deserialize_with = "present")]
+    whole_conversation: Option<Thresholds>,
+    #[serde(default, deserialize_with = "present")]
+    tail: Option<Vec<TailPolicy>>,
 }
 impl Policy {
     fn deserialize_telemetry<'de, D: serde::Deserializer<'de>>(
@@ -50,6 +54,23 @@ impl MetricPolicy {
         String::deserialize(deserializer).map(Some)
     }
 }
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Thresholds {
+    max_regression_bps: u32,
+    max_reference_spread_bps: u32,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, Hash)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum TailTarget { Completion { cell: String }, WholeConversation }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TailPolicy {
+    target: TailTarget,
+    percentile: crate::acquisition::Percentile,
+    max_regression_bps: u32,
+    max_reference_spread_bps: u32,
+}
 #[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 enum Metric {
@@ -62,6 +83,9 @@ enum Metric {
     CompletionLatencyUs,
     WorstLaneFirstAnswerUs,
     FirstAnswerMaxMinRatio,
+    FirstToolDeltaUs,
+    FirstValidatedToolCallUs,
+    WholeConversationUs,
 }
 impl Metric {
     fn legacy(self) -> bool {
@@ -90,7 +114,8 @@ impl Metric {
             | Self::FirstAnswerTextUs
             | Self::CompletionLatencyUs
             | Self::WorstLaneFirstAnswerUs
-            | Self::FirstAnswerMaxMinRatio => Direction::LowerBetter,
+            | Self::FirstAnswerMaxMinRatio
+            | Self::FirstToolDeltaUs | Self::FirstValidatedToolCallUs | Self::WholeConversationUs => Direction::LowerBetter,
             Self::AchievedCompletionTokensPerSecond
             | Self::DecodeTokensPerSecond
             | Self::PrefillTokensPerSecond => Direction::HigherBetter,
@@ -177,12 +202,12 @@ pub fn parse(
     let policy: Policy = serde_json::from_slice(bytes).map_err(|_| Reason::InvalidPolicy)?;
     if !matches!(
         (policy.version, policy.method.as_str()),
-        (1, "observed-envelope-v1") | (2, "observed-envelope-v2")
+        (1, "observed-envelope-v1") | (2, "observed-envelope-v2") | (3, "observed-envelope-v3")
     )
         || !identifier(&policy.id)
         || !sha(&policy.collector_sha256)
         || !sha(&policy.workload_source_sha256)
-        || !(3..=100).contains(&policy.min_trials)
+        || !(3..=if policy.version == 3 { 1000 } else { 100 }).contains(&policy.min_trials)
     {
         return Err(Reason::InvalidPolicy);
     }
@@ -192,15 +217,14 @@ pub fn parse(
     if policy.workload_source_sha256 != source_sha256 {
         return Err(Reason::PolicySourceMismatch);
     }
-    // This first policy2 slice admits homogeneous flat workloads only.
-    // Schedule selectors and repeated conversations require their own integration.
     if (policy.version == 1 && workload.version >= 4)
-        || (policy.version == 2 && !matches!(workload.version, 1 | 3))
+        || (policy.version == 2 && !matches!(workload.version, 1 | 3 | 4))
+        || (policy.version == 3 && workload.version != 6)
     {
         return Err(Reason::PolicyScopeMismatch);
     }
     if let Some(requirements) = &policy.required_telemetry {
-        if policy.version != 2 || requirements.is_empty() || requirements.len() > 256 {
+        if !matches!(policy.version, 2 | 3) || requirements.is_empty() || requirements.len() > 256 {
             return Err(Reason::InvalidPolicy);
         }
         let Some(crate::metrics::Protocol::V2(config)) = telemetry else {
@@ -220,35 +244,71 @@ pub fn parse(
             }
         }
     }
-    if policy.cells.len() != workload.cells.len() {
+    if policy.version != 3 && (policy.whole_conversation.is_some() || policy.tail.is_some()) {
+        return Err(Reason::InvalidPolicy);
+    }
+    let expected_cells = if workload.version == 4 { workload.schedule.as_ref().map_or(0, Vec::len) }
+        else { workload.cells.iter().filter(|c| workload.acquisition.as_ref().is_none_or(|p| p.measured(&c.case))).count() };
+    if expected_cells == 0 || policy.cells.len() != expected_cells {
         return Err(Reason::PolicyScopeMismatch);
     }
     let mut cells = HashSet::new();
     for declared in &policy.cells {
-        let cell = workload
-            .cells
-            .iter()
-            .find(|c| c.id == declared.cell)
-            .ok_or(Reason::PolicyScopeMismatch)?;
+        let cell = population(workload, &declared.cell).ok_or(Reason::PolicyScopeMismatch)?;
+        if workload.acquisition.as_ref().is_some_and(|p| !p.measured(&cell.case)) { return Err(Reason::PolicyScopeMismatch); }
         if !cells.insert(&declared.cell)
             || declared.metrics.is_empty()
-            || declared.metrics.len() > if policy.version == 1 { 4 } else { 9 }
+            || declared.metrics.len() > if policy.version == 1 { 4 } else { 256 }
         {
             return Err(Reason::PolicyScopeMismatch);
         }
-        if cell.trials < policy.min_trials {
+        if cell.trials < policy.min_trials || (policy.version == 3 && cell.warmup_trials == 0) {
             return Err(Reason::InsufficientDeclaredTrials);
         }
         let mut metrics = HashSet::new();
         for metric in &declared.metrics {
-            if !metrics.insert(metric.metric)
+            if !metrics.insert((metric.metric, metric.lane.as_deref()))
                 || metric.max_regression_bps > 9999
                 || metric.max_reference_spread_bps > 1_000_000
                 || (policy.version == 1 && !metric.metric.legacy())
-                || metric.lane.is_some()
+                || metric.metric == Metric::WholeConversationUs
+                || (policy.version != 3 && matches!(metric.metric, Metric::FirstToolDeltaUs | Metric::FirstValidatedToolCallUs))
+                || (workload.version != 4 && metric.lane.is_some())
                 || (metric.metric.aggregate() && cell.concurrency < 2)
             {
                 return Err(Reason::InvalidPolicy);
+            }
+            if workload.version == 4 {
+                let scenario = workload.schedule.as_ref().unwrap().iter().find(|s| s.id == declared.cell).unwrap();
+                if metric.metric.legacy()
+                    || (metric.metric.aggregate() && (metric.lane.is_some() || scenario.kind != crate::schedule::Kind::Overlap))
+                    || (!metric.metric.aggregate() && !scenario.lanes.iter().any(|l| Some(l.id.as_str()) == metric.lane.as_deref()))
+                { return Err(Reason::PolicyScopeMismatch); }
+            }
+            if matches!(metric.metric, Metric::FirstToolDeltaUs | Metric::FirstValidatedToolCallUs) {
+                if !workload.cases.iter().find(|c| c.id == cell.case).and_then(|c| c.step.as_ref())
+                    .is_some_and(|s| matches!(s.expect, crate::sequence::Expected::Tool { .. }))
+                { return Err(Reason::PolicyScopeMismatch); }
+            }
+        }
+    }
+    if let Some(whole) = &policy.whole_conversation {
+        if !crate::acquisition::conversation(workload) || !thresholds_valid(whole.max_regression_bps, whole.max_reference_spread_bps) {
+            return Err(Reason::PolicyScopeMismatch);
+        }
+    }
+    if let Some(tails) = &policy.tail {
+        if tails.is_empty() || tails.len() > 256 { return Err(Reason::InvalidPolicy); }
+        let mut seen = HashSet::new();
+        for tail in tails {
+            if !seen.insert((&tail.target, tail.percentile)) || !thresholds_valid(tail.max_regression_bps, tail.max_reference_spread_bps) {
+                return Err(Reason::InvalidPolicy);
+            }
+            match &tail.target {
+                TailTarget::Completion { cell } => {
+                    if crate::acquisition::conversation(workload) || population(workload, cell).is_none() { return Err(Reason::PolicyScopeMismatch); }
+                }
+                TailTarget::WholeConversation => if !crate::acquisition::conversation(workload) { return Err(Reason::PolicyScopeMismatch); },
             }
         }
     }
@@ -303,6 +363,12 @@ struct Gate {
     cell: String,
     metric: Metric,
     #[serde(skip_serializing_if = "Option::is_none")]
+    lane: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target: Option<TailTarget>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    percentile: Option<crate::acquisition::Percentile>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     sample_unit: Option<&'static str>,
     max_regression_bps: u32,
     max_reference_spread_bps: u32,
@@ -326,20 +392,25 @@ pub struct Decision {
     roles: Roles<Option<RoleIdentity>>,
     gates: Vec<Gate>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    whole_conversation: Option<Gate>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tail: Option<Vec<Gate>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     required_telemetry: Option<Roles<Option<crate::metrics::v2::Assessment>>>,
     reason_codes: Vec<Reason>,
 }
 fn observations(
     run: Option<&evidence::Loaded>,
-    cell: &Cell,
+    cell: &Population,
     metric: Metric,
+    lane: Option<&str>,
 ) -> (Coverage, Vec<Rational>) {
     let mut coverage = Coverage {
         expected_waves: cell.trials,
         observed_waves: 0,
         eligible_waves: 0,
         expected_observations: cell.trials
-            * if metric.per_wave() { 1 } else { cell.concurrency },
+            * if metric.per_wave() || lane.is_some() { 1 } else { cell.concurrency },
         observed_observations: 0,
         expected_warmups: cell.warmup_trials,
         eligible_warmups: 0,
@@ -388,9 +459,10 @@ fn observations(
                 }
                 Metric::FirstGeneratedTextUs
                 | Metric::FirstAnswerTextUs
-                | Metric::CompletionLatencyUs => {
-                    values.extend(wave.attempts.iter().filter_map(|a| latency_sample(a, metric)));
+                | Metric::CompletionLatencyUs | Metric::FirstToolDeltaUs | Metric::FirstValidatedToolCallUs => {
+                    values.extend(wave.attempts.iter().filter(|a| lane.is_none_or(|id| wave.spec.lanes.as_ref().and_then(|lanes| lanes.get(a.lane as usize)).is_some_and(|l| l.id == id))).filter_map(|a| latency_sample(a, metric)));
                 }
+                Metric::WholeConversationUs => (),
                 Metric::WorstLaneFirstAnswerUs | Metric::FirstAnswerMaxMinRatio => {
                     if let Some(sample) = fairness_sample(wave, metric) {
                         values.push(sample);
@@ -414,6 +486,8 @@ fn latency_sample(attempt: &Attempt, metric: Metric) -> Option<Rational> {
         Metric::FirstGeneratedTextUs => attempt.timing.first_generated_text_us?,
         Metric::FirstAnswerTextUs => attempt.timing.first_answer_text_us?,
         Metric::CompletionLatencyUs => attempt.timing.settle_us,
+        Metric::FirstToolDeltaUs => attempt.timing.first_tool_delta_us?,
+        Metric::FirstValidatedToolCallUs => attempt.timing.first_validated_tool_call_us?,
         _ => return None,
     };
     (value > 0).then(|| (value, 1).into())
@@ -519,6 +593,8 @@ pub fn decide(a: &Path, b: &Path, reference: Option<&Path>) -> Decision {
             reference: None,
         },
         gates: Vec::new(),
+        whole_conversation: None,
+        tail: None,
         required_telemetry: None,
         reason_codes: Vec::new(),
     };
@@ -620,21 +696,22 @@ pub fn decide(a: &Path, b: &Path, reference: Option<&Path>) -> Decision {
             result.min_trials = Some(policy.min_trials);
             for declared in &policy.cells {
                 // Policy admission already proved exact cell coverage.
-                let cell = a
-                    .plan
-                    .workload
-                    .cells
-                    .iter()
-                    .find(|c| c.id == declared.cell)
-                    .unwrap();
+                let cell = population(&a.plan.workload, &declared.cell).expect("admitted gate population");
                 for metric in &declared.metrics {
                     let [(ac, av), (bc, bv), (rc, rv)] =
-                        runs.map(|r| observations(r, cell, metric.metric));
+                        runs.map(|r| observations(r, &cell, metric.metric, metric.lane.as_deref()));
                     let sampled_ranges = [&av, &bv, &rv].map(|values| range(values));
                     let mut gate = Gate {
                         cell: cell.id.clone(),
                         metric: metric.metric,
-                        sample_unit: (policy.version == 2).then_some(if metric.metric.per_wave() {
+                        lane: metric.lane.clone(),
+                        target: None,
+                        percentile: None,
+                        sample_unit: (policy.version >= 2).then_some(if metric.lane.is_some() {
+                            "named-lane-per-scenario-repetition"
+                        } else if a.plan.workload.acquisition.as_ref().is_some_and(crate::acquisition::Protocol::conversation) {
+                            "same-step-per-complete-declared-acquisition"
+                        } else if metric.metric.per_wave() {
                             "wave-repetition"
                         } else {
                             "lane-observations-within-wave-repetitions"
@@ -684,6 +761,15 @@ pub fn decide(a: &Path, b: &Path, reference: Option<&Path>) -> Decision {
                     {
                         add(&mut gate.reason_codes, Reason::OutputAmountsMismatch);
                     }
+                    if a.plan.workload.version == 4 && runs.into_iter().flatten().any(|run| !mixed_qualified(run, &cell.id)) {
+                        add(&mut gate.reason_codes, Reason::MetricUnavailable);
+                    }
+                    if a.plan.workload.acquisition.as_ref().is_some_and(crate::acquisition::Protocol::conversation)
+                        && (runs.into_iter().flatten().any(|run| !conversation_qualified(run))
+                            || runs[1].is_some_and(|run| !complete_amounts_match(a, run))
+                            || runs[2].is_some_and(|run| !complete_amounts_match(a, run))) {
+                        add(&mut gate.reason_codes, Reason::MetricUnavailable);
+                    }
                     if gate.reason_codes.is_empty()
                         && let (Some(ar), Some(rr), Some(br)) = (
                             gate.ranges.baseline,
@@ -710,6 +796,20 @@ pub fn decide(a: &Path, b: &Path, reference: Option<&Path>) -> Decision {
                     result.gates.push(gate);
                 }
             }
+        }
+    }
+    if let Some(policy) = left.as_ref().and_then(|r| r.policy.as_ref()) {
+        if let Some(thresholds) = &policy.whole_conversation {
+            let gate = acquisition_gate(runs, TailTarget::WholeConversation, None, thresholds, &result.reason_codes);
+            result.decision = result.decision.max(gate.decision);
+            result.whole_conversation = Some(gate);
+        }
+        if let Some(tails) = &policy.tail {
+            let gates: Vec<_> = tails.iter().map(|tail| acquisition_gate(runs, tail.target.clone(), Some(tail.percentile), &Thresholds {
+                max_regression_bps: tail.max_regression_bps, max_reference_spread_bps: tail.max_reference_spread_bps,
+            }, &result.reason_codes)).collect();
+            for gate in &gates { result.decision = result.decision.max(gate.decision); }
+            result.tail = Some(gates);
         }
     }
     let mut telemetry_eligible = true;
@@ -752,7 +852,8 @@ pub fn decide(a: &Path, b: &Path, reference: Option<&Path>) -> Decision {
     }
     result.eligibility = qualified
         && telemetry_eligible
-        && result.gates.iter().all(|g| {
+        && !result.gates.is_empty()
+        && result.gates.iter().chain(result.whole_conversation.iter()).chain(result.tail.iter().flatten()).all(|g| {
             g.reason_codes.iter().all(|r| {
                 matches!(
                     r,
@@ -772,3 +873,176 @@ mod policy_calibration;
 #[cfg(test)]
 #[path = "../tests/support/policy_observations.rs"]
 mod policy_observations;
+
+// Gate population is not a synthetic serving Cell or request: scheduled lanes
+// continue to bind their own resolved settings and exact named controls.
+struct Population { id: String, case: String, trials: u32, warmup_trials: u32, concurrency: u32 }
+fn population(workload: &Workload, id: &str) -> Option<Population> {
+    if workload.version == 4 {
+        let scenario = workload.schedule.as_ref()?.iter().find(|s| s.id == id)?;
+        return Some(Population { id: scenario.id.clone(), case: String::new(), trials: scenario.trials,
+            warmup_trials: scenario.warmup_trials, concurrency: scenario.lanes.len() as u32 });
+    }
+    let cell = workload.cells.iter().find(|c| c.id == id)?;
+    let (trials, warmup_trials) = workload.acquisition.as_ref().map_or((cell.trials, cell.warmup_trials), |p| p.counts(cell));
+    Some(Population { id: cell.id.clone(), case: cell.case.clone(), trials, warmup_trials, concurrency: cell.concurrency })
+}
+fn thresholds_valid(adverse: u32, spread: u32) -> bool { adverse <= 9999 && spread <= 1_000_000 }
+fn conversation_qualified(run: &evidence::Loaded) -> bool {
+    [Phase::Warmup, Phase::Measured].into_iter().all(|phase| crate::acquisition::whole_samples(&run.plan, &run.waves, phase).is_ok())
+}
+fn complete_amounts_match(a: &evidence::Loaded, b: &evidence::Loaded) -> bool {
+    a.plan.waves.len() == b.plan.waves.len() && a.waves.iter().zip(&b.waves).all(|(a,b)| {
+        match (a,b) {
+            (Some(a),Some(b)) => a.eligible && b.eligible && a.spec == b.spec && a.attempts.len() == b.attempts.len()
+                && a.attempts.iter().zip(&b.attempts).all(|(a,b)| a.usage.completion_tokens.is_some() && a.usage.completion_tokens == b.usage.completion_tokens),
+            _ => false,
+        }
+    })
+}
+fn mixed_qualified(run: &evidence::Loaded, id: &str) -> bool {
+    let Some(scenario) = run.plan.workload.schedule.as_ref().and_then(|s| s.iter().find(|s| s.id == id)) else { return false; };
+    let waves: Vec<_> = run.waves.iter().flatten().filter(|w| w.spec.cell == id).collect();
+    if waves.len() != (scenario.trials + scenario.warmup_trials) as usize || waves.iter().any(|w| !w.eligible) { return false; }
+    if scenario.kind == crate::schedule::Kind::Solo { return true; }
+    for wave in waves {
+        let Some(observation) = &wave.schedule else { return false; };
+        if observation.fatal.is_some() || !required_overlap(scenario, observation) { return false; }
+        for (index, lane) in scenario.lanes.iter().enumerate() {
+            let Some(control) = &lane.control else { return false; };
+            let Some(solo) = run.waves.iter().flatten().find(|w| w.spec.cell == control.scenario && w.spec.phase == wave.spec.phase && w.spec.trial == wave.spec.trial) else { return false; };
+            let Some(position) = solo.spec.lanes.as_ref().and_then(|ls| ls.iter().position(|l| l.id == control.lane)) else { return false; };
+            let Some(a) = wave.attempts.get(index) else { return false; };
+            let Some(b) = solo.attempts.get(position) else { return false; };
+            if !solo.eligible || a.usage.completion_tokens.is_none() || a.usage.completion_tokens != b.usage.completion_tokens { return false; }
+        }
+    }
+    true
+}
+fn required_overlap(scenario: &crate::schedule::Scenario, observed: &crate::schedule::Observation) -> bool {
+    // Each triggered edge must exhibit its declared source decode / target
+    // prefill intersection. Fixed-offset lanes need an actual mixed interval
+    // involving that lane. In-flight settlement alone never establishes this.
+    scenario.lanes.iter().all(|lane| match &lane.arrival {
+        crate::schedule::Arrival::AfterFirstGenerated { lane: source, .. } => observed.overlap.iter().any(|o| {
+            o.request_inflight && ((&o.left == source && o.right == lane.id && o.left_decode_right_prefill)
+                || (&o.right == source && o.left == lane.id && o.right_decode_left_prefill))
+        }),
+        crate::schedule::Arrival::FixedOffset { .. } => observed.overlap.iter().any(|o| {
+            o.request_inflight && (o.left == lane.id || o.right == lane.id)
+                && (o.left_decode_right_prefill || o.right_decode_left_prefill)
+        }),
+    })
+}
+fn completion_population(run: &evidence::Loaded, cell: &str, phase: Phase) -> Option<Vec<u64>> {
+    let expected = population(&run.plan.workload, cell)?;
+    let expected = if phase == Phase::Warmup { expected.warmup_trials } else { expected.trials };
+    let mut values = Vec::with_capacity(expected as usize);
+    for wave in run.waves.iter().flatten().filter(|w| w.spec.cell == cell && w.spec.phase == phase) {
+        values.push(completion_wave(wave)?);
+    }
+    (values.len() == expected as usize).then_some(values)
+}
+fn acquisition_gate(
+    runs: [Option<&evidence::Loaded>; 3], target: TailTarget,
+    percentile: Option<crate::acquisition::Percentile>, thresholds: &Thresholds, inherited: &[Reason],
+) -> Gate {
+    let workload = runs[0].map(|r| &r.plan.workload);
+    let (trials, warmups) = match (&target, workload) {
+        (TailTarget::WholeConversation, Some(w)) => w.cells.first().and_then(|c| w.acquisition.as_ref().map(|p| p.counts(c))).unwrap_or((0,0)),
+        (TailTarget::Completion { cell }, Some(w)) => population(w, cell).map(|p| (p.trials,p.warmup_trials)).unwrap_or((0,0)),
+        _ => (0,0),
+    };
+    let observations = runs.map(|run| {
+        let sample = |phase| run.and_then(|r| match &target {
+            TailTarget::WholeConversation => crate::acquisition::whole_samples(&r.plan, &r.waves, phase).ok(),
+            TailTarget::Completion { cell } => completion_population(r, cell, phase),
+        });
+        let measured = sample(Phase::Measured);
+        let (observed_waves, eligible_waves) = run.map_or((0,0), |r| population_counts(r, &target, Phase::Measured));
+        let (_, eligible_warmups) = run.map_or((0,0), |r| population_counts(r, &target, Phase::Warmup));
+        let mut coverage = Coverage { expected_waves: trials, observed_waves: 0, eligible_waves: 0,
+            expected_observations: trials, observed_observations: 0, expected_warmups: warmups,
+            eligible_warmups };
+        // Retain actual complete and observed counts even when partial membership
+        // withholds the statistic; no survivor-only point estimate is emitted.
+        coverage.observed_waves = observed_waves;
+        coverage.eligible_waves = eligible_waves;
+        coverage.observed_observations = eligible_waves;
+        let values = measured.and_then(|mut values| {
+            coverage.eligible_waves = values.len();
+            coverage.observed_observations = values.len();
+            match percentile {
+                Some(p) => p.nearest_rank(&mut values).map(|v| vec![Rational::from((v,1))]),
+                None => Some(values.into_iter().map(|v| Rational::from((v,1))).collect()),
+            }
+        });
+        (coverage, values.and_then(|v| range(&v).ok().flatten()))
+    });
+    let [(ac,ar),(bc,br),(rc,rr)] = observations;
+    let mut gate = Gate {
+        cell: match &target { TailTarget::Completion { cell } => cell.clone(), TailTarget::WholeConversation => "whole_conversation".into() },
+        metric: if target == TailTarget::WholeConversation { Metric::WholeConversationUs } else { Metric::CompletionLatencyUs },
+        lane: None, target: Some(target.clone()), percentile,
+        sample_unit: Some(if percentile.is_some() { "finite-empirical-nearest-rank-per-complete-acquisition-not-production-percentile-or-confidence" } else { "whole-conversation-wall-time-including-required-controls" }),
+        max_regression_bps: thresholds.max_regression_bps, max_reference_spread_bps: thresholds.max_reference_spread_bps,
+        coverage: Roles { baseline: ac, candidate: bc, reference: rc }, ranges: Roles { baseline: ar, candidate: br, reference: rr },
+        pooled_reference_range: None, adverse_bounds: None, decision: Outcome::Inconclusive, reason_codes: inherited.to_vec(),
+    };
+    for coverage in [&gate.coverage.baseline,&gate.coverage.candidate,&gate.coverage.reference] {
+        if warmups == 0 || coverage.eligible_warmups != warmups as usize { add(&mut gate.reason_codes, Reason::WarmupIncomplete); }
+        if trials == 0 || coverage.eligible_waves != trials as usize || percentile.is_some_and(|p| coverage.observed_observations < p.floor()) {
+            add(&mut gate.reason_codes, Reason::MetricUnavailable);
+        }
+    }
+    if let (Some(a),Some(b),Some(r)) = (runs[0],runs[1],runs[2]) {
+        if evidence::compatible(&a.plan,&b.plan) && evidence::compatible(&a.plan,&r.plan)
+            && (!complete_amounts_match(a,b) || !complete_amounts_match(a,r)) { add(&mut gate.reason_codes, Reason::OutputAmountsMismatch); }
+    } else { add(&mut gate.reason_codes, Reason::MissingReference); }
+    if gate.reason_codes.is_empty() && let (Some(ar),Some(rr),Some(br)) = (ar,rr,br) {
+        let assessed = range(&[ar[0],ar[1],rr[0],rr[1]]).map_err(envelope_reason)
+            .and_then(|r| r.ok_or(Reason::InvalidEvidence)).and_then(|r| evaluate(&mut gate,r,br));
+        if let Err(reason) = assessed {
+            gate.decision = if matches!(reason,Reason::ArithmeticOverflow | Reason::InvalidEvidence) { Outcome::Error } else { Outcome::Inconclusive };
+            add(&mut gate.reason_codes,reason);
+        }
+    }
+    gate
+}
+
+#[cfg(test)]
+#[path = "../tests/support/acquisition_policy.rs"]
+mod acquisition_policy;
+
+fn completion_wave(wave: &Wave) -> Option<u64> {
+    if !wave.eligible || wave.attempts.len() != wave.spec.concurrency as usize { return None; }
+    let mut worst = 0;
+    for (lane, a) in wave.attempts.iter().enumerate() {
+        if a.lane as usize != lane { return None; }
+        worst = worst.max(latency_sample(a, Metric::CompletionLatencyUs)?.numerator);
+    }
+    (worst > 0).then_some(worst)
+}
+fn population_counts(run: &evidence::Loaded, target: &TailTarget, phase: Phase) -> (usize, usize) {
+    match target {
+        TailTarget::Completion { cell } => {
+            let mut counts = (0,0);
+            for wave in run.waves.iter().flatten().filter(|w| w.spec.phase == phase && w.spec.cell == *cell) {
+                counts.0 += 1;
+                counts.1 += usize::from(completion_wave(wave).is_some());
+            }
+            counts
+        }
+        TailTarget::WholeConversation => {
+            let Some(crate::acquisition::Protocol::Conversation { repetitions, warmup_repetitions, .. }) = &run.plan.workload.acquisition else { return (0,0); };
+            let count = if phase == Phase::Warmup { *warmup_repetitions } else { *repetitions };
+            let mut counts = (0,0);
+            for index in 0..count {
+                let identity = crate::acquisition::AcquisitionIdentity { phase, index };
+                counts.0 += usize::from(run.waves.iter().flatten().any(|w| w.spec.acquisition == Some(identity)));
+                counts.1 += usize::from(crate::acquisition::whole_sample(&run.plan, &run.waves, identity).is_ok());
+            }
+            counts
+        }
+    }
+}

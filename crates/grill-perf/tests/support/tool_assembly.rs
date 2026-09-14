@@ -7,6 +7,8 @@ fn stream(prior_ids: &[&str]) -> ToolStream {
         result: "sapphire".into(),
         history_bytes: 2,
         history_messages: 0,
+        history_cap: 128 * 1024,
+        message_cap: 64,
     })
 }
 

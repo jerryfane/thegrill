@@ -144,7 +144,7 @@ pub fn waves(workload: &Workload) -> Vec<WaveSpec> {
             for trial in 0..count {
                 waves.push(WaveSpec {
                     index: waves.len() as u32, phase, cell: scenario.id.clone(), case: None,
-                    trial, concurrency: scenario.lanes.len() as u32,
+                    trial, concurrency: scenario.lanes.len() as u32, acquisition: None,
                     lanes: Some(scenario.lanes.iter().map(|lane| ResolvedLane {
                         id: lane.id.clone(), case: lane.case.clone(), arrival: lane.arrival.clone(),
                         request: lane.request.as_ref().unwrap_or(&workload.request).clone(), control: lane.control.clone(),

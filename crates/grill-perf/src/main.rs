@@ -1,3 +1,4 @@
+mod acquisition;
 mod bundle;
 mod envelope;
 mod evidence;
@@ -191,6 +192,14 @@ fn execute(cli: Cli) -> model::Result<u8> {
                 if !json { println!("Named-lane schedule observations; descriptive only, not a mixed-load or fairness verdict."); }
                 print_json(&comparison)?;
                 return Ok(if schedule.complete_eligible { 0 } else { 2 });
+            }
+            if let Some(acquisition) = &comparison.acquisition {
+                if !json { println!("Declared acquisition observations; descriptive only, use decide for prospective gates."); }
+                print_json(&comparison)?;
+                let complete = [&acquisition.baseline, &acquisition.candidate].into_iter()
+                    .chain(acquisition.reference.iter())
+                    .all(|report| !report.records.is_empty() && report.records.iter().all(|r| r.complete_eligible));
+                return Ok(if complete { 0 } else { 2 });
             }
             if json {
                 print_json(&comparison)?;

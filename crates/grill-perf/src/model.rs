@@ -161,6 +161,8 @@ pub struct Workload {
     pub cells: Vec<Cell>,
     #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "present")]
     pub schedule: Option<Vec<crate::schedule::Scenario>>,
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "present")]
+    pub acquisition: Option<crate::acquisition::Protocol>,
 }
 pub(crate) fn identifier(s: &str) -> bool {
     !s.is_empty()
@@ -176,7 +178,7 @@ pub(crate) fn present<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
 }
 impl Workload {
     pub fn salted(&self) -> bool {
-        matches!(self.version, 2 | 5) || self.cases.iter().any(|case| case.fill.is_some())
+        crate::acquisition::conversation(self) || self.cases.iter().any(|case| case.fill.is_some())
     }
     pub fn cache_namespace_required(&self) -> bool {
         self.request.cache != Cache::Observe || self.salted()
@@ -189,8 +191,8 @@ impl Workload {
                 .any(|l| l.request.as_ref().is_some_and(|r| r.profile != Profile::PortableChatV1))
     }
     pub fn validate(&self) -> Result<()> {
-        if !matches!(self.version, 1..=5) || !identifier(&self.name) {
-            return Err("expected workload version 1 through 5 and a short ASCII name".into());
+        if !matches!(self.version, 1..=6) || !identifier(&self.name) {
+            return Err("expected workload version 1 through 6 and a short ASCII name".into());
         }
         if self.version < 3 && self.request.warmup_output.is_some() {
             return Err("request.warmup_output requires workload version 3".into());
@@ -201,11 +203,12 @@ impl Workload {
         if self.version != 4 && self.schedule.is_some() {
             return Err("schedule requires workload version 4".into());
         }
+        crate::acquisition::validate(self)?;
         crate::sequence::validate(self)?;
         if self.cases.is_empty()
             || self.cases.len() > 128
             || (self.version != 4 && self.cells.is_empty())
-            || self.cells.len() > 64
+            || self.cells.len() > if self.version == 6 { 128 } else { 64 }
         {
             return Err("workload requires 1..128 cases and 1..64 cells".into());
         }
@@ -216,7 +219,7 @@ impl Workload {
             }
             if case.messages.is_empty()
                 || case.messages.len() > 64
-                || case.messages.iter().map(|m| m.content.len()).sum::<usize>() > 128 * 1024
+                || case.messages.iter().map(|m| m.content.len()).sum::<usize>() > self.acquisition.as_ref().map_or(128 * 1024, crate::acquisition::Protocol::input_bytes)
             {
                 return Err(format!("case {} exceeds message bounds", case.id));
             }
@@ -254,7 +257,13 @@ impl Workload {
             }
         }
         let r = &self.request;
-        r.validate()?;
+        if self.version == 6 {
+            let mut controls = r.clone();
+            controls.seed = None;
+            controls.validate()?;
+        } else {
+            r.validate()?;
+        }
         let l = &self.limits;
         if l.total_ms == 0 || l.total_ms > 3_600_000 {
             return Err(format!(
@@ -298,7 +307,7 @@ impl Workload {
             }
             if !(1..=64).contains(&cell.concurrency)
                 || cell.trials == 0
-                || cell.trials > 100
+                || cell.trials > if self.version == 6 { 1000 } else { 100 }
                 || cell.warmup_trials > 20
             {
                 return Err(format!("cell {} exceeds concurrency/trial bounds", cell.id));
@@ -316,28 +325,40 @@ impl Workload {
             } else {
                 6 * l.response_bytes + 512 * 1024
             } + fill_bytes
-                + if self.version == 5 && case.step.as_ref().is_some_and(|step| matches!(step.expect, crate::sequence::Expected::Tool { .. })) {
+                + if matches!(self.version, 5 | 6) && case.step.as_ref().is_some_and(|step| matches!(step.expect, crate::sequence::Expected::Tool { .. })) {
                     TOOL_TRACE_ALLOWANCE
                 } else {
                     0
                 };
-            let required = per_request * cell.concurrency as usize;
+            let required = if let Some(protocol) = &self.acquisition {
+                per_request.checked_add(protocol.input_bytes())
+                    .and_then(|n| n.checked_mul(cell.concurrency as usize))
+                    .and_then(|n| n.checked_add(protocol.history_bytes()))
+                    .ok_or("acquisition buffer budget overflow")?
+            } else { per_request * cell.concurrency as usize };
             if required > l.wave_buffer_bytes {
                 return Err(format!(
                     "cell {} requires limits.wave_buffer_bytes >= {required}, supplied {}; concurrency={}, stream={}, response_bytes={}, fill_bytes={fill_bytes}",
                     cell.id, l.wave_buffer_bytes, cell.concurrency, r.stream, l.response_bytes
                 ));
             }
-            let n = u64::from(cell.trials) + u64::from(cell.warmup_trials);
-            waves += n;
-            attempts += n * u64::from(cell.concurrency);
+            let (trials, warmups) = self.acquisition.as_ref().map_or((cell.trials, cell.warmup_trials), |p| p.counts(cell));
+            if self.version == 6 && let Some(seed) = r.seed {
+                let max_trial = trials.max(warmups).saturating_sub(1);
+                seed.checked_add(i64::from(max_trial) * 64 + i64::from(cell.concurrency - 1))
+                    .ok_or("acquisition seed range overflows i64")?;
+            }
+            let n = u64::from(trials) + u64::from(warmups);
+            waves = waves.checked_add(n).ok_or("wave budget overflow")?;
+            attempts = n.checked_mul(u64::from(cell.concurrency)).and_then(|n| attempts.checked_add(n)).ok_or("attempt budget overflow")?;
         }
-        if attempts > MAX_ATTEMPTS || waves > 1024 {
-            return Err("workload exceeds 10,000 attempts or 1,024 waves".into());
+        if attempts > MAX_ATTEMPTS || waves > if self.version == 6 { crate::acquisition::WAVE_CAP as u64 } else { 1024 } {
+            return Err("workload exceeds attempt or versioned wave limit".into());
         }
         Ok(())
     }
     pub fn waves(&self) -> Vec<WaveSpec> {
+        if self.version == 6 { return crate::acquisition::waves(self); }
         if self.version == 4 {
             return crate::schedule::waves(self);
         }
@@ -358,6 +379,7 @@ impl Workload {
                         trial,
                         concurrency: cell.concurrency,
                         lanes: None,
+                        acquisition: None,
                     });
                 }
             }
@@ -383,6 +405,8 @@ pub struct WaveSpec {
     pub concurrency: u32,
     #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "present")]
     pub lanes: Option<Vec<crate::schedule::ResolvedLane>>,
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "present")]
+    pub acquisition: Option<crate::acquisition::AcquisitionIdentity>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -666,6 +690,8 @@ pub struct Wave {
     pub metrics: Option<crate::metrics::Reference>,
     #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "present")]
     pub schedule: Option<crate::schedule::Observation>,
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "present")]
+    pub acquisition_clock: Option<crate::acquisition::StepClock>,
 }
 pub fn eligibility(a: &Attempt, r: &RequestSettings, phase: Phase) -> Vec<String> {
     let mut errors = Vec::new();

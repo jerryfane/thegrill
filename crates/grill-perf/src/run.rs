@@ -89,6 +89,7 @@ struct Admitted {
     policy_bytes: Option<Vec<u8>>,
     policy_sha256: Option<String>,
     schedule_budget: Option<ScheduleBudget>,
+    acquisition_budget: Option<crate::acquisition::Budget>,
 }
 
 #[derive(Serialize)]
@@ -122,6 +123,10 @@ pub struct PreflightReport<'a> {
     schedule: Option<Vec<crate::schedule::Scenario>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     schedule_budget: Option<ScheduleBudget>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    acquisition_budget: Option<crate::acquisition::Budget>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    acquisition: Option<crate::acquisition::Protocol>,
 }
 
 pub fn preflight(o: &CommonArgs) -> Result<PreflightReport<'_>> {
@@ -152,6 +157,8 @@ pub fn preflight(o: &CommonArgs) -> Result<PreflightReport<'_>> {
         planned_waves: admitted.waves.len(),
         schedule: admitted.workload.schedule,
         schedule_budget: admitted.schedule_budget,
+        acquisition_budget: admitted.acquisition_budget,
+        acquisition: admitted.workload.acquisition,
     })
 }
 
@@ -190,9 +197,6 @@ fn admit(o: &CommonArgs) -> Result<Admitted> {
     workload.validate()?;
     if matches!(workload.version, 2 | 5) && o.policy.is_some() {
         return Err("conversation steps have descriptive per-step semantics, not an advanced policy contract".into());
-    }
-    if workload.version == 4 && o.policy.is_some() {
-        return Err("schedule policy gates require policy2 named-lane integration; policy1 is forbidden".into());
     }
     if o.model.is_empty() || o.model.len() > 4096 || o.model.chars().any(char::is_control) {
         return Err("model must be a nonempty selector within 4096 bytes".into());
@@ -300,13 +304,21 @@ fn admit(o: &CommonArgs) -> Result<Admitted> {
         )
         .map_err(|e| e.as_str().to_owned())?;
     }
+    let acquisition_budget = if workload.version == 6 {
+        crate::acquisition::preflight(&context)?;
+        let plan_bound = json_size(&(&workload, &waves))?
+            .checked_add(json_size(&(&o.model, url.as_str(), &deployment, &o.auth_env, &metrics))?)
+            .and_then(|n| n.checked_add(64 * 1024)).ok_or("acquisition plan size overflow")?;
+        if plan_bound > 8 * 1024 * 1024 { return Err("acquisition exceeds native plan bound".into()); }
+        Some(crate::acquisition::budget(&workload)?)
+    } else { None };
     // Seed magnitude peaks at a corner of the trial/lane range and index 1023 is
     // the widest index, but lane 0 renders one digit narrower than lanes 10..63 in
     // each of the cache salt and the text salt, so an interior body can exceed a
     // corner sample by two bytes. Bound with that slack rather than serializing
     // every repeated prompt.
     // Identical output controls give warmup the same encoded bound as measured.
-    for cell in &workload.cells {
+    for cell in workload.cells.iter().filter(|_| workload.version != 6) {
         for phase in [Phase::Measured, Phase::Warmup] {
             if phase == Phase::Warmup
                 && (cell.warmup_trials == 0
@@ -324,6 +336,7 @@ fn admit(o: &CommonArgs) -> Result<Admitted> {
                     trial,
                     concurrency: cell.concurrency,
                     lanes: None,
+                    acquisition: None,
                 };
                 let body = wire::request_body(&context, &bound, lane)?;
                 if body.len() + 2 > REQUEST_CAP {
@@ -353,6 +366,7 @@ fn admit(o: &CommonArgs) -> Result<Admitted> {
         policy_sha256: policy_bytes.as_deref().map(evidence::digest),
         policy_bytes,
         schedule_budget,
+        acquisition_budget,
     })
 }
 
@@ -394,7 +408,7 @@ fn execute_inner(o: &Options, deadline: Option<Instant>) -> Result<Summary> {
         .then(|| "declared-vllm-prefix-cache".into());
     let pool = admitted.waves.iter().map(|s| s.concurrency as usize).max().unwrap_or(1);
     let plan = Plan {
-        version: if matches!(admitted.workload.version, 4 | 5) { 4 } else { 3 },
+        version: if admitted.workload.version == 6 { 5 } else if matches!(admitted.workload.version, 4 | 5) { 4 } else { 3 },
         metric_contract: Some(METRIC_CONTRACT.into()),
         kind: "performance-run-v1".into(),
         tool_version: env!("CARGO_PKG_VERSION").into(),
@@ -439,7 +453,7 @@ fn execute_inner(o: &Options, deadline: Option<Instant>) -> Result<Summary> {
 pub fn resume(root: &std::path::Path, json: bool) -> Result<Summary> {
     let _owner = lifecycle::ownership(root)?;
     let mut loaded = evidence::load(root)?;
-    if matches!(loaded.plan.workload.version, 2 | 5) {
+    if matches!(loaded.plan.workload.version, 2 | 5 | 6) {
         return Err("bounded conversation sequences cannot resume; retain the partial sequence and start a new explicitly budgeted capture".into());
     }
     if !matches!(loaded.plan.version, 2 | 3 | 4) {
@@ -534,6 +548,12 @@ fn collect(
         let mut signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()).map_err(|_| "cannot subscribe to interrupt signal")?;
         let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).map_err(|_| "cannot subscribe to termination signal")?;
         let mut sequence = crate::sequence::State::default();
+        let capture_origin = Instant::now();
+        let deadline = if plan.version == 5 {
+            let allowance = crate::acquisition::budget(&plan.workload)?.wall_time_ceiling_us;
+            let acquisition_deadline = capture_origin.checked_add(Duration::from_micros(allowance)).ok_or("acquisition deadline overflow")?;
+            Some(deadline.map_or(acquisition_deadline, |d| d.min(acquisition_deadline)))
+        } else { deadline };
         let body_context = wire::BodyContext::from(plan);
         for spec in &plan.waves[first_wave..] {
             if interrupted() { summary.status = "interrupted".into(); break; }
@@ -547,9 +567,17 @@ fn collect(
             };
             if lifecycle::requested(&session_dir)? { summary.status = "paused".into(); break; }
             let preparation = Instant::now();
-            let requests: Vec<_> = (0..spec.concurrency).map(|lane| sequence.request(&body_context, spec, lane)).collect::<Result<_>>()?;
+            let requests: Vec<_> = match (0..spec.concurrency).map(|lane| sequence.request(&body_context, spec, lane)).collect::<Result<_>>() {
+                Ok(requests) => requests,
+                Err(detail) if plan.version == 5 => {
+                    evidence::publish(root, "acquisition-failure.json", &crate::acquisition::AdmissionFailure { version: 1, wave: spec.clone(), detail })?;
+                    summary.status = "local-failure".into();
+                    break;
+                }
+                Err(detail) => return Err(detail),
+            };
             let hashes = requests.iter().map(|r| evidence::digest(r.as_bytes())).collect();
-            let reservation = Reservation { version: if plan.version == 4 { 2 } else { 1 }, plan_sha256: plan_hash.into(), wave: spec.clone(), requests, request_sha256: hashes };
+            let reservation = Reservation { version: if matches!(plan.version, 4 | 5) { 2 } else { 1 }, plan_sha256: plan_hash.into(), wave: spec.clone(), requests, request_sha256: hashes };
             if interrupted() { summary.status = "interrupted".into(); break; }
             if deadline.is_some_and(|deadline| Instant::now() >= deadline) { summary.status = "budget-exhausted".into(); break; }
             let reservation_start = Instant::now();
@@ -602,6 +630,15 @@ fn collect(
                 (settled, None)
             };
             let measured_duration_us = wire::us(origin);
+            let acquisition_clock = if plan.version == 5 {
+                let started_offset_us = metrics::offset_us(capture_origin, origin)?;
+                Some(crate::acquisition::StepClock {
+                    clock_id: plan_hash.into(), kind: crate::acquisition::ClockKind::StdInstantMonotonic,
+                    units: crate::acquisition::ClockUnits::Microseconds,
+                    started_offset_us,
+                    settled_offset_us: started_offset_us.checked_add(crate::acquisition::settlement(settled.iter().map(|a| &a.attempt))?).ok_or("acquisition clock overflow")?,
+                })
+            } else { None };
             let metrics = match (&plan.metrics, &metrics_client, before, measured_origin_unix_ms, telemetry_start) {
                 (Some(config), Some(client), Some(before), Some(measured_origin_unix_ms), Some(telemetry_origin)) => {
                     let after_start = Instant::now();
@@ -632,7 +669,7 @@ fn collect(
                 }
                 a.response_sha256 = evidence::digest(&collected.body);
                 a.sequence = sequence.observe(plan, spec, &a, &collected.body)?;
-                a.eligibility_errors = eligibility(&a, &settings[a.lane as usize], spec.phase);
+                a.eligibility_errors = eligibility(&a, &settings[a.lane as usize], crate::acquisition::eligibility_phase(&plan.workload, spec.phase));
                 evidence::write(&dir.join(format!("response-{:04}.bin", a.lane)), &collected.body)?;
                 attempts.push(a);
             }
@@ -645,7 +682,7 @@ fn collect(
                 Some(crate::schedule::observation(spec, &attempts, &reasons, schedule_fatal, measured_duration_us)?)
             } else { None };
             let (eligible, tokens, rate) = crate::schedule::throughput(&attempts, elapsed_us, schedule.as_ref());
-            let wave = Wave { version: if plan.version == 4 { 2 } else { 1 }, plan_sha256: plan_hash.into(), reservation_sha256, spec: spec.clone(), attempts, elapsed_us, dispatch_spread_us, preparation_us, reservation_publication_us, body_publication_us: wire::us(publication), completion_tokens: tokens, achieved_completion_tokens_per_second: rate, eligible, metrics, schedule };
+            let wave = Wave { version: if matches!(plan.version, 4 | 5) { 2 } else { 1 }, plan_sha256: plan_hash.into(), reservation_sha256, spec: spec.clone(), attempts, elapsed_us, dispatch_spread_us, preparation_us, reservation_publication_us, body_publication_us: wire::us(publication), completion_tokens: tokens, achieved_completion_tokens_per_second: rate, eligible, metrics, schedule, acquisition_clock };
             evidence::publish(&dir, "wave.json", &wave)?;
             summary.wave_publication_us += wire::us(publication);
             summary.wave_preparation_us += preparation_us;

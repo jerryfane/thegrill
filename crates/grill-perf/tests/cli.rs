@@ -3840,3 +3840,6 @@ mod preflight_tests;
 mod phase_output_tests;
 #[path = "support/schedules.rs"]
 mod schedule_tests;
+
+#[path = "support/acquisitions.rs"]
+mod acquisition_tests;
