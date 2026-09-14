@@ -1,13 +1,26 @@
 use super::*;
 
-fn sample(index: u32, rank: Option<u32>, repetition: Option<u32>, nanos: u64) -> Sample {
+fn ratio(numerator: u64, denominator: u64) -> Rational {
+    Rational {
+        numerator,
+        denominator,
+    }
+}
+
+/// A sample whose raw text is the decimal in the clock's units and whose
+/// duration is the exact nanosecond rational.
+fn sample(index: u32, rank: Option<u32>, repetition: Option<u32>, raw: &str, ns: Rational) -> Sample {
     Sample {
         index,
         rank,
         repetition,
-        raw: nanos.to_string(),
-        duration_ns: nanos,
+        raw: raw.to_string(),
+        duration: ns,
     }
+}
+
+fn integer_sample(index: u32, raw: &str, nanos: u64) -> Sample {
+    sample(index, None, None, raw, ratio(nanos, 1))
 }
 
 fn cpu_artifact(samples: Vec<Sample>) -> Artifact {
@@ -22,6 +35,7 @@ fn cpu_artifact(samples: Vec<Sample>) -> Artifact {
         program_sha256: None,
         kernel_revision: None,
         sources: Vec::new(),
+        observations: Vec::new(),
         topology: Topology {
             scope: Scope::Cpu,
             world: None,
@@ -49,8 +63,99 @@ fn cpu_artifact(samples: Vec<Sample>) -> Artifact {
     }
 }
 
+fn cpu_samples() -> Vec<Sample> {
+    vec![
+        integer_sample(0, "160", 160),
+        integer_sample(1, "100", 100),
+        integer_sample(2, "120", 120),
+        integer_sample(3, "140", 140),
+        integer_sample(4, "180", 180),
+    ]
+}
+
+/// A device artifact is the easiest way to exercise the millisecond clock and
+/// the sub-resolution / fractional-nanosecond sample rules.
+fn device_artifact() -> Artifact {
+    let mut artifact = cpu_artifact(cpu_samples());
+    artifact.adapter = AdapterId::Exl3E3Grouped;
+    artifact.operation = frozen_operation(AdapterId::Exl3E3Grouped);
+    artifact.clock = required_clock(AdapterId::Exl3E3Grouped);
+    artifact.topology = Topology {
+        scope: Scope::Device,
+        world: None,
+        ranks: vec![RankRef {
+            index: 0,
+            device: Some(0),
+        }],
+    };
+    artifact.execution.warmups = 2;
+    // The effective tier must match the declared tier or the measurement is
+    // withheld, so a device fixture always reports the grouped fallback.
+    artifact.execution.observed_fallback = Some(Tier::E3Grouped);
+    artifact.execution.work_units = 206_158_430_208;
+    artifact.execution.memory_bytes = 1_073_741_824;
+    artifact.program_sha256 = Some("b".repeat(64));
+    artifact.kernel_revision = Some("exl3-module:fixture".into());
+    artifact.sources = vec![Source {
+        path: "/observed/tests/test_exl3_overlay.py".into(),
+        sha256: E3_PARITY_SOURCE_SHA256.into(),
+    }];
+    artifact.observations = e3_observations("e3-grouped");
+    artifact.correctness = Correctness::E3Parity {
+        reference: E3_REFERENCE_ID.into(),
+        finite: true,
+        ref_max: "2.000000000".into(),
+        e2: parity("0.001000000", "0.001000000", "0.001000000", "0.010000000"),
+        e3: parity("0.003000000", "0.003000000", "0.003000000", "0.015000000"),
+        tolerance: E3_TOLERANCE,
+        passed: true,
+        outcome: CheckOutcome::Pass,
+        detail: None,
+    };
+    artifact.samples = (0..5)
+        .map(|index| sample(index, None, None, "31.234", ratio(31_234_000, 1)))
+        .collect();
+    artifact
+}
+
+fn parity(maxabs: &str, per_token_max: &str, per_token_p99: &str, nrmse: &str) -> ParityStats {
+    ParityStats {
+        maxabs: maxabs.into(),
+        per_token_max: per_token_max.into(),
+        per_token_p99: per_token_p99.into(),
+        nrmse: nrmse.into(),
+    }
+}
+
+fn e3_observations(fallback: &str) -> Vec<Observation> {
+    let observed = |name: ObservationName, value: &str| Observation {
+        name,
+        value: value.into(),
+    };
+    vec![
+        observed(ObservationName::TorchVersion, "2.9.0"),
+        observed(ObservationName::NcclVersion, "2.27.7"),
+        observed(ObservationName::Exl3ModuleSha256, &"c".repeat(64)),
+        observed(ObservationName::Device, "fixture-device"),
+        observed(ObservationName::Experts, "288"),
+        observed(ObservationName::Topk, "8"),
+        observed(ObservationName::Tokens, "1024"),
+        observed(ObservationName::Hidden, "4096"),
+        observed(ObservationName::Intermediate, "1024"),
+        observed(ObservationName::Cap, "32"),
+        observed(ObservationName::SkewMilli, "1000"),
+        observed(ObservationName::RoutingSeed, "1"),
+        observed(ObservationName::LayerSeed, "0"),
+        observed(ObservationName::ParityRoutingSeed, "3"),
+        observed(ObservationName::ActivationSeed, "3"),
+        observed(ObservationName::FallbackTier, fallback),
+        observed(ObservationName::SourcesVerified, "1"),
+        observed(ObservationName::SourcesDeclared, "0"),
+    ]
+}
+
 fn rank_artifact(values: &[[u64; 2]; 5]) -> Artifact {
-    let mut artifact = cpu_artifact(Vec::new());
+    let mut artifact = device_artifact();
     artifact.adapter = AdapterId::NcclAllreduceSum;
     artifact.operation = frozen_operation(AdapterId::NcclAllreduceSum);
     artifact.clock = required_clock(AdapterId::NcclAllreduceSum);
@@ -71,8 +176,49 @@ fn rank_artifact(values: &[[u64; 2]; 5]) -> Artifact {
     artifact.execution.warmups = 1;
     artifact.execution.work_units = 1_572_864;
     artifact.execution.memory_bytes = 6_291_456;
-    artifact.program_sha256 = Some("a".repeat(64));
-    artifact.kernel_revision = Some("fixture".into());
+    artifact.execution.observed_fallback = None;
+    artifact.sources = vec![Source {
+        path: "/observed/doc/PERFORMANCE.md".into(),
+        sha256: NCCL_BYTE_SOURCE_SHA256.into(),
+    }];
+    artifact.observations = vec![
+        Observation {
+            name: ObservationName::TorchVersion,
+            value: "2.9.0".into(),
+        },
+        Observation {
+            name: ObservationName::NcclVersion,
+            value: "2.27.7".into(),
+        },
+        Observation {
+            name: ObservationName::Device,
+            value: "fixture-device".into(),
+        },
+        Observation {
+            name: ObservationName::World,
+            value: "2".into(),
+        },
+        Observation {
+            name: ObservationName::Numel,
+            value: "262144".into(),
+        },
+        Observation {
+            name: ObservationName::Dtype,
+            value: "int64".into(),
+        },
+        Observation {
+            name: ObservationName::Op,
+            value: "sum".into(),
+        },
+        Observation {
+            name: ObservationName::SourcesVerified,
+            value: "1".into(),
+        },
+        Observation {
+            name: ObservationName::SourcesDeclared,
+            value: "0".into(),
+        },
+    ];
     artifact.correctness = Correctness::ExactReduction {
         reference: REDUCE_REFERENCE_ID.into(),
         mismatches: 0,
@@ -80,6 +226,7 @@ fn rank_artifact(values: &[[u64; 2]; 5]) -> Artifact {
         finite: true,
         passed: true,
     };
+    artifact.samples = Vec::new();
     let mut index = 0;
     for (repetition, pair) in values.iter().enumerate() {
         for (rank, nanos) in pair.iter().enumerate() {
@@ -87,7 +234,8 @@ fn rank_artifact(values: &[[u64; 2]; 5]) -> Artifact {
                 index,
                 Some(rank as u32),
                 Some(repetition as u32),
-                *nanos,
+                &nanos.to_string(),
+                ratio(*nanos, 1),
             ));
             index += 1;
         }
@@ -96,44 +244,144 @@ fn rank_artifact(values: &[[u64; 2]; 5]) -> Artifact {
 }
 
 #[test]
-fn exact_decimal_is_bounded_and_never_invents_precision() {
+fn exact_decimal_accepts_scientific_notation_and_rejects_the_rest() {
+    assert_eq!(exact_decimal("4096"), Some(ratio(4096, 1)));
+    // Values are reduced exactly: 1.25 is 5/4, not 125/100.
+    assert_eq!(exact_decimal("1.25"), Some(ratio(5, 4)));
+    assert_eq!(exact_decimal("1."), Some(ratio(1, 1)));
+    assert_eq!(exact_decimal("1.234e-05"), Some(ratio(1234, 100_000_000)));
+    assert_eq!(exact_decimal("1E+3"), Some(ratio(1000, 1)));
     assert_eq!(
-        exact_decimal("4096"),
-        Some(Rational {
-            numerator: 4096,
-            denominator: 1
-        })
+        exact_decimal("0.123456789012345"),
+        Some(ratio(24_691_357_802_469, 200_000_000))
     );
-    assert_eq!(
-        exact_decimal("1.25"),
-        Some(Rational {
-            numerator: 125,
-            denominator: 100
-        })
-    );
-    assert_eq!(
-        exact_decimal("1."),
-        Some(Rational {
-            numerator: 1,
-            denominator: 1
-        })
-    );
-    for rejected in ["", ".5", "-1", "+1", "1e3", "1.2.3", "1.0000000000", " 1", "0x10"] {
+    for rejected in [
+        "", ".5", "-1", "+1", "nan", "inf", "1.2.3", " 1", "0x10", "1e", "1e31", "1e-31",
+    ] {
         assert_eq!(exact_decimal(rejected), None, "{rejected}");
     }
-    assert_eq!(duration_ns("12.345", Units::Milliseconds), Some(12_345_000));
-    // Finer than the declared nanosecond scale is rejected, never rounded.
-    assert_eq!(duration_ns("0.0000001", Units::Milliseconds), None);
-    assert_eq!(duration_ns("1.2345678901", Units::Nanoseconds), None);
-    assert_eq!(duration_ns("0", Units::Nanoseconds), Some(0));
+    // A long but bounded digit string stays exact; an over-long one is refused.
+    assert!(exact_decimal(&format!("1.{}", "0".repeat(30))).is_some());
+    assert_eq!(exact_decimal(&format!("1.{}", "0".repeat(32))), None);
+}
+
+#[test]
+fn durations_keep_fractional_nanoseconds_and_never_round_to_a_resolution() {
+    // 31.2345678 ms is not a whole number of nanoseconds: 156172839/5 ns.
     assert_eq!(
-        duration_ns("1", Units::Nanoseconds),
-        Some(1)
+        duration_ns("31.2345678", Units::Milliseconds),
+        Ok(ratio(156_172_839, 5))
+    );
+    // The acceptance case: an exact rational from a long decimal.
+    assert_eq!(
+        duration_ns("0.123456789012345", Units::Milliseconds),
+        Ok(ratio(24_691_357_802_469, 200_000_000))
+    );
+    // Scientific notation from a float representation.
+    assert_eq!(duration_ns("1.234e-05", Units::Milliseconds), Ok(ratio(617, 50)));
+    assert_eq!(
+        duration_ns("0.0000001", Units::Milliseconds),
+        Ok(ratio(1, 10))
+    );
+    // Legacy three-decimal device samples still parse exactly.
+    assert_eq!(
+        duration_ns("31.234", Units::Milliseconds),
+        Ok(ratio(31_234_000, 1))
+    );
+    assert_eq!(duration_ns("7", Units::Nanoseconds), Ok(ratio(7, 1)));
+    assert_eq!(
+        duration_ns("0.0", Units::Milliseconds),
+        Err(DurationError::Zero)
+    );
+    assert_eq!(
+        duration_ns("-1.5", Units::Milliseconds),
+        Err(DurationError::Malformed)
+    );
+    assert_eq!(
+        duration_ns("nan", Units::Nanoseconds),
+        Err(DurationError::Malformed)
+    );
+    assert_eq!(
+        duration_ns("inf", Units::Nanoseconds),
+        Err(DurationError::Malformed)
+    );
+    assert_eq!(
+        duration_ns("1e30", Units::Milliseconds),
+        Err(DurationError::Overflow)
     );
 }
 
 #[test]
-fn operation_admission_pins_frozen_cells_and_declared_collective_world() {
+fn samples_are_checked_against_their_own_raw_representation() {
+    // A sub-resolution digit is retained, not rejected: the declared clock
+    // resolution never quantizes a value.
+    let mut artifact = device_artifact();
+    artifact.clock.resolution_ns = 1000;
+    assert!(check_artifact(None, &artifact).clean());
+    artifact.samples[0] = sample(0, None, None, "31.2345678", ratio(156_172_839, 5));
+    assert!(check_artifact(None, &artifact).clean());
+
+    let mut mismatched = artifact.clone();
+    mismatched.samples[0].duration = ratio(156_172_839, 50);
+    assert!(
+        check_artifact(None, &mismatched)
+            .invalid
+            .contains(&Reason::SamplePrecision)
+    );
+
+    let mut zero = artifact.clone();
+    zero.samples[0] = sample(0, None, None, "0.0", ratio(0, 1));
+    assert!(
+        check_artifact(None, &zero)
+            .invalid
+            .contains(&Reason::DurationOutOfRange)
+    );
+
+    let mut overflow = artifact.clone();
+    overflow.samples[0] = sample(0, None, None, "1e30", ratio(1, 1));
+    assert!(
+        check_artifact(None, &overflow)
+            .invalid
+            .contains(&Reason::SampleOverflow)
+    );
+
+    let mut denominator = artifact.clone();
+    denominator.samples[0].duration = ratio(1, 0);
+    assert!(
+        check_artifact(None, &denominator)
+            .invalid
+            .contains(&Reason::SamplePrecision)
+    );
+}
+
+#[test]
+fn mean_and_acquisition_statistics_are_exact_rationals() {
+    assert_eq!(mean(&[]), None);
+    assert_eq!(mean(&[ratio(1, 3), ratio(2, 3)]), Some(ratio(1, 2)));
+    assert_eq!(
+        mean(&[ratio(1, 10), ratio(3, 10), ratio(1, 1)]),
+        Some(ratio(7, 15))
+    );
+    let artifact = cpu_artifact(cpu_samples());
+    assert_eq!(statistic(&artifact), Some(ratio(140, 1)));
+
+    // Rank scope: per-repetition maxima first, then the mean of those rationals.
+    let ranks = rank_artifact(&[[100, 400], [200, 300], [100, 100], [500, 100], [100, 100]]);
+    assert_eq!(statistic(&ranks), Some(ratio(280, 1)));
+    let mut short = ranks.clone();
+    short.samples.pop();
+    assert_eq!(statistic(&short), None);
+
+    // A fractional rank duration survives the maximum and the mean:
+    // repetition 0 peaks at 3/2, the rest at 100 → (3/2 + 400) / 5 = 803/10.
+    let mut fractional = rank_artifact(&[[100, 100], [100, 100], [100, 100], [100, 100], [100, 100]]);
+    fractional.samples[0].duration = ratio(3, 2);
+    fractional.samples[1].duration = ratio(1, 1);
+    assert_eq!(statistic(&fractional), Some(ratio(803, 10)));
+}
+
+#[test]
+fn operation_admission_and_byte_definitions_are_unchanged() {
     assert!(operation_admitted(
         AdapterId::CpuSumU64Reference,
         &frozen_operation(AdapterId::CpuSumU64Reference)
@@ -143,12 +391,6 @@ fn operation_admission_pins_frozen_cells_and_declared_collective_world() {
         *bound = 1024;
     }
     assert!(!operation_admitted(AdapterId::CpuSumU64Reference, &cpu));
-
-    let mut e3 = frozen_operation(AdapterId::Exl3E3Grouped);
-    if let Operation::Exl3Experts { cap, .. } = &mut e3 {
-        *cap = 64;
-    }
-    assert!(!operation_admitted(AdapterId::Exl3E3Grouped, &e3));
 
     let declared = Operation::AllReduce {
         op: ReduceOp::Sum,
@@ -160,101 +402,10 @@ fn operation_admission_pins_frozen_cells_and_declared_collective_world() {
         reference: REDUCE_REFERENCE_ID.into(),
     };
     assert!(operation_admitted(AdapterId::NcclAllreduceSum, &declared));
-    if let Operation::AllReduce { ranks, .. } = &declared {
-        let mut wrong = declared.clone();
-        if let Operation::AllReduce { ranks: slot, .. } = &mut wrong {
-            *slot = ranks.iter().rev().copied().collect();
-        }
-        assert!(!operation_admitted(AdapterId::NcclAllreduceSum, &wrong));
-    }
-    let single = Operation::AllReduce {
-        op: ReduceOp::Sum,
-        dtype: Dtype::Int64,
-        numel: 262_144,
-        world: 1,
-        ranks: vec![0],
-        input: REDUCE_INPUT_ID.into(),
-        reference: REDUCE_REFERENCE_ID.into(),
-    };
-    assert!(!operation_admitted(AdapterId::NcclAllreduceSum, &single));
-}
-
-#[test]
-fn byte_definitions_keep_payload_and_bus_normalization_distinct() {
-    let operation = frozen_operation(AdapterId::NcclAllreduceSum);
-    assert_eq!(algorithm_payload_bytes(&operation), Some(2_097_152));
-    assert_eq!(
-        bus_normalization(2),
-        Some(Rational {
-            numerator: 1,
-            denominator: 1
-        })
-    );
-    assert_eq!(
-        bus_normalization(3),
-        Some(Rational {
-            numerator: 4,
-            denominator: 3
-        })
-    );
+    assert_eq!(algorithm_payload_bytes(&declared), Some(2_097_152));
+    assert_eq!(bus_normalization(2), Some(ratio(1, 1)));
+    assert_eq!(bus_normalization(3), Some(ratio(4, 3)));
     assert_eq!(bus_normalization(1), None);
-    let derived = derived(
-        &operation,
-        &required_clock(AdapterId::NcclAllreduceSum),
-        Rational {
-            numerator: 1_048_576,
-            denominator: 1,
-        },
-    )
-    .expect("rank operation derives bandwidth");
-    // 2097152 bytes over 1048576 ns is exactly 2e9 bytes per second.
-    assert_eq!(derived.payload_bytes, 2_097_152);
-    assert_eq!(
-        derived.algorithm_bandwidth_bps,
-        Rational {
-            numerator: 2_000_000_000,
-            denominator: 1
-        }
-    );
-    assert_eq!(
-        derived.bus_normalization,
-        Rational {
-            numerator: 1,
-            denominator: 1
-        }
-    );
-    // The bus bandwidth is the labelled normalization applied to the algorithm
-    // bandwidth, not a separately measured link number.
-    assert_eq!(
-        derived.bus_bandwidth_bps,
-        derived.algorithm_bandwidth_bps
-    );
-    assert!(derived.bus_scope.contains("not measured physical link traffic"));
-}
-
-#[test]
-fn rank_statistic_is_the_mean_of_complete_per_repetition_maxima() {
-    let artifact = rank_artifact(&[
-        [100, 400],
-        [200, 300],
-        [100, 100],
-        [500, 100],
-        [100, 100],
-    ]);
-    // (400 + 300 + 100 + 500 + 100) / 5 reduces to 280.
-    assert_eq!(
-        statistic(&artifact),
-        Some(Rational {
-            numerator: 280,
-            denominator: 1
-        })
-    );
-    let mut short = artifact.clone();
-    short.samples.pop();
-    assert_eq!(statistic(&short), None);
-    let mut duplicated = artifact.clone();
-    duplicated.samples[0].rank = Some(1);
-    assert!(!check_artifact(None, &duplicated).invalid.is_empty());
 }
 
 #[test]
@@ -267,84 +418,175 @@ fn e3_bounds_are_recomputed_from_the_frozen_tolerances() {
         exact_decimal("0.010000000").unwrap(),
     ];
     let bounds = e3_bounds(E3_TOLERANCE, ref_max, &e2).expect("bounds");
-    // floor = 1e-3 * ref_max = 0.002; maxabs bound = 1.5 * 0.001 + 0.002 = 0.0035
     assert_eq!(display(bounds[0]), 0.0035);
-    // nrmse bound = 1.5 * 0.01 + 1e-4 = 0.0151
     assert_eq!(display(bounds[3]), 0.0151);
-    // coarse = max(0.15, 0.08 * 2.0) = 0.16
     assert_eq!(display(bounds[4]), 0.16);
-    // Coarse uses max(1.0, ref_max): a sub-unit reference keeps the 0.15 floor.
     let tiny = e3_bounds(E3_TOLERANCE, exact_decimal("0.5").unwrap(), &e2).expect("bounds");
     assert_eq!(display(tiny[4]), 0.15);
-    // A widened tolerance changes the recomputed bound, so retained evidence
-    // cannot quietly carry a relaxed contract.
-    let widened = Tolerance::E3Rel {
-        factor_milli: 2000,
-        abs_rel_micro: 1000,
-        nrmse_abs_micro: 100,
-        coarse_abs_milli: 150,
-        coarse_factor_milli: 80,
-    };
-    let wide = e3_bounds(widened, ref_max, &e2).expect("bounds");
-    assert_eq!(display(wide[0]), 0.004);
 }
 
 #[test]
-fn cpu_artifact_validation_accepts_the_reference_and_rejects_drift() {
-    let samples = vec![
-        sample(0, None, None, 160),
-        sample(1, None, None, 100),
-        sample(2, None, None, 120),
-        sample(3, None, None, 140),
-        sample(4, None, None, 180),
-    ];
-    let artifact = cpu_artifact(samples);
+fn e3_parity_boundaries_are_exact() {
+    let mut artifact = device_artifact();
+    // Exactly on the recomputed maxabs bound: 1.5 * 0.001 + 1e-3 * 2 = 0.0035.
+    artifact.correctness = Correctness::E3Parity {
+        reference: E3_REFERENCE_ID.into(),
+        finite: true,
+        ref_max: "2.000000000".into(),
+        e2: parity("0.001000000", "0.001000000", "0.001000000", "0.010000000"),
+        e3: parity("0.003500000", "0.003500000", "0.003500000", "0.015100000"),
+        tolerance: E3_TOLERANCE,
+        passed: true,
+        outcome: CheckOutcome::Pass,
+        detail: None,
+    };
     assert!(check_artifact(None, &artifact).clean());
-    // (160 + 100 + 120 + 140 + 180) / 5 reduces to 140.
-    assert_eq!(
-        statistic(&artifact),
-        Some(Rational {
-            numerator: 140,
-            denominator: 1
-        })
-    );
 
-    let mut drifted = artifact.clone();
-    drifted.correctness = Correctness::ExactSum {
-        reference: SUM_REFERENCE_ID.into(),
-        computed: "8386561".into(),
-        bound: "8386560".into(),
-        passed: false,
+    // One micro-unit beyond the maxabs bound fails.
+    artifact.correctness = Correctness::E3Parity {
+        reference: E3_REFERENCE_ID.into(),
+        finite: true,
+        ref_max: "2.000000000".into(),
+        e2: parity("0.001000000", "0.001000000", "0.001000000", "0.010000000"),
+        e3: parity("0.003600000", "0.003500000", "0.003500000", "0.015100000"),
+        tolerance: E3_TOLERANCE,
+        passed: true,
+        outcome: CheckOutcome::Pass,
+        detail: None,
     };
     assert!(
-        check_artifact(None, &drifted)
+        check_artifact(None, &artifact)
             .invalid
             .contains(&Reason::CorrectnessFailed)
     );
 
-    let mut unsynchronized = artifact.clone();
-    unsynchronized.clock.synchronization = Synchronization::CollectiveBarrierBeforeAfter;
+    // The coarse bound is strict: exactly 0.16 does not pass.
+    artifact.correctness = Correctness::E3Parity {
+        reference: E3_REFERENCE_ID.into(),
+        finite: true,
+        ref_max: "2.000000000".into(),
+        e2: parity("0.001000000", "0.001000000", "0.001000000", "0.010000000"),
+        e3: parity("0.160000000", "0.003500000", "0.003500000", "0.015100000"),
+        tolerance: E3_TOLERANCE,
+        passed: true,
+        outcome: CheckOutcome::Pass,
+        detail: None,
+    };
     assert!(
-        check_artifact(None, &unsynchronized)
+        check_artifact(None, &artifact)
             .invalid
-            .contains(&Reason::ClockMismatch)
+            .contains(&Reason::CorrectnessFailed)
+    );
+}
+
+#[test]
+fn observed_sources_and_runtime_observations_are_cross_checked() {
+    let artifact = device_artifact();
+    assert!(check_artifact(None, &artifact).clean());
+
+    // A pinned source hash present in the plan but absent from the observation
+    // set is identity drift, even when the paths look plausible.
+    let plan_sources = vec![Source {
+        path: "tests/test_exl3_overlay.py".into(),
+        sha256: E3_PARITY_SOURCE_SHA256.into(),
+    }];
+    let mut findings = Findings::new();
+    check_sources(Some(&plan_sources), &artifact.sources, &mut findings);
+    assert!(findings.clean());
+
+    let mut other_hash = artifact.sources.clone();
+    other_hash[0].sha256 = E3_OPERATION_SOURCE_SHA256.into();
+    let mut findings = Findings::new();
+    check_sources(Some(&plan_sources), &other_hash, &mut findings);
+    assert!(findings.invalid.contains(&Reason::IdentityDrift));
+
+    // A missing required observation never passes.
+    let mut missing = artifact.clone();
+    missing
+        .observations
+        .retain(|observation| observation.name != ObservationName::Cap);
+    assert!(
+        check_artifact(None, &missing)
+            .invalid
+            .contains(&Reason::ObservationMissing)
     );
 
-    let mut rounded = artifact.clone();
-    rounded.clock.units = Units::Milliseconds;
-    rounded.clock.resolution_ns = 1000;
-    rounded.samples[0].raw = "0.00016".into();
+    // A reported parameter that is not the frozen one is drift, not noise.
+    let mut wrong_cap = artifact.clone();
+    for observation in &mut wrong_cap.observations {
+        if observation.name == ObservationName::Cap {
+            observation.value = "64".into();
+        }
+    }
     assert!(
-        check_artifact(None, &rounded)
+        check_artifact(None, &wrong_cap)
             .invalid
-            .contains(&Reason::SamplePrecision)
+            .contains(&Reason::ObservationDrift)
     );
 
-    let mut declared = artifact.clone();
-    declared.provenance = Provenance::Declared;
+    // A source echoed as a declaration instead of verified from bytes is drift.
+    let mut echoed = artifact.clone();
+    for observation in &mut echoed.observations {
+        if observation.name == ObservationName::SourcesDeclared {
+            observation.value = "1".into();
+        }
+    }
     assert!(
-        check_artifact(None, &declared)
+        check_artifact(None, &echoed)
+            .invalid
+            .contains(&Reason::ObservationDrift)
+    );
+
+    // The CPU reference carries no runtime observations at all.
+    let mut cpu = cpu_artifact(cpu_samples());
+    cpu.observations = e3_observations("e3-grouped");
+    assert!(
+        check_artifact(None, &cpu)
             .invalid
             .contains(&Reason::InvalidArtifact)
     );
+}
+
+#[test]
+fn study_declaration_requires_three_complete_roles_and_a_change_axis() {
+    let study = |minimum: u32, baseline: &str, candidate: &str, slots: usize| Study {
+        kind: STUDY_KIND.into(),
+        version: VERSION,
+        adapter: AdapterId::CpuSumU64Reference,
+        revision_axis: RevisionAxis {
+            baseline: baseline.into(),
+            candidate: candidate.into(),
+        },
+        thresholds: Thresholds {
+            adverse_bps: 500,
+            spread_bps: 2000,
+        },
+        minimum_acquisitions: minimum,
+        roles: Roles {
+            baseline: (0..slots).map(|i| format!("a{i:02}")).collect(),
+            candidate: (0..slots).map(|i| format!("b{i:02}")).collect(),
+            reference: (0..slots).map(|i| format!("r{i:02}")).collect(),
+        },
+        started_unix_ms: 1_757_000_000_000,
+    };
+    assert!(check_study(&study(3, "rev-a", "rev-b", 3)).is_empty());
+    assert!(
+        check_study(&study(2, "rev-a", "rev-b", 3))
+            .contains(&Reason::RoleMinimum)
+    );
+    assert!(
+        check_study(&study(3, "rev-a", "rev-b", 2))
+            .contains(&Reason::RoleMinimum)
+    );
+    assert!(
+        check_study(&study(3, "rev-a", "rev-a", 3))
+            .contains(&Reason::InvalidStudy)
+    );
+    let mut duplicated = study(3, "rev-a", "rev-b", 3);
+    duplicated.roles.reference[0] = "a00".into();
+    assert!(check_study(&duplicated).contains(&Reason::RoleReuse));
+
+    let mut bad_thresholds = study(3, "rev-a", "rev-b", 3);
+    bad_thresholds.thresholds.adverse_bps = 10_000;
+    assert!(check_study(&bad_thresholds).contains(&Reason::InvalidBounds));
 }

@@ -19,10 +19,10 @@ only be maximized, and rank absolute timestamps are never subtracted across
 ranks. Synchronization is a device synchronize plus a completed collective
 barrier immediately before and after the timed collective, so the retained
 duration is a synchronized host-monotonic completion latency, explicitly not
-device-only kernel time.
+device-only kernel time. Each sample carries the integer nanosecond reading
+verbatim plus the exact rational nanosecond duration `{value, 1}`.
 
-Byte definitions (NVIDIA/nccl-tests `doc/PERFORMANCE.md`,
-sha256 2242493053a6f9d5db1c6542a8ce7740be919778645125b94eeae440efd31edf):
+Byte definitions (NVIDIA/nccl-tests `doc/PERFORMANCE.md`):
 
   * algorithmic payload bytes = numel * sizeof(dtype)   (the collector's
     `algorithm_payload_bytes`)
@@ -31,6 +31,12 @@ sha256 2242493053a6f9d5db1c6542a8ce7740be919778645125b94eeae440efd31edf):
     physical link traffic.
 
 The adapter never translates either bandwidth into a serving-speed claim.
+
+Runtime pins are observations of what this process actually saw (installed
+torch/NCCL versions, participating device names, the participant count and
+element shape it reduced, and how many declared sources it could verify from
+bytes versus echo as declarations). None of them is authenticated execution
+evidence and none is echoed from a declared implementation pin.
 
 Usage:
 
@@ -82,6 +88,72 @@ FROZEN_OPERATION = {
     "reference": REFERENCE_ID,
 }
 
+ARTIFACT_KEYS = {
+    "kind",
+    "version",
+    "adapter",
+    "revision",
+    "operation",
+    "provenance",
+    "submitted_provenance",
+    "program_sha256",
+    "kernel_revision",
+    "sources",
+    "observations",
+    "topology",
+    "clock",
+    "execution",
+    "samples",
+    "correctness",
+    "failures",
+}
+FAILURE_KINDS = {
+    "deadline-exceeded",
+    "allowance-exceeded",
+    "tier-fallback",
+    "rank-missing",
+    "incomplete-samples",
+    "correctness-failed",
+    "non-finite",
+    "adapter-error",
+}
+OBSERVATION_NAMES = {
+    "torch-version",
+    "nccl-version",
+    "exl3-module-sha256",
+    "device",
+    "experts",
+    "topk",
+    "tokens",
+    "hidden",
+    "intermediate",
+    "cap",
+    "skew-milli",
+    "routing-seed",
+    "layer-seed",
+    "parity-routing-seed",
+    "activation-seed",
+    "fallback-tier",
+    "world",
+    "numel",
+    "dtype",
+    "op",
+    "sources-verified",
+    "sources-declared",
+}
+REQUIRED_OBSERVATIONS = {
+    "torch-version",
+    "nccl-version",
+    "device",
+    "world",
+    "numel",
+    "dtype",
+    "op",
+    "sources-verified",
+    "sources-declared",
+}
+PINNED_OBSERVATIONS = {"numel": "262144", "dtype": "int64", "op": "sum"}
+
 
 def abort(message: str) -> "NoReturn":  # type: ignore[name-defined]
     print(f"{ADAPTER}: {message}", file=sys.stderr, flush=True)
@@ -96,37 +168,117 @@ def sha256_file(path: str) -> str:
     return digest.hexdigest()
 
 
-def verify_sources(plan: dict, checkout: str | None) -> list[dict]:
-    """Verify the pins this host can resolve; echo the rest as declarations.
+def sample_duration(nanoseconds: int) -> dict:
+    """Integer nanosecond readings are already exact: `value / 1`."""
+    return {"numerator": int(nanoseconds), "denominator": 1}
 
-    `program_sha256` is the one pin the collector verifies directly, because the
-    collector hashes the program it launched. A declared source path that does
-    not exist on the producing host stays a declaration and is retained
-    verbatim, never silently dropped or rewritten.
-    """
-    self_path = os.path.abspath(__file__)
-    if sha256_file(self_path) != plan.get("program_sha256"):
-        abort("this adapter does not match plan.program_sha256; re-pin instead of running it")
-    sources = plan.get("sources") or []
-    if not sources:
-        abort("plan must declare its pinned sources")
-    reported = []
-    for source in sources:
-        declared = source.get("path")
-        declared_sha = source.get("sha256")
-        if not isinstance(declared, str) or not isinstance(declared_sha, str):
-            abort("plan sources must be {path, sha256} objects")
-        resolved = None
-        if os.path.basename(declared) == os.path.basename(self_path):
-            resolved = self_path
-        elif os.path.isabs(declared) and os.path.isfile(declared):
-            resolved = declared
-        elif checkout and os.path.isfile(os.path.join(checkout, declared)):
-            resolved = os.path.join(checkout, declared)
-        if resolved is not None and sha256_file(resolved) != declared_sha:
-            abort(f"pinned source hash mismatch for {declared}")
-        reported.append({"path": declared, "sha256": declared_sha})
-    return reported
+
+def artifact_body(
+    plan: dict,
+    sources: list[dict],
+    observations: list[dict],
+    kernel_revision: str,
+    world: int,
+    samples: list[dict],
+    execution: dict,
+    correctness: dict,
+    failures: list[dict],
+) -> dict:
+    """Assemble the wire document. Pure: no device or environment access."""
+    return {
+        "kind": KIND,
+        "version": VERSION,
+        "adapter": ADAPTER,
+        "revision": plan["revision"],
+        "operation": plan["operation"],
+        "provenance": "native_observed",
+        "submitted_provenance": None,
+        "program_sha256": plan["program_sha256"],
+        "kernel_revision": kernel_revision,
+        "sources": sources,
+        "observations": observations,
+        "topology": {
+            "scope": "ranks",
+            "world": world,
+            "ranks": [{"index": rank, "device": rank} for rank in range(world)],
+        },
+        "clock": CLOCK,
+        "execution": execution,
+        "samples": samples,
+        "correctness": correctness,
+        "failures": failures,
+    }
+
+
+def validate_body(body: dict, plan: dict) -> None:
+    """Fail closed if the document would not match the collector's contract."""
+    if set(body) != ARTIFACT_KEYS:
+        abort(
+            "artifact keys differ from the collector contract: "
+            f"missing={sorted(ARTIFACT_KEYS - set(body))} extra={sorted(set(body) - ARTIFACT_KEYS)}"
+        )
+    if body["kind"] != KIND or body["version"] != VERSION or body["adapter"] != ADAPTER:
+        abort("artifact kind/version/adapter mismatch")
+    if body["revision"] != plan.get("revision"):
+        abort("artifact revision does not match the plan")
+    if body["operation"] != plan.get("operation"):
+        abort("artifact operation does not match the plan")
+    if body["clock"] != CLOCK:
+        abort("artifact clock is not the declared contract")
+    if body["program_sha256"] != plan.get("program_sha256"):
+        abort("artifact program_sha256 does not match the plan")
+    if not isinstance(body["kernel_revision"], str) or not body["kernel_revision"]:
+        abort("kernel_revision must be a nonempty observed runtime identity")
+    for source in body["sources"]:
+        if set(source) != {"path", "sha256"} or len(source["sha256"]) != 64:
+            abort("artifact source entries must be {path, sha256}")
+    names = [observation["name"] for observation in body["observations"]]
+    if set(names) != REQUIRED_OBSERVATIONS or len(names) != len(set(names)):
+        abort(f"observation set mismatch: {sorted(set(names) ^ REQUIRED_OBSERVATIONS)}")
+    for observation in body["observations"]:
+        if observation["name"] not in OBSERVATION_NAMES:
+            abort(f"observation name {observation['name']!r} is not in the closed set")
+        expected = PINNED_OBSERVATIONS.get(observation["name"])
+        if expected is not None and observation["value"] != expected:
+            abort(f"observation {observation['name']} is {observation['value']!r}, expected {expected!r}")
+    topology = body["topology"]
+    world = int(body["operation"]["world"])
+    if topology.get("scope") != "ranks" or topology.get("world") != world:
+        abort("rank topology must declare the operation's world")
+    if len(topology.get("ranks", [])) != world:
+        abort("rank topology must list every participating rank")
+    execution = body["execution"]
+    if execution["warmups"] != plan["warmups"] or execution["iterations"] != plan["iterations"]:
+        abort("execution warmups/iterations do not match the plan")
+    seen = set()
+    for position, sample in enumerate(body["samples"]):
+        if set(sample) != {"index", "rank", "repetition", "raw", "duration"}:
+            abort("sample keys differ from the collector contract")
+        if sample["index"] != position:
+            abort("sample index must be the retained position")
+        key = (sample["repetition"], sample["rank"])
+        if key in seen:
+            abort(f"duplicate rank sample {key}")
+        seen.add(key)
+        if sample["rank"] is None or not 0 <= sample["rank"] < world:
+            abort("rank sample outside the declared world")
+        if sample["repetition"] is None or not 0 <= sample["repetition"] < plan["iterations"]:
+            abort("repetition outside the declared iteration count")
+        if not isinstance(sample["raw"], str) or not sample["raw"].isdigit():
+            abort("nanosecond raw must be a plain nonnegative integer")
+        duration = sample["duration"]
+        if set(duration) != {"numerator", "denominator"}:
+            abort("sample duration must be a rational object")
+        if duration["denominator"] != 1 or duration["numerator"] != int(sample["raw"]):
+            abort("nanosecond samples must retain the exact integer duration")
+    correctness = body["correctness"]
+    if correctness.get("kind") != "exact-reduction" or correctness.get("reference") != REFERENCE_ID:
+        abort("correctness record is not the exact reduction reference")
+    if correctness.get("tolerance_elems") != 0:
+        abort("the exact integer reference has no tolerance")
+    for failure in body["failures"]:
+        if set(failure) != {"kind", "detail"} or failure["kind"] not in FAILURE_KINDS:
+            abort(f"retained failure {failure.get('kind')!r} is not in the closed set")
 
 
 def check_plan(plan: dict) -> None:
@@ -150,6 +302,8 @@ def check_plan(plan: dict) -> None:
         abort("plan clock is not the pinned rank-monotonic-ns contract")
     if not plan.get("program_sha256"):
         abort("plan must pin program_sha256 for an external adapter")
+    if not plan.get("sources"):
+        abort("plan must declare its pinned sources")
     allowance = plan.get("allowance") or {}
     for key in ("work_units", "memory_bytes", "deadline_ms"):
         if not isinstance(allowance.get(key), int) or allowance[key] <= 0:
@@ -159,6 +313,46 @@ def check_plan(plan: dict) -> None:
         abort("plan correctness reference is not the exact all-reduce sum")
     if (correctness.get("tolerance") or {}).get("kind") != "exact-int64":
         abort("plan correctness tolerance is not exact int64 equality")
+
+
+def verify_sources(plan: dict, checkout: str | None) -> tuple[list[dict], int, int]:
+    """Verify every pin this host can resolve; echo the rest as declarations.
+
+    `program_sha256` is the one pin the collector verifies directly, because the
+    collector hashes the program it launched. A declared source path that does
+    not exist on the producing host stays a declaration, is counted as one, and
+    is retained verbatim rather than silently dropped or rewritten.
+    """
+    self_path = os.path.abspath(__file__)
+    if sha256_file(self_path) != plan.get("program_sha256"):
+        abort("this adapter does not match plan.program_sha256; re-pin instead of running it")
+    observed = []
+    verified = 0
+    declared_count = 0
+    for source in plan["sources"]:
+        declared = source.get("path")
+        declared_sha = source.get("sha256")
+        if not isinstance(declared, str) or not isinstance(declared_sha, str):
+            abort("plan sources must be {path, sha256} objects")
+        resolved = None
+        if os.path.basename(declared) == os.path.basename(self_path):
+            resolved = self_path
+        elif os.path.isabs(declared) and os.path.isfile(declared):
+            resolved = declared
+        elif checkout and os.path.isfile(os.path.join(checkout, declared)):
+            resolved = os.path.join(checkout, declared)
+        if resolved is not None:
+            observed_sha = sha256_file(resolved)
+            if observed_sha != declared_sha:
+                abort(f"pinned source hash mismatch for {declared}")
+            observed.append({"path": os.path.realpath(resolved), "sha256": observed_sha})
+            verified += 1
+        else:
+            observed.append({"path": declared, "sha256": declared_sha})
+            declared_count += 1
+    if verified < 1:
+        abort("no declared source could be verified from bytes on this host")
+    return observed, verified, declared_count
 
 
 def main() -> int:
@@ -176,7 +370,7 @@ def main() -> int:
     with open(args.plan, "rb") as handle:
         plan = json.loads(handle.read())
     check_plan(plan)
-    sources = verify_sources(plan, args.checkout)
+    sources, verified, declared_count = verify_sources(plan, args.checkout)
 
     if "RANK" not in os.environ or "WORLD_SIZE" not in os.environ:
         abort("this adapter must be launched by torchrun so rank and world are explicit")
@@ -191,6 +385,11 @@ def main() -> int:
             "re-pin the plan instead of running a different topology"
         )
     started = time.monotonic()
+    rank = None
+    failures = []
+    timed_out = False
+    total_mismatches = 0
+    devices = []
 
     try:
         import torch
@@ -220,11 +419,8 @@ def main() -> int:
 
         buffer = torch.empty(numel, dtype=torch.int64, device=local)
         mismatches = 0
-        failures = []
-        samples = []
-        timed_out = False
 
-        def run_once() -> tuple[int, list[int]]:
+        def run_once() -> int:
             nonlocal mismatches
             reset(buffer)
             torch.cuda.synchronize()
@@ -234,9 +430,7 @@ def main() -> int:
             torch.cuda.synchronize()
             elapsed = time.perf_counter_ns() - origin
             distributed.barrier()
-            equal = bool(torch.equal(buffer, expected))
-            local_mismatch = 0
-            if not equal:
+            if not bool(torch.equal(buffer, expected)):
                 local_mismatch = int((buffer != expected).sum().item())
                 mismatches += local_mismatch
                 failures.append(
@@ -245,7 +439,7 @@ def main() -> int:
                         "detail": f"rank {rank} result differed in {local_mismatch} elements",
                     }
                 )
-            return elapsed, [local_mismatch]
+            return elapsed
 
         for _ in range(warmups):
             run_once()
@@ -260,18 +454,26 @@ def main() -> int:
                     }
                 )
                 break
-            elapsed, _ = run_once()
-            times.append(elapsed)
+            times.append(run_once())
 
         gathered = [None for _ in range(world)]
         distributed.gather_object(
-            {"rank": rank, "times": times, "mismatches": mismatches}, object_list=gathered if rank == 0 else None
+            {
+                "rank": rank,
+                "times": times,
+                "mismatches": mismatches,
+                "device": torch.cuda.get_device_name(local),
+            },
+            object_list=gathered if rank == 0 else None,
         )
         kernel_revision = (
             f"torch:{torch.__version__};"
-            f"nccl:{'.'.join(str(part) for part in torch.cuda.nccl.version())};"
-            f"device:{torch.cuda.get_device_name(local)}"
+            f"nccl:{'.'.join(str(part) for part in torch.cuda.nccl.version())}"
         )
+        if rank == 0:
+            devices = sorted(
+                {str(entry["device"]) for entry in gathered if entry is not None}
+            )
     except SystemExit:
         raise
     except BaseException:  # noqa: BLE001  (retain the traceback; missing ranks stay failures)
@@ -297,17 +499,21 @@ def main() -> int:
             entry = indexed.get(index_rank)
             times = entry["times"] if entry else []
             if repetition < len(times):
-                nanos = int(times[repetition])
+                nanoseconds = int(times[repetition])
                 samples.append(
                     {
-                        "index": repetition * world + index_rank,
+                        "index": len(samples),
                         "rank": index_rank,
                         "repetition": repetition,
-                        "raw": str(nanos),
-                        "duration_ns": nanos,
+                        "raw": str(nanoseconds),
+                        "duration": sample_duration(nanoseconds),
                     }
                 )
-    missing = [r for r in range(world) if indexed.get(r) is None or len(indexed[r]["times"]) != iterations]
+    missing = [
+        missing_rank
+        for missing_rank in range(world)
+        if indexed.get(missing_rank) is None or len(indexed[missing_rank]["times"]) != iterations
+    ]
     for missing_rank in missing:
         failures.append(
             {
@@ -348,24 +554,25 @@ def main() -> int:
             }
         )
 
-    artifact = {
-        "kind": KIND,
-        "version": VERSION,
-        "adapter": ADAPTER,
-        "revision": plan["revision"],
-        "operation": operation,
-        "provenance": "native_observed",
-        "submitted_provenance": None,
-        "program_sha256": plan["program_sha256"],
-        "kernel_revision": kernel_revision,
-        "sources": sources,
-        "topology": {
-            "scope": "ranks",
-            "world": world,
-            "ranks": [{"index": r, "device": r} for r in range(world)],
-        },
-        "clock": CLOCK,
-        "execution": {
+    observations = [
+        {"name": "torch-version", "value": str(torch.__version__)},
+        {"name": "nccl-version", "value": ".".join(str(part) for part in torch.cuda.nccl.version())},
+        {"name": "device", "value": ",".join(devices) if devices else "unavailable"},
+        {"name": "world", "value": str(world)},
+        {"name": "numel", "value": str(numel)},
+        {"name": "dtype", "value": str(operation["dtype"])},
+        {"name": "op", "value": str(operation["op"])},
+        {"name": "sources-verified", "value": str(verified)},
+        {"name": "sources-declared", "value": str(declared_count)},
+    ]
+    body = artifact_body(
+        plan,
+        sources,
+        observations,
+        kernel_revision,
+        world,
+        samples,
+        {
             "warmups": warmups,
             "iterations": iterations,
             "deadline_ms": deadline_ms,
@@ -375,8 +582,7 @@ def main() -> int:
             "timed_out": timed_out,
             "observed_fallback": None,
         },
-        "samples": samples,
-        "correctness": {
+        {
             "kind": "exact-reduction",
             "reference": REFERENCE_ID,
             "mismatches": int(total_mismatches),
@@ -384,14 +590,15 @@ def main() -> int:
             "finite": True,
             "passed": total_mismatches == 0,
         },
-        "failures": failures,
-    }
-    body = json.dumps(artifact, indent=2, sort_keys=False)
+        failures,
+    )
+    validate_body(body, plan)
+    encoded = json.dumps(body, indent=2, sort_keys=False)
     if args.out:
         with open(args.out, "w", encoding="utf-8") as handle:
-            handle.write(body + "\n")
+            handle.write(encoded + "\n")
     if args.stdout or not args.out:
-        sys.stdout.write(body + "\n")
+        sys.stdout.write(encoded + "\n")
         sys.stdout.flush()
     return 0
 

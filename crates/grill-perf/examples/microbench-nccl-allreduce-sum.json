@@ -3,11 +3,11 @@
   "version": 1,
   "adapter": "nccl-allreduce-sum",
   "revision": "nccl-allreduce-sum-world2-v1",
-  "program_sha256": "fedf362bde05e67b4076b3e3bf2b8b4546a5ec37a2bcdba8534d1e8859f51b46",
+  "program_sha256": "e02a724b35d9cbef5cf13c90c75f8fd6963ed043974fae867006c21f4a557aca",
   "sources": [
     {
       "path": "tools/microbench/nccl_allreduce_sum.py",
-      "sha256": "fedf362bde05e67b4076b3e3bf2b8b4546a5ec37a2bcdba8534d1e8859f51b46"
+      "sha256": "e02a724b35d9cbef5cf13c90c75f8fd6963ed043974fae867006c21f4a557aca"
     },
     {
       "path": "doc/PERFORMANCE.md",
@@ -20,7 +20,10 @@
     "dtype": "int64",
     "numel": 262144,
     "world": 2,
-    "ranks": [0, 1],
+    "ranks": [
+      0,
+      1
+    ],
     "input": "input[i]=(i%251)+rank",
     "reference": "world*(i%251)+world*(world-1)/2"
   },

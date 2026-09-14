@@ -13,7 +13,8 @@
 //! * `native_observed` — bytes produced by a program this collector launched,
 //!   or by the in-process CPU reference below. This records *observation*,
 //!   never authenticated execution: the collector cannot attest what a child
-//!   process actually did.
+//!   process actually did, and every runtime pin it retains is reported as an
+//!   unauthenticated observation rather than as provenance.
 //!
 //! Only one adapter executes inside this binary: the deterministic CPU
 //! `sum_u64` reference over the vector `0..bound`. It proves operation
@@ -25,7 +26,7 @@
 //! then.
 //!
 //! Grounding for the two shipped device adapters, pinned before
-//! implementation (hashes recorded in this file, in the plans shipped under
+//! implementation (hashes recorded in this file, in the plans under
 //! `crates/grill-perf/examples/` and in `docs/performance/KERNEL-FABRIC.md`):
 //!
 //! * `MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks` at
@@ -40,12 +41,24 @@
 //! all-reduce; it is labelled separately and is not measured physical link
 //! traffic. A kernel or collective result never sets a serving-speed claim.
 //!
-//! Clock discipline: every artifact carries exactly one clock identity, kind,
-//! unit and synchronization contract, and every duration is retained as its
-//! bounded exact decimal text plus the exact nanosecond integer converted from
-//! it. Digits finer than the declared timer resolution are rejected rather
-//! than silently rounded. Durations from different clock identities are never
-//! subtracted; for rank scope only complete per-repetition maxima are used.
+//! Clocks and samples. Every artifact carries exactly one clock identity, kind,
+//! unit, declared resolution and synchronization contract, and the plan must
+//! declare the identical contract. A retained sample is the timer's own
+//! decimal representation (`raw`) plus the exact rational nanosecond duration
+//! converted from it, including scientific notation and fractional
+//! nanoseconds. The declared clock resolution states the advertised timer
+//! class; it never rounds, quantizes or gates a retained value, and a
+//! sub-resolution digit is preserved rather than rejected. Every decision is
+//! exact rational arithmetic — there is no floating-point decision path.
+//!
+//! Study shape. A native domain comparison needs at least three complete
+//! measured acquisitions in EACH of the A, B and A2 roles, prospectively
+//! declared in a study document before any acquisition is recorded. Missing,
+//! failed or unusable acquisitions are never replaced, filtered or dropped:
+//! they withhold the comparison. Within one acquisition the statistic is the
+//! exact mean of the measured samples, or for rank scope the exact mean of the
+//! complete per-repetition maxima; roles are then compared by pooling the A/A2
+//! acquisition statistics into a reference envelope against the B envelope.
 
 use crate::envelope::{self, Direction, EnvelopeDecision, EnvelopeReason, Rational};
 use crate::evidence;
@@ -58,6 +71,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub const KIND: &str = "microbench-artifact-v1";
 pub const PLAN_KIND: &str = "microbench-plan-v1";
+pub const STUDY_KIND: &str = "microbench-study-v1";
 pub const RECEIPT_KIND: &str = "microbench-receipt-v1";
 pub const VERSION: u32 = 1;
 
@@ -65,12 +79,20 @@ pub const VERSION: u32 = 1;
 pub const OUTPUT_CAP: usize = 1024 * 1024;
 /// Bounded retained stderr for a failed operator program.
 pub const STDERR_CAP: usize = 64 * 1024;
-/// Fractional digits accepted in any retained decimal value.
-pub const DECIMALS: usize = 9;
+/// Bounded significant digits in a retained decimal value.
+pub const DECIMAL_DIGITS: usize = 32;
+/// Bounded decimal exponent magnitude in a retained scientific value.
+pub const DECIMAL_EXPONENT: u32 = 30;
 /// Largest accepted single duration (~13 days) keeps exact arithmetic bounded.
 pub const MAX_DURATION_NS: u64 = 1 << 50;
 /// Largest accepted rank count for a declared collective.
 pub const MAX_RANKS: u32 = 64;
+/// Fewest complete measured acquisitions a role may declare.
+pub const MIN_ROLE_ACQUISITIONS: u32 = 3;
+/// Most acquisitions a single role may declare.
+pub const MAX_ROLE_ACQUISITIONS: u32 = 64;
+/// Most observations a producer may retain.
+pub const MAX_OBSERVATIONS: usize = 32;
 
 /// Frozen revision of the pinned public E3 sources.
 pub const E3_SOURCE_REVISION: &str = "f906ee990596486e10ddbe381efa6f0e496f77e3";
@@ -240,12 +262,51 @@ pub enum ReduceOp {
     Sum,
 }
 
+/// Closed set of runtime observations a producer may retain. A name outside
+/// this set is rejected at parse time, and unknown names cannot smuggle a
+/// provenance claim into the artifact.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "kebab-case")]
+pub enum ObservationName {
+    TorchVersion,
+    NcclVersion,
+    Exl3ModuleSha256,
+    Device,
+    Experts,
+    Topk,
+    Tokens,
+    Hidden,
+    Intermediate,
+    Cap,
+    SkewMilli,
+    RoutingSeed,
+    LayerSeed,
+    ParityRoutingSeed,
+    ActivationSeed,
+    FallbackTier,
+    World,
+    Numel,
+    Dtype,
+    Op,
+    SourcesVerified,
+    SourcesDeclared,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Observation {
+    pub name: ObservationName,
+    pub value: String,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Clock {
     pub id: String,
     pub kind: ClockKind,
     pub units: Units,
+    /// Declared advertised timer resolution. It states the timer's class and
+    /// never rounds, quantizes or gates a retained sample.
     pub resolution_ns: u64,
     pub synchronization: Synchronization,
 }
@@ -399,6 +460,42 @@ pub struct Plan {
     pub acquisition: Acquisition,
 }
 
+/// The declared candidate change axis of one study.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RevisionAxis {
+    pub baseline: String,
+    pub candidate: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Roles<T> {
+    pub baseline: T,
+    pub candidate: T,
+    pub reference: T,
+}
+
+/// Prospective declaration of a complete A/B/A2 group study. It is written
+/// before any acquisition runs: every declared slot must be present and
+/// complete, and nothing outside the declaration is admitted.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Study {
+    pub kind: String,
+    pub version: u32,
+    pub adapter: AdapterId,
+    pub revision_axis: RevisionAxis,
+    pub thresholds: Thresholds,
+    /// Minimum complete measured acquisitions required in every role; never
+    /// below [`MIN_ROLE_ACQUISITIONS`].
+    pub minimum_acquisitions: u32,
+    /// Ordered acquisition-slot ids per role. Each id is one acquisition
+    /// directory named after the plan's `acquisition.id`.
+    pub roles: Roles<Vec<String>>,
+    pub started_unix_ms: u64,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RankRef {
@@ -436,10 +533,12 @@ pub struct Sample {
     pub index: u32,
     pub rank: Option<u32>,
     pub repetition: Option<u32>,
-    /// Exact retained decimal text as produced by the adapter timer.
+    /// The timer's own decimal representation, preserved verbatim, including
+    /// scientific notation and any sub-resolution digits.
     pub raw: String,
-    /// Exact nanosecond conversion of `raw`. Never a re-rounded float.
-    pub duration_ns: u64,
+    /// Exact rational nanosecond duration converted from `raw`. A fractional
+    /// nanosecond is retained as a rational, never rounded.
+    pub duration: Rational,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -520,8 +619,14 @@ pub struct Artifact {
     /// Whatever the payload claimed about itself, retained for audit.
     pub submitted_provenance: Option<Provenance>,
     pub program_sha256: Option<String>,
+    /// Observed runtime identity of the executing stack, never a declared
+    /// implementation pin echoed back.
     pub kernel_revision: Option<String>,
+    /// Sources whose bytes the producer actually read, with the hashes it
+    /// computed from them.
     pub sources: Vec<Source>,
+    /// Structured, bounded runtime facts. Observations are unauthenticated.
+    pub observations: Vec<Observation>,
     pub topology: Topology,
     pub clock: Clock,
     pub execution: Execution,
@@ -567,8 +672,13 @@ pub struct Receipt {
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum Reason {
     InvalidPlan,
+    InvalidStudy,
     InvalidArtifact,
     MissingArtifact,
+    MissingAcquisition,
+    UnexpectedAcquisition,
+    RoleMinimum,
+    WarmupCountMismatch,
     CaptureFailed,
     AdapterMismatch,
     IdentityDrift,
@@ -577,6 +687,7 @@ pub enum Reason {
     IterationCountMismatch,
     SampleGridIncomplete,
     SamplePrecision,
+    SampleOverflow,
     DurationOutOfRange,
     NonFinite,
     CorrectnessFailed,
@@ -589,6 +700,9 @@ pub enum Reason {
     RoleReuse,
     DeclaredStartsOutOfOrder,
     StatisticUnavailable,
+    ObservationMissing,
+    ObservationDrift,
+    CollectorMismatch,
     InvalidRational,
     InvalidBounds,
     ArithmeticOverflow,
@@ -608,46 +722,91 @@ fn envelope_reason(reason: EnvelopeReason) -> Reason {
     }
 }
 
-/// Bounded exact decimal-to-rational conversion. Rejects signs, exponents,
-/// empty integer parts, more than [`DECIMALS`] fractional digits and values
-/// beyond the bounded magnitude.
+/// Failure to read a retained duration.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DurationError {
+    /// Not a bounded decimal or scientific decimal.
+    Malformed,
+    /// The exact conversion does not fit the bounded rational representation.
+    Overflow,
+    /// The value is zero, which is not a usable duration for this cell.
+    Zero,
+}
+
+/// Bounded exact decimal-to-rational conversion. Accepts `digits`, `digits.digits`
+/// and a bounded `e`/`E` exponent, both plain and scientific, with neither sign
+/// nor separator. Rejects `nan`, `inf`, signs, empty integer parts, more than
+/// [`DECIMAL_DIGITS`] digits and exponents beyond [`DECIMAL_EXPONENT`].
 pub fn exact_decimal(text: &str) -> Option<Rational> {
-    if text.is_empty() || text.len() > 32 {
+    if text.is_empty() || text.len() > 64 {
         return None;
     }
-    let (whole, fraction) = match text.split_once('.') {
+    let (mantissa, exponent) = match text.split_once(['e', 'E']) {
+        Some((mantissa, exponent)) => {
+            let (sign, digits) = match exponent.strip_prefix('-') {
+                Some(digits) => (-1i64, digits),
+                None => (1i64, exponent.strip_prefix('+').unwrap_or(exponent)),
+            };
+            if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+            let magnitude: u32 = digits.parse().ok()?;
+            if magnitude > DECIMAL_EXPONENT {
+                return None;
+            }
+            (mantissa, sign * i64::from(magnitude))
+        }
+        None => (text, 0),
+    };
+    if mantissa.contains(['e', 'E', '-', '+']) {
+        return None;
+    }
+    let (whole, fraction) = match mantissa.split_once('.') {
         Some((whole, fraction)) => (whole, fraction),
-        None => (text, ""),
+        None => (mantissa, ""),
     };
     if whole.is_empty() || !whole.bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
-    if fraction.len() > DECIMALS || !fraction.bytes().all(|b| b.is_ascii_digit()) {
+    if !fraction.bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
-    let whole: u64 = whole.parse().ok()?;
-    let scale = 10u64.checked_pow(fraction.len() as u32)?;
-    let fraction: u64 = if fraction.is_empty() {
-        0
+    if whole.len() + fraction.len() > DECIMAL_DIGITS {
+        return None;
+    }
+    let digits: u128 = format!("{whole}{fraction}").parse().ok()?;
+    let mut numerator = digits;
+    let mut denominator = 10u128.pow(fraction.len() as u32);
+    if exponent >= 0 {
+        numerator = numerator.checked_mul(10u128.checked_pow(exponent as u32)?)?;
     } else {
-        fraction.parse().ok()?
-    };
-    Some(Rational {
-        numerator: whole.checked_mul(scale)?.checked_add(fraction)?,
-        denominator: scale,
-    })
+        denominator = denominator.checked_mul(10u128.checked_pow((-exponent) as u32)?)?;
+    }
+    reduce(numerator, denominator)
 }
 
 /// Exact nanosecond conversion of a retained decimal in the declared units.
-/// A value finer than one nanosecond is rejected instead of rounded.
-pub fn duration_ns(text: &str, units: Units) -> Option<u64> {
-    let value = exact_decimal(text)?;
-    let scaled = value.numerator.checked_mul(units.nanoseconds())?;
-    if value.denominator == 0 || scaled % value.denominator != 0 {
-        return None;
+/// Fractional nanoseconds are retained as an exact rational; nothing is
+/// rounded and no value is rejected for being finer than the declared
+/// resolution.
+pub fn duration_ns(text: &str, units: Units) -> std::result::Result<Rational, DurationError> {
+    let value = exact_decimal(text).ok_or(DurationError::Malformed)?;
+    if value.numerator == 0 {
+        return Err(DurationError::Zero);
     }
-    let nanoseconds = scaled / value.denominator;
-    (nanoseconds <= MAX_DURATION_NS).then_some(nanoseconds)
+    let scaled = u128::from(value.numerator)
+        .checked_mul(u128::from(units.nanoseconds()))
+        .ok_or(DurationError::Overflow)?;
+    let duration = reduce(scaled, u128::from(value.denominator)).ok_or(DurationError::Overflow)?;
+    if compare(duration, Rational {
+        numerator: MAX_DURATION_NS,
+        denominator: 1,
+    })
+    .is_gt()
+    {
+        return Err(DurationError::Overflow);
+    }
+    Ok(duration)
 }
 
 fn gcd(mut a: u128, mut b: u128) -> u128 {
@@ -702,6 +861,23 @@ fn display(value: Rational) -> f64 {
     value.numerator as f64 / value.denominator as f64
 }
 
+fn mean(values: &[Rational]) -> Option<Rational> {
+    if values.is_empty() || values.iter().any(|value| value.denominator == 0) {
+        return None;
+    }
+    let mut total = Rational {
+        numerator: 0,
+        denominator: 1,
+    };
+    for value in values {
+        total = add(total, *value)?;
+    }
+    reduce(
+        u128::from(total.numerator),
+        u128::from(total.denominator) * values.len() as u128,
+    )
+}
+
 fn sha256(text: &str) -> bool {
     text.len() == 64
         && text
@@ -715,6 +891,10 @@ fn identifier(text: &str) -> bool {
         && text
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.')
+}
+
+fn printable(text: &str, max: usize) -> bool {
+    !text.is_empty() && text.len() <= max && !text.chars().any(char::is_control)
 }
 
 fn unix_ms() -> Result<u64> {
@@ -807,6 +987,9 @@ pub fn required_clock(adapter: AdapterId) -> Clock {
             id: "cuda-event-ms".into(),
             kind: ClockKind::DeviceEvent,
             units: Units::Milliseconds,
+            // Declared microsecond-class device event timer. The adapter
+            // retains the timer's own decimal expansion, so a sub-microsecond
+            // digit is preserved rather than rounded to this class.
             resolution_ns: 1000,
             synchronization: Synchronization::DeviceEventTimingAfterSynchronize,
         },
@@ -850,9 +1033,136 @@ pub fn frozen_iterations(adapter: AdapterId) -> u32 {
     }
 }
 
-fn reference_sum(bound: u32) -> u64 {
-    let n = u64::from(bound);
-    n * (n - 1) / 2
+/// Required observation names, and the pinned values Grill re-checks against
+/// the frozen operation. A producer that reports a number it did not use is
+/// caught here; a producer that reports nothing required is rejected.
+fn observations_admitted(
+    adapter: AdapterId,
+    operation: &Operation,
+    observations: &[Observation],
+) -> Vec<Reason> {
+    let mut reasons = Vec::new();
+    if observations.len() > MAX_OBSERVATIONS {
+        push(&mut reasons, Reason::InvalidArtifact);
+        return reasons;
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for observation in observations {
+        if !seen.insert(observation.name) {
+            push(&mut reasons, Reason::InvalidArtifact);
+        }
+        if !printable(&observation.value, 256) {
+            push(&mut reasons, Reason::InvalidArtifact);
+        }
+    }
+    let value = |name: ObservationName| {
+        observations
+            .iter()
+            .find(|observation| observation.name == name)
+            .map(|observation| observation.value.as_str())
+    };
+    let pinned = |name: ObservationName, expected: &str, reasons: &mut Vec<Reason>| match value(name) {
+        Some(observed) if observed == expected => (),
+        Some(_) => push(reasons, Reason::ObservationDrift),
+        None => push(reasons, Reason::ObservationMissing),
+    };
+    let numeric = |name: ObservationName, expected: u64, reasons: &mut Vec<Reason>| {
+        match value(name).and_then(|observed| observed.parse::<u64>().ok()) {
+            Some(observed) if observed == expected => (),
+            Some(_) => push(reasons, Reason::ObservationDrift),
+            None => push(reasons, Reason::ObservationMissing),
+        }
+    };
+    let present = |name: ObservationName, reasons: &mut Vec<Reason>| match value(name) {
+        Some(observed) if printable(observed, 256) => (),
+        _ => push(reasons, Reason::ObservationMissing),
+    };
+    match (adapter, operation) {
+        (AdapterId::CpuSumU64Reference, _) => {
+            if !observations.is_empty() {
+                push(&mut reasons, Reason::InvalidArtifact);
+            }
+        }
+        (AdapterId::Exl3E3Grouped, Operation::Exl3Experts { .. }) => {
+            present(ObservationName::TorchVersion, &mut reasons);
+            present(ObservationName::NcclVersion, &mut reasons);
+            present(ObservationName::Device, &mut reasons);
+            match value(ObservationName::Exl3ModuleSha256) {
+                Some(observed) if sha256(observed) => (),
+                Some(_) => push(&mut reasons, Reason::ObservationDrift),
+                None => push(&mut reasons, Reason::ObservationMissing),
+            }
+            numeric(ObservationName::Experts, 288, &mut reasons);
+            numeric(ObservationName::Hidden, 4096, &mut reasons);
+            numeric(ObservationName::Intermediate, 1024, &mut reasons);
+            numeric(ObservationName::Tokens, 1024, &mut reasons);
+            numeric(ObservationName::Topk, 8, &mut reasons);
+            numeric(ObservationName::Cap, 32, &mut reasons);
+            numeric(ObservationName::SkewMilli, 1000, &mut reasons);
+            numeric(ObservationName::LayerSeed, 0, &mut reasons);
+            numeric(ObservationName::RoutingSeed, 1, &mut reasons);
+            numeric(ObservationName::ParityRoutingSeed, 3, &mut reasons);
+            numeric(ObservationName::ActivationSeed, 3, &mut reasons);
+            pinned(ObservationName::FallbackTier, "e3-grouped", &mut reasons);
+            let verified =
+                observed_count(observations, &mut reasons, ObservationName::SourcesVerified);
+            let declared =
+                observed_count(observations, &mut reasons, ObservationName::SourcesDeclared);
+            if let (Some(verified), Some(declared)) = (verified, declared) {
+                // Every pinned source of this adapter lives in the pinned
+                // checkout, so it must be verified from bytes read on the
+                // producing host rather than echoed as a declaration.
+                if verified == 0 {
+                    push(&mut reasons, Reason::ObservationMissing);
+                }
+                if declared != 0 {
+                    push(&mut reasons, Reason::ObservationDrift);
+                }
+            }
+        }
+        (AdapterId::NcclAllreduceSum, Operation::AllReduce { world, .. }) => {
+            present(ObservationName::TorchVersion, &mut reasons);
+            present(ObservationName::NcclVersion, &mut reasons);
+            present(ObservationName::Device, &mut reasons);
+            numeric(ObservationName::World, u64::from(*world), &mut reasons);
+            numeric(ObservationName::Numel, 262_144, &mut reasons);
+            pinned(ObservationName::Dtype, "int64", &mut reasons);
+            pinned(ObservationName::Op, "sum", &mut reasons);
+            match observed_count(observations, &mut reasons, ObservationName::SourcesVerified) {
+                // The collective adapter can always verify its own script; a
+                // reference document it cannot resolve stays declared.
+                Some(0) | None => push(&mut reasons, Reason::ObservationMissing),
+                Some(_) => (),
+            }
+            observed_count(observations, &mut reasons, ObservationName::SourcesDeclared);
+        }
+        _ => push(&mut reasons, Reason::IdentityDrift),
+    }
+    reasons
+}
+
+/// Read a required counting observation. A missing or unparsable count is a
+/// missing observation, never a zero.
+fn observed_count(
+    observations: &[Observation],
+    reasons: &mut Vec<Reason>,
+    name: ObservationName,
+) -> Option<u64> {
+    match observed(observations, name).and_then(|value| value.parse::<u64>().ok()) {
+        Some(count) => Some(count),
+        None => {
+            push(reasons, Reason::ObservationMissing);
+            None
+        }
+    }
+}
+
+/// Read one retained observation by name.
+pub fn observed(observations: &[Observation], name: ObservationName) -> Option<&str> {
+    observations
+        .iter()
+        .find(|observation| observation.name == name)
+        .map(|observation| observation.value.as_str())
 }
 
 /// Exact payload bytes for the operation: `numel * sizeof(dtype)`. This is the
@@ -979,9 +1289,10 @@ pub fn check_plan(plan: &Plan) -> Vec<Reason> {
     if plan.correctness != frozen_correctness(plan.adapter) {
         push(&mut reasons, Reason::IdentityDrift);
     }
-    if plan.warmups != frozen_warmups(plan.adapter)
-        || plan.iterations != frozen_iterations(plan.adapter)
-    {
+    if plan.warmups != frozen_warmups(plan.adapter) {
+        push(&mut reasons, Reason::WarmupCountMismatch);
+    }
+    if plan.iterations != frozen_iterations(plan.adapter) {
         push(&mut reasons, Reason::IterationCountMismatch);
     }
     if plan.allowance.work_units == 0
@@ -1020,15 +1331,15 @@ pub fn check_plan(plan: &Plan) -> Vec<Reason> {
         }
         AdapterId::Exl3E3Grouped => {
             if !plan.program_sha256.as_deref().is_some_and(sha256)
-                || !pinned(&plan.sources, E3_OPERATION_SOURCE_SHA256)
-                || !pinned(&plan.sources, E3_PARITY_SOURCE_SHA256)
+                || !plan.sources.iter().any(|source| source.sha256 == E3_OPERATION_SOURCE_SHA256)
+                || !plan.sources.iter().any(|source| source.sha256 == E3_PARITY_SOURCE_SHA256)
             {
                 push(&mut reasons, Reason::IdentityDrift);
             }
         }
         AdapterId::NcclAllreduceSum => {
             if !plan.program_sha256.as_deref().is_some_and(sha256)
-                || !pinned(&plan.sources, NCCL_BYTE_SOURCE_SHA256)
+                || !plan.sources.iter().any(|source| source.sha256 == NCCL_BYTE_SOURCE_SHA256)
             {
                 push(&mut reasons, Reason::IdentityDrift);
             }
@@ -1045,8 +1356,59 @@ pub fn check_plan(plan: &Plan) -> Vec<Reason> {
     reasons
 }
 
-fn pinned(sources: &[Source], sha: &str) -> bool {
-    sources.iter().any(|source| source.sha256 == sha)
+/// Validate the prospective A/B/A2 study declaration. Nothing here consults
+/// measured bytes: the declaration must already be complete and bounded.
+pub fn check_study(study: &Study) -> Vec<Reason> {
+    let mut reasons = Vec::new();
+    if study.kind != STUDY_KIND || study.version != VERSION {
+        push(&mut reasons, Reason::InvalidStudy);
+        return reasons;
+    }
+    if study.started_unix_ms == 0
+        || !identifier(&study.revision_axis.baseline)
+        || !identifier(&study.revision_axis.candidate)
+    {
+        push(&mut reasons, Reason::InvalidStudy);
+    }
+    if study.revision_axis.baseline == study.revision_axis.candidate {
+        // Without a declared change axis this is an A/A control, not a
+        // candidate comparison, and it cannot support a directional verdict.
+        push(&mut reasons, Reason::InvalidStudy);
+    }
+    if study.thresholds.adverse_bps > 9999 || study.thresholds.spread_bps > 1_000_000 {
+        push(&mut reasons, Reason::InvalidBounds);
+    }
+    if study.minimum_acquisitions < MIN_ROLE_ACQUISITIONS
+        || study.minimum_acquisitions > MAX_ROLE_ACQUISITIONS
+    {
+        push(&mut reasons, Reason::RoleMinimum);
+    }
+    let mut all: Vec<&String> = Vec::new();
+    for slots in [
+        &study.roles.baseline,
+        &study.roles.candidate,
+        &study.roles.reference,
+    ] {
+        if slots.len() < MIN_ROLE_ACQUISITIONS as usize
+            || slots.len() > MAX_ROLE_ACQUISITIONS as usize
+            || slots.len() < study.minimum_acquisitions as usize
+        {
+            push(&mut reasons, Reason::RoleMinimum);
+        }
+        for slot in slots {
+            if !identifier(slot) {
+                push(&mut reasons, Reason::InvalidStudy);
+            }
+            all.push(slot);
+        }
+    }
+    let mut sorted = all.clone();
+    sorted.sort();
+    sorted.dedup();
+    if sorted.len() != all.len() {
+        push(&mut reasons, Reason::RoleReuse);
+    }
+    reasons
 }
 
 /// Structural then plan-relative validation. `plan` is absent only for
@@ -1079,7 +1441,9 @@ pub fn check_artifact(plan: Option<&Plan>, artifact: &Artifact) -> Findings {
         findings.invalidate(Reason::ClockMismatch);
     }
     if !artifact.adapter.external()
-        && (artifact.program_sha256.is_some() || !artifact.sources.is_empty())
+        && (artifact.program_sha256.is_some()
+            || !artifact.sources.is_empty()
+            || !artifact.observations.is_empty())
     {
         findings.invalidate(Reason::InvalidArtifact);
     }
@@ -1089,9 +1453,18 @@ pub fn check_artifact(plan: Option<&Plan>, artifact: &Artifact) -> Findings {
     {
         findings.invalidate(Reason::IdentityDrift);
     }
-    if artifact.execution.warmups != frozen_warmups(artifact.adapter)
-        || artifact.execution.iterations != frozen_iterations(artifact.adapter)
-    {
+    for reason in observations_admitted(
+        artifact.adapter,
+        &artifact.operation,
+        &artifact.observations,
+    ) {
+        findings.invalidate(reason);
+    }
+    check_sources(None, &artifact.sources, &mut findings);
+    if artifact.execution.warmups != frozen_warmups(artifact.adapter) {
+        findings.invalidate(Reason::WarmupCountMismatch);
+    }
+    if artifact.execution.iterations != frozen_iterations(artifact.adapter) {
         findings.invalidate(Reason::IterationCountMismatch);
     }
     if artifact.execution.timed_out {
@@ -1111,11 +1484,12 @@ pub fn check_artifact(plan: Option<&Plan>, artifact: &Artifact) -> Findings {
     }
     check_grid(artifact, &mut findings);
     check_correctness(artifact, &mut findings);
-    if artifact
-        .failures
-        .iter()
-        .any(|failure| matches!(failure.kind, FailureKind::CorrectnessFailed | FailureKind::NonFinite))
-    {
+    if artifact.failures.iter().any(|failure| {
+        matches!(
+            failure.kind,
+            FailureKind::CorrectnessFailed | FailureKind::NonFinite
+        )
+    }) {
         findings.invalidate(Reason::CorrectnessFailed);
     } else if !artifact.failures.is_empty() {
         findings.withhold(Reason::RetainedFailure);
@@ -1129,11 +1503,11 @@ pub fn check_artifact(plan: Option<&Plan>, artifact: &Artifact) -> Findings {
             || plan.clock != artifact.clock
             || plan.warmups != artifact.execution.warmups
             || plan.iterations != artifact.execution.iterations
-            || plan.sources != artifact.sources
             || plan.program_sha256 != artifact.program_sha256
         {
             findings.invalidate(Reason::IdentityDrift);
         }
+        check_sources(Some(&plan.sources), &artifact.sources, &mut findings);
         if artifact.execution.work_units > plan.allowance.work_units
             || artifact.execution.memory_bytes > plan.allowance.memory_bytes
         {
@@ -1158,24 +1532,49 @@ pub fn check_artifact(plan: Option<&Plan>, artifact: &Artifact) -> Findings {
     findings
 }
 
+/// Observed sources must carry a usable path and hash; with a plan present the
+/// observed hash set must equal the pinned hash set exactly, so a producer
+/// cannot drop, add or substitute a pinned source. Paths are the paths the
+/// producer actually read and are not required to match the declared hints.
+fn check_sources(pinned: Option<&[Source]>, observed: &[Source], findings: &mut Findings) {
+    let mut seen = std::collections::BTreeSet::new();
+    for source in observed {
+        if !printable(&source.path, 4096) || !sha256(&source.sha256) {
+            findings.invalidate(Reason::InvalidArtifact);
+        }
+        if !seen.insert(source.sha256.clone()) {
+            findings.invalidate(Reason::InvalidArtifact);
+        }
+    }
+    if let Some(pinned) = pinned {
+        let mut expected: Vec<&str> = pinned.iter().map(|source| source.sha256.as_str()).collect();
+        let mut found: Vec<&str> = observed.iter().map(|source| source.sha256.as_str()).collect();
+        expected.sort_unstable();
+        found.sort_unstable();
+        if expected != found {
+            findings.invalidate(Reason::IdentityDrift);
+        }
+    }
+}
+
 fn check_grid(artifact: &Artifact, findings: &mut Findings) {
     let units = artifact.clock.units;
-    let resolution = artifact.clock.resolution_ns;
     let world = artifact.topology.world.unwrap_or(0);
     let mut seen = std::collections::BTreeSet::new();
     for (position, sample) in artifact.samples.iter().enumerate() {
-        let Some(nanoseconds) = duration_ns(&sample.raw, units) else {
+        if sample.duration.denominator == 0 {
             findings.invalidate(Reason::SamplePrecision);
             continue;
-        };
-        if nanoseconds != sample.duration_ns {
-            findings.invalidate(Reason::SamplePrecision);
         }
-        if resolution == 0 || nanoseconds % resolution != 0 {
-            findings.invalidate(Reason::SamplePrecision);
-        }
-        if nanoseconds == 0 || nanoseconds > MAX_DURATION_NS {
-            findings.invalidate(Reason::DurationOutOfRange);
+        match duration_ns(&sample.raw, units) {
+            Ok(expected) => {
+                if compare(expected, sample.duration).is_ne() {
+                    findings.invalidate(Reason::SamplePrecision);
+                }
+            }
+            Err(DurationError::Malformed) => findings.invalidate(Reason::SamplePrecision),
+            Err(DurationError::Overflow) => findings.invalidate(Reason::SampleOverflow),
+            Err(DurationError::Zero) => findings.invalidate(Reason::DurationOutOfRange),
         }
         let key = match artifact.topology.scope {
             Scope::Ranks => match (sample.repetition, sample.rank) {
@@ -1358,10 +1757,15 @@ fn e3_bounds(tolerance: Tolerance, ref_max: Rational, e2: &[Rational; 4]) -> Opt
     Some(bounds)
 }
 
+fn reference_sum(bound: u32) -> u64 {
+    let n = u64::from(bound);
+    n * (n - 1) / 2
+}
+
 /// One measured acquisition yields one exact statistic: the arithmetic mean of
 /// its measured samples, or for rank scope the mean of the complete
 /// per-repetition maxima. Never a best case, percentile or survivor subset.
-fn statistic(artifact: &Artifact) -> Option<Rational> {
+pub fn statistic(artifact: &Artifact) -> Option<Rational> {
     let values = match artifact.topology.scope {
         Scope::Ranks => {
             let world = artifact.topology.world?;
@@ -1373,13 +1777,26 @@ fn statistic(artifact: &Artifact) -> Option<Rational> {
             }
             let mut per_repetition = Vec::new();
             for repetition in 0..artifact.execution.iterations {
-                let worst = artifact
+                let mut worst: Option<Rational> = None;
+                let mut seen = 0u32;
+                for sample in artifact
                     .samples
                     .iter()
                     .filter(|sample| sample.repetition == Some(repetition))
-                    .map(|sample| sample.duration_ns)
-                    .max()?;
-                per_repetition.push(worst);
+                {
+                    if sample.duration.denominator == 0 {
+                        return None;
+                    }
+                    seen += 1;
+                    worst = Some(match worst {
+                        Some(current) => larger(current, sample.duration),
+                        None => sample.duration,
+                    });
+                }
+                if seen != world {
+                    return None;
+                }
+                per_repetition.push(worst?);
             }
             per_repetition
         }
@@ -1390,18 +1807,11 @@ fn statistic(artifact: &Artifact) -> Option<Rational> {
             artifact
                 .samples
                 .iter()
-                .map(|sample| sample.duration_ns)
+                .map(|sample| sample.duration)
                 .collect()
         }
     };
-    if values.is_empty() {
-        return None;
-    }
-    let mut total = 0u128;
-    for value in &values {
-        total = total.checked_add(u128::from(*value))?;
-    }
-    reduce(total, values.len() as u128)
+    mean(&values)
 }
 
 fn exerciser(provenance: Provenance, adapter: AdapterId) -> &'static str {
@@ -1430,11 +1840,11 @@ fn scope_sentence(provenance: Provenance, adapter: AdapterId) -> String {
             adapter.name()
         ),
         (Provenance::NativeObserved, Scope::Device) => format!(
-            "This collector launched the {} program and retained its synchronized device-event samples on the declared clock. Native observation is not authenticated execution, and a kernel result never sets a serving-speed claim; serving impact needs a separately linked serving acquisition.",
+            "This collector launched the {} program and retained its synchronized device-event samples on the declared clock. Runtime pins are unauthenticated observations, not authenticated execution, and a kernel result never sets a serving-speed claim; serving impact needs a separately linked serving acquisition.",
             adapter.name()
         ),
         (Provenance::NativeObserved, Scope::Ranks) => format!(
-            "This collector launched the {} program and retained complete per-rank samples on the declared clock. One completed world repetition is one sample; ranks are never pooled, and rank durations from the same repetition may only be maximized. Native observation is not authenticated execution, and a collective result never sets a serving-speed claim.",
+            "This collector launched the {} program and retained complete per-rank samples on the declared clock. One completed world repetition is one sample; ranks are never pooled, and rank durations from the same repetition may only be maximized. Runtime pins are unauthenticated observations, not authenticated execution, and a collective result never sets a serving-speed claim.",
             adapter.name()
         ),
     }
@@ -1501,13 +1911,17 @@ fn cpu_reference(plan: &Plan, bound: u32) -> Result<Artifact> {
                 ),
             });
         }
+        let nanos = u64::try_from(elapsed.as_nanos())
+            .map_err(|_| "reference duration does not fit nanoseconds".to_string())?;
         samples.push(Sample {
             index,
             rank: None,
             repetition: None,
-            raw: elapsed.as_nanos().to_string(),
-            duration_ns: u64::try_from(elapsed.as_nanos())
-                .map_err(|_| "reference duration does not fit nanoseconds".to_string())?,
+            raw: nanos.to_string(),
+            duration: Rational {
+                numerator: nanos,
+                denominator: 1,
+            },
         });
     }
     Ok(Artifact {
@@ -1521,6 +1935,7 @@ fn cpu_reference(plan: &Plan, bound: u32) -> Result<Artifact> {
         program_sha256: None,
         kernel_revision: None,
         sources: Vec::new(),
+        observations: Vec::new(),
         topology: Topology {
             scope: Scope::Cpu,
             world: None,
@@ -1729,6 +2144,7 @@ pub struct Inspection {
     pub program_sha256: Option<String>,
     pub kernel_revision: Option<String>,
     pub sources: Vec<Source>,
+    pub observations: Vec<Observation>,
     pub topology: Topology,
     pub clock: Clock,
     pub execution: Execution,
@@ -1764,37 +2180,67 @@ impl Inspection {
     }
 }
 
-#[derive(Clone, Serialize)]
-pub struct Identity {
-    pub plan_sha256: String,
-    pub artifact_sha256: String,
-    pub collector_sha256: Option<String>,
-    pub program_sha256: Option<String>,
-    pub revision: String,
-    pub acquisition: Acquisition,
-}
-
-#[derive(Clone, Serialize)]
-pub struct Role {
-    pub identity: Option<Identity>,
+/// One acquisition inside a role, as retained evidence.
+#[derive(Serialize)]
+pub struct AcquisitionView {
+    pub slot: String,
+    pub plan_sha256: Option<String>,
+    pub artifact_sha256: Option<String>,
     pub provenance: Option<Provenance>,
-    pub exerciser: &'static str,
+    pub revision: Option<String>,
     pub samples: usize,
     pub statistic: Option<Rational>,
     pub statistic_display_ns: Option<f64>,
-    pub eligible: bool,
     pub invalid: Vec<Reason>,
     pub unavailable: Vec<Reason>,
-    /// Never serialized: the validated plan feeds pin comparison only.
     #[serde(skip)]
     plan: Option<Plan>,
+    #[serde(skip)]
+    collector_sha256: Option<String>,
+}
+
+impl AcquisitionView {
+    fn missing(slot: &str, reason: Reason) -> Self {
+        Self {
+            slot: slot.to_string(),
+            plan_sha256: None,
+            artifact_sha256: None,
+            provenance: None,
+            revision: None,
+            samples: 0,
+            statistic: None,
+            statistic_display_ns: None,
+            invalid: Vec::new(),
+            unavailable: vec![reason],
+            plan: None,
+            collector_sha256: None,
+        }
+    }
+
+    fn complete(&self) -> bool {
+        self.invalid.is_empty() && self.unavailable.is_empty() && self.statistic.is_some()
+    }
 }
 
 #[derive(Serialize)]
-pub struct Roles {
-    pub baseline: Role,
-    pub candidate: Role,
-    pub reference: Role,
+pub struct RoleGroup {
+    pub revision: Option<String>,
+    pub declared: usize,
+    pub present: usize,
+    pub complete: usize,
+    pub eligible: bool,
+    pub range: Option<[Rational; 2]>,
+    pub acquisitions: Vec<AcquisitionView>,
+}
+
+#[derive(Serialize)]
+pub struct StudySummary {
+    pub adapter: AdapterId,
+    pub minimum_acquisitions: u32,
+    pub started_unix_ms: u64,
+    pub declared_acquisitions: u32,
+    pub present_acquisitions: u32,
+    pub complete_acquisitions: u32,
 }
 
 #[derive(Serialize)]
@@ -1806,34 +2252,25 @@ pub struct Decision {
     pub statistic_definition: &'static str,
     pub direction: &'static str,
     pub axis: &'static str,
+    pub axis_baseline: Option<String>,
+    pub axis_candidate: Option<String>,
     pub decision: Outcome,
     pub adverse_bounds: Option<[f64; 2]>,
     pub thresholds: Option<Thresholds>,
-    pub roles: Roles,
+    pub study_sha256: Option<String>,
+    pub study: Option<StudySummary>,
+    pub roles: Roles<RoleGroup>,
+    /// Pooled A/A2 reference envelope.
     pub reference_range: Option<[Rational; 2]>,
     pub candidate_range: Option<[Rational; 2]>,
+    pub collector_sha256: Option<String>,
+    pub evaluator_sha256: Option<String>,
     pub reason_codes: Vec<Reason>,
 }
 
 impl Decision {
     pub fn exit(&self) -> u8 {
         self.decision.exit()
-    }
-}
-
-fn unavailable_role(reason: Reason, exerciser: &'static str) -> Role {
-    Role {
-        identity: None,
-        provenance: None,
-        exerciser,
-        samples: 0,
-        statistic: None,
-        statistic_display_ns: None,
-        eligible: false,
-        invalid: Vec::new(),
-        unavailable: vec![reason],
-        references: Vec::new(),
-        plan: None,
     }
 }
 
@@ -1889,10 +2326,16 @@ pub struct InspectOptions {
 
 #[derive(clap::Args)]
 pub struct CompareOptions {
+    /// Prospective A/B/A2 study declaration.
+    #[arg(long)]
+    pub study: PathBuf,
+    /// Role directory holding one acquisition directory per declared slot.
+    #[arg(long)]
     pub baseline: PathBuf,
+    #[arg(long)]
     pub candidate: PathBuf,
     #[arg(long)]
-    pub reference: Option<PathBuf>,
+    pub reference: PathBuf,
     #[arg(long)]
     pub json: bool,
 }
@@ -2374,6 +2817,7 @@ fn inspection_of(
         program_sha256: artifact.program_sha256.clone(),
         kernel_revision: artifact.kernel_revision.clone(),
         sources: artifact.sources.clone(),
+        observations: artifact.observations.clone(),
         topology: artifact.topology.clone(),
         clock: artifact.clock.clone(),
         execution: artifact.execution.clone(),
@@ -2390,7 +2834,7 @@ fn inspection_of(
     }
 }
 
-fn load_role(path: &Path, missing: Reason) -> Role {
+fn load_view(slot: &str, path: &Path) -> AcquisitionView {
     match load_dir(path) {
         Ok(loaded) => {
             let eligible = loaded.findings.clean();
@@ -2399,40 +2843,115 @@ fn load_role(path: &Path, missing: Reason) -> Role {
             } else {
                 None
             };
-            Role {
-                identity: Some(Identity {
-                    plan_sha256: loaded.plan_sha256,
-                    artifact_sha256: loaded.artifact_sha256,
-                    collector_sha256: loaded
-                        .receipt
-                        .as_ref()
-                        .map(|receipt| receipt.collector_sha256.clone()),
-                    program_sha256: loaded.artifact.program_sha256.clone(),
-                    revision: loaded.artifact.revision.clone(),
-                    acquisition: loaded.plan.acquisition.clone(),
-                }),
+            AcquisitionView {
+                slot: slot.to_string(),
+                plan_sha256: Some(loaded.plan_sha256),
+                artifact_sha256: Some(loaded.artifact_sha256),
                 provenance: Some(loaded.artifact.provenance),
-                exerciser: exerciser(loaded.artifact.provenance, loaded.artifact.adapter),
+                revision: Some(loaded.artifact.revision.clone()),
                 samples: loaded.artifact.samples.len(),
                 statistic,
                 statistic_display_ns: statistic.map(display),
-                eligible: eligible && statistic.is_some(),
                 invalid: loaded.findings.invalid,
                 unavailable: loaded.findings.unavailable,
                 plan: Some(loaded.plan),
+                collector_sha256: loaded
+                    .receipt
+                    .as_ref()
+                    .map(|receipt| receipt.collector_sha256.clone()),
             }
         }
         Err(LoadError::Invalid(reason)) => {
-            let mut role = unavailable_role(missing, "none");
-            role.invalid = vec![reason];
-            role
+            let mut view = AcquisitionView::missing(slot, Reason::MissingArtifact);
+            view.unavailable.clear();
+            view.invalid = vec![reason];
+            view
         }
-        Err(LoadError::Unavailable(_)) => unavailable_role(missing, "none"),
+        Err(LoadError::Unavailable(_)) => AcquisitionView::missing(slot, Reason::MissingAcquisition),
     }
 }
 
-/// Every pin except the declared candidate axis must match across roles. The
-/// acquisition identity itself is required to differ and be strictly ordered.
+/// Enumerate a role directory and load exactly the declared slots. Anything
+/// present but not declared is rejected: the prospective declaration is the
+/// complete membership of the role, so an unexpected acquisition can never be
+/// substituted for a declared one.
+fn load_role_group(dir: &Path, slots: &[String], revision: Option<String>) -> RoleGroup {
+    let mut group = RoleGroup {
+        revision,
+        declared: slots.len(),
+        present: 0,
+        complete: 0,
+        eligible: false,
+        range: None,
+        acquisitions: Vec::new(),
+    };
+    let entries = match role_entries(dir) {
+        Ok(entries) => entries,
+        Err(reason) => {
+            group.acquisitions = vec![AcquisitionView::missing("<role>", reason)];
+            return group;
+        }
+    };
+    let declared: std::collections::BTreeSet<&String> = slots.iter().collect();
+    for entry in &entries {
+        if !declared.contains(entry) {
+            let mut view = AcquisitionView::missing(entry, Reason::UnexpectedAcquisition);
+            view.unavailable.clear();
+            view.invalid = vec![Reason::UnexpectedAcquisition];
+            group.acquisitions.push(view);
+        }
+    }
+    for slot in slots {
+        let view = load_view(slot, &dir.join(slot));
+        group.present += usize::from(view.artifact_sha256.is_some());
+        group.complete += usize::from(view.complete());
+        group.acquisitions.push(view);
+    }
+    group.eligible = group.complete == slots.len() && slots.len() >= MIN_ROLE_ACQUISITIONS as usize;
+    if group.eligible {
+        let statistics: Vec<Rational> = group
+            .acquisitions
+            .iter()
+            .filter_map(|view| view.statistic)
+            .collect();
+        if statistics.len() == slots.len()
+            && let Ok(Some(range)) = envelope::range(&statistics)
+        {
+            group.range = Some(range);
+        } else {
+            group.eligible = false;
+        }
+    }
+    group
+}
+
+fn role_entries(dir: &Path) -> std::result::Result<Vec<String>, Reason> {
+    evidence::directory(dir).map_err(|_| Reason::MissingArtifact)?;
+    let listing = std::fs::read_dir(dir).map_err(|_| Reason::MissingArtifact)?;
+    let mut entries = Vec::new();
+    for entry in listing {
+        if entries.len() > MAX_ROLE_ACQUISITIONS as usize + 1 {
+            return Err(Reason::UnexpectedAcquisition);
+        }
+        let entry = entry.map_err(|_| Reason::MissingArtifact)?;
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| Reason::UnexpectedAcquisition)?;
+        if !entry
+            .file_type()
+            .map_err(|_| Reason::MissingArtifact)?
+            .is_dir()
+        {
+            return Err(Reason::UnexpectedAcquisition);
+        }
+        entries.push(name);
+    }
+    Ok(entries)
+}
+
+/// Every pin except the declared candidate revision axis must match across all
+/// acquisitions of a study.
 fn pins_match(a: &Plan, b: &Plan) -> bool {
     a.kind == b.kind
         && a.version == b.version
@@ -2448,83 +2967,194 @@ fn pins_match(a: &Plan, b: &Plan) -> bool {
         && a.thresholds == b.thresholds
 }
 
-pub fn compare(baseline: &Path, candidate: &Path, reference: Option<&Path>) -> Decision {
-    let mut reason_codes = Vec::new();
+/// Complete A/B/A2 group comparison. A missing, extra or unusable acquisition
+/// withholds the verdict; there is no survivor-only or one-per-role path.
+pub fn compare(options: &CompareOptions) -> Decision {
+    let study_bytes = evidence::read(&options.study, FILE_CAP).ok();
+    let study: Option<Study> = study_bytes
+        .as_deref()
+        .and_then(|bytes| serde_json::from_slice::<Study>(bytes).ok());
+    let study_sha256 = study_bytes.as_deref().map(evidence::digest);
+    let evaluator_sha256 = evidence::binary_digest().ok();
+    let mut reasons = Vec::new();
     let mut decision = Outcome::Pass;
-    let roles = [
-        load_role(baseline, Reason::MissingArtifact),
-        load_role(candidate, Reason::MissingArtifact),
-        match reference {
-            Some(path) => load_role(path, Reason::MissingReference),
-            None => unavailable_role(Reason::MissingReference, "none"),
-        },
-    ];
-    if reference.is_none() {
-        push(&mut reason_codes, Reason::MissingReference);
+    let Some(study) = study else {
+        return finish(Verdict {
+            decision: Outcome::Error,
+            reason_codes: vec![Reason::InvalidStudy],
+            study_sha256,
+            study: None,
+            groups: empty_groups(),
+            reference_range: None,
+            candidate_range: None,
+            adverse_bounds: None,
+            thresholds: None,
+            collector_sha256: None,
+            evaluator_sha256,
+            adapter: None,
+        });
+    };
+    for reason in check_study(&study) {
+        decision = Outcome::Error;
+        push(&mut reasons, reason);
     }
-    for role in &roles {
-        for reason in &role.invalid {
-            decision = Outcome::Error;
-            push(&mut reason_codes, *reason);
-        }
-        for reason in &role.unavailable {
-            decision = decision.max(Outcome::Inconclusive);
-            push(&mut reason_codes, *reason);
-        }
-    }
-    let plans: [Option<&Plan>; 3] = [
-        roles[0].plan.as_ref(),
-        roles[1].plan.as_ref(),
-        roles[2].plan.as_ref(),
-    ];
-    if let [Some(a), Some(b), Some(a2)] = plans {
-        for (left, right) in [(a, b), (a, a2), (b, a2)] {
-            if !pins_match(left, right) {
+    let groups = Roles {
+        baseline: load_role_group(
+            &options.baseline,
+            &study.roles.baseline,
+            Some(study.revision_axis.baseline.clone()),
+        ),
+        candidate: load_role_group(
+            &options.candidate,
+            &study.roles.candidate,
+            Some(study.revision_axis.candidate.clone()),
+        ),
+        reference: load_role_group(
+            &options.reference,
+            &study.roles.reference,
+            Some(study.revision_axis.baseline.clone()),
+        ),
+    };
+    let summary = StudySummary {
+        adapter: study.adapter,
+        minimum_acquisitions: study.minimum_acquisitions,
+        started_unix_ms: study.started_unix_ms,
+        declared_acquisitions: (study.roles.baseline.len()
+            + study.roles.candidate.len()
+            + study.roles.reference.len()) as u32,
+        present_acquisitions: (groups.baseline.present
+            + groups.candidate.present
+            + groups.reference.present) as u32,
+        complete_acquisitions: (groups.baseline.complete
+            + groups.candidate.complete
+            + groups.reference.complete) as u32,
+    };
+
+    // Membership, revision axis, pins, collector identity and declared order
+    // over everything actually present.
+    let mut collector: Option<String> = None;
+    let mut seen_slots = std::collections::BTreeSet::new();
+    let mut seen_artifacts = std::collections::BTreeSet::new();
+    let mut role_starts: [Vec<u64>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+    let mut reference_plan: Option<&Plan> = None;
+    for (index, group) in [&groups.baseline, &groups.candidate, &groups.reference]
+        .into_iter()
+        .enumerate()
+    {
+        for view in &group.acquisitions {
+            for reason in &view.invalid {
                 decision = Outcome::Error;
-                push(&mut reason_codes, Reason::IdentityDrift);
+                push(&mut reasons, *reason);
+            }
+            for reason in &view.unavailable {
+                decision = decision.max(Outcome::Inconclusive);
+                push(&mut reasons, *reason);
+            }
+            if !seen_slots.insert(view.slot.clone()) {
+                decision = Outcome::Error;
+                push(&mut reasons, Reason::RoleReuse);
+            }
+            if let Some(artifact_sha256) = &view.artifact_sha256
+                && !seen_artifacts.insert(artifact_sha256.clone())
+            {
+                decision = Outcome::Error;
+                push(&mut reasons, Reason::RoleReuse);
+            }
+            match (&collector, &view.collector_sha256) {
+                (Some(previous), Some(observed)) if previous != observed => {
+                    decision = Outcome::Error;
+                    push(&mut reasons, Reason::CollectorMismatch);
+                }
+                (None, Some(observed)) => collector = Some(observed.clone()),
+                _ => (),
+            }
+            let Some(plan) = &view.plan else {
+                continue;
+            };
+            if plan.acquisition.id != view.slot {
+                decision = Outcome::Error;
+                push(&mut reasons, Reason::InvalidStudy);
+            }
+            if plan.adapter != study.adapter {
+                decision = Outcome::Error;
+                push(&mut reasons, Reason::AdapterMismatch);
+            }
+            let expected_revision = if index == 1 {
+                &study.revision_axis.candidate
+            } else {
+                &study.revision_axis.baseline
+            };
+            if &plan.revision != expected_revision {
+                decision = Outcome::Error;
+                push(&mut reasons, Reason::ObservationDrift);
+            }
+            if plan.acquisition.started_unix_ms < study.started_unix_ms {
+                decision = Outcome::Error;
+                push(&mut reasons, Reason::DeclaredStartsOutOfOrder);
+            }
+            // The study re-declares the thresholds; a plan that declares
+            // different ones is a conflicting prospective declaration.
+            if plan.thresholds != Some(study.thresholds) {
+                decision = Outcome::Error;
+                push(&mut reasons, Reason::InvalidBounds);
+            }
+            role_starts[index].push(plan.acquisition.started_unix_ms);
+            match reference_plan {
+                Some(reference) if !pins_match(reference, plan) => {
+                    decision = Outcome::Error;
+                    push(&mut reasons, Reason::IdentityDrift);
+                }
+                None => reference_plan = Some(plan),
+                _ => (),
             }
         }
-        if a.acquisition.id == b.acquisition.id
-            || a.acquisition.id == a2.acquisition.id
-            || b.acquisition.id == a2.acquisition.id
-        {
+    }
+    for starts in &role_starts {
+        if starts.windows(2).any(|pair| pair[0] >= pair[1]) {
             decision = Outcome::Error;
-            push(&mut reason_codes, Reason::RoleReuse);
-        }
-        if !(a.acquisition.started_unix_ms < b.acquisition.started_unix_ms
-            && b.acquisition.started_unix_ms < a2.acquisition.started_unix_ms)
-        {
-            decision = Outcome::Error;
-            push(&mut reason_codes, Reason::DeclaredStartsOutOfOrder);
+            push(&mut reasons, Reason::DeclaredStartsOutOfOrder);
         }
     }
-    let thresholds = plans[0].and_then(|plan| plan.thresholds);
-    if thresholds.is_none() {
-        decision = decision.max(Outcome::Inconclusive);
-        push(&mut reason_codes, Reason::MissingThresholds);
+    let overlaps = |left: &[u64], right: &[u64]| {
+        left.iter()
+            .max()
+            .zip(right.iter().min())
+            .is_some_and(|(last, first)| last >= first)
+    };
+    if overlaps(&role_starts[0], &role_starts[1]) || overlaps(&role_starts[1], &role_starts[2]) {
+        decision = Outcome::Error;
+        push(&mut reasons, Reason::DeclaredStartsOutOfOrder);
     }
-    let statistics = [roles[0].statistic, roles[1].statistic, roles[2].statistic];
-    let mut adverse_bounds = None;
+
+    // The envelope is computed only from a complete, eligible membership.
     let mut reference_range = None;
     let mut candidate_range = None;
-    if decision == Outcome::Pass
-        && thresholds.is_some()
-        && let (Some(a), Some(b), Some(a2)) = (statistics[0], statistics[1], statistics[2])
-    {
-        let pooled = envelope::range(&[a, a2])
-            .and_then(|range| range.ok_or(EnvelopeReason::InvalidRational));
-        let candidate_span =
-            envelope::range(&[b]).and_then(|range| range.ok_or(EnvelopeReason::InvalidRational));
-        match (pooled, candidate_span) {
-            (Ok(pooled), Ok(candidate_span)) => {
-                reference_range = Some(pooled);
-                candidate_range = Some(candidate_span);
-                let thresholds = thresholds.unwrap();
+    let mut adverse_bounds = None;
+    if groups.baseline.eligible && groups.candidate.eligible && groups.reference.eligible {
+        let mut pooled: Vec<Rational> = Vec::new();
+        for group in [&groups.baseline, &groups.reference] {
+            pooled.extend(group.acquisitions.iter().filter_map(|view| view.statistic));
+        }
+        let candidate_values: Vec<Rational> = groups
+            .candidate
+            .acquisitions
+            .iter()
+            .filter_map(|view| view.statistic)
+            .collect();
+        match (
+            envelope::range(&pooled)
+                .and_then(|range| range.ok_or(EnvelopeReason::InvalidRational)),
+            envelope::range(&candidate_values)
+                .and_then(|range| range.ok_or(EnvelopeReason::InvalidRational)),
+        ) {
+            (Ok(pooled_range), Ok(candidate_range)) => {
+                reference_range = Some(pooled_range);
+                candidate_range = Some(candidate_range);
                 match envelope::assess(
-                    pooled,
-                    candidate_span,
-                    thresholds.adverse_bps,
-                    thresholds.spread_bps,
+                    pooled_range,
+                    candidate_range,
+                    study.thresholds.adverse_bps,
+                    study.thresholds.spread_bps,
                     Direction::LowerBetter,
                 ) {
                     Ok(assessment) => {
@@ -2547,51 +3177,124 @@ pub fn compare(baseline: &Path, candidate: &Path, reference: Option<&Path>) -> D
                             Reason::ArithmeticOverflow | Reason::InvalidRational => Outcome::Error,
                             _ => Outcome::Inconclusive,
                         });
-                        push(&mut reason_codes, mapped);
+                        push(&mut reasons, mapped);
                     }
                 }
             }
             (Err(reason), _) | (_, Err(reason)) => {
                 decision = Outcome::Error;
-                push(&mut reason_codes, envelope_reason(reason));
+                push(&mut reasons, envelope_reason(reason));
             }
         }
-    } else if decision == Outcome::Pass {
-        decision = Outcome::Inconclusive;
-        push(&mut reason_codes, Reason::StatisticUnavailable);
+    } else {
+        if decision == Outcome::Pass {
+            decision = Outcome::Inconclusive;
+        }
+        push(&mut reasons, Reason::MissingAcquisition);
     }
-    let adapter = plans[0].map(|plan| plan.adapter);
-    let provenance = roles[0].provenance;
+
+    finish(Verdict {
+        decision,
+        reason_codes: reasons,
+        study_sha256,
+        study: Some(summary),
+        groups,
+        reference_range,
+        candidate_range,
+        adverse_bounds,
+        thresholds: Some(study.thresholds),
+        collector_sha256: collector,
+        evaluator_sha256,
+        adapter: Some(study.adapter),
+    })
+}
+
+fn empty_groups() -> Roles<RoleGroup> {
+    let empty = || RoleGroup {
+        revision: None,
+        declared: 0,
+        present: 0,
+        complete: 0,
+        eligible: false,
+        range: None,
+        acquisitions: Vec::new(),
+    };
+    Roles {
+        baseline: empty(),
+        candidate: empty(),
+        reference: empty(),
+    }
+}
+
+/// Everything the terminal decision needs, assembled in one place.
+struct Verdict {
+    decision: Outcome,
+    reason_codes: Vec<Reason>,
+    study_sha256: Option<String>,
+    study: Option<StudySummary>,
+    groups: Roles<RoleGroup>,
+    reference_range: Option<[Rational; 2]>,
+    candidate_range: Option<[Rational; 2]>,
+    adverse_bounds: Option<[f64; 2]>,
+    thresholds: Option<Thresholds>,
+    collector_sha256: Option<String>,
+    evaluator_sha256: Option<String>,
+    adapter: Option<AdapterId>,
+}
+
+fn finish(verdict: Verdict) -> Decision {
+    let Verdict {
+        decision,
+        reason_codes,
+        study_sha256,
+        study,
+        groups,
+        reference_range,
+        candidate_range,
+        adverse_bounds,
+        thresholds,
+        collector_sha256,
+        evaluator_sha256,
+        adapter,
+    } = verdict;
+    let provenance = groups
+        .baseline
+        .acquisitions
+        .iter()
+        .find_map(|view| view.provenance);
     let scope = match (provenance, adapter) {
         (Some(Provenance::NativeObserved), Some(adapter)) => {
             scope_sentence(Provenance::NativeObserved, adapter)
         }
         (Some(Provenance::Imported), Some(adapter)) => scope_sentence(Provenance::Imported, adapter),
         (Some(Provenance::Declared), Some(adapter)) => scope_sentence(Provenance::Declared, adapter),
-        _ => "Unavailable evidence: the baseline acquisition could not be loaded, so no comparison scope exists.".into(),
+        _ => "Unavailable evidence: the study declaration or the baseline acquisitions could not be loaded, so no comparison scope exists.".into(),
     };
-    let exerciser = roles[0].exerciser;
+    let minimum = study
+        .as_ref()
+        .map_or(MIN_ROLE_ACQUISITIONS, |summary| summary.minimum_acquisitions);
     Decision {
         version: VERSION,
-        claim: "observed-microbench-comparison-not-serving-speed",
+        claim: "observed-microbench-group-comparison-not-serving-speed",
         scope: format!(
-            "{} Exerciser: {}. This is a measurement-layer observation only; kernel or collective results never establish serving-speed impact, capacity, adoption or live qualification.",
-            scope, exerciser
+            "{} At least {minimum} complete measured acquisitions are required in every A/B/A2 role; missing, extra or unusable acquisitions withhold the verdict. This is a measurement-layer observation only; kernel or collective results never establish serving-speed impact, capacity, adoption or live qualification."
         ),
         statistic: "mean-duration-ns",
-        statistic_definition: "exact arithmetic mean per acquisition; rank scope uses complete per-repetition maxima",
+        statistic_definition: "exact arithmetic mean within one acquisition (rank scope: mean of complete per-repetition maxima); roles compare acquisition statistics, and the reference envelope pools the A and A2 roles",
         direction: "lower_better",
-        axis: "adapter-revision",
+        axis: "revision",
+        axis_baseline: groups.baseline.revision.clone(),
+        axis_candidate: groups.candidate.revision.clone(),
         decision,
         adverse_bounds,
         thresholds,
-        roles: Roles {
-            baseline: roles[0].clone(),
-            candidate: roles[1].clone(),
-            reference: roles[2].clone(),
-        },
+        study_sha256,
+        study,
+        roles: groups,
         reference_range,
         candidate_range,
+        collector_sha256,
+        evaluator_sha256,
         reason_codes,
     }
 }
@@ -2608,7 +3311,10 @@ pub fn human_capture(report: &CaptureReport) -> String {
     text.push_str(&format!("  evidence: {}\n", report.out));
     text.push_str(&format!("  samples: {}", report.samples));
     if let Some(statistic) = report.statistic {
-        text.push_str(&format!("; mean {:.3} ns", display(statistic)));
+        text.push_str(&format!(
+            "; mean {}/{} ns",
+            statistic.numerator, statistic.denominator
+        ));
     }
     text.push('\n');
     for reason in &report.invalid {
@@ -2640,11 +3346,15 @@ pub fn human_inspection(inspection: &Inspection) -> String {
     ));
     if let Some(statistic) = inspection.statistic {
         text.push_str(&format!(
-            "  mean duration {:.3} ns on clock {} ({})\n",
-            display(statistic),
+            "  mean duration {}/{} ns on clock {} ({})\n",
+            statistic.numerator,
+            statistic.denominator,
             inspection.clock.id,
             inspection.clock.units.name()
         ));
+    }
+    for observation in &inspection.observations {
+        text.push_str(&format!("  observed {:?} = {}\n", observation.name, observation.value));
     }
     if let Some(derived) = &inspection.derived {
         text.push_str(&format!(
@@ -2678,23 +3388,39 @@ pub fn human_inspection(inspection: &Inspection) -> String {
 pub fn human_decision(decision: &Decision) -> String {
     let mut text = String::new();
     text.push_str(&format!(
-        "microbench comparison ({}): {:?}\n",
+        "microbench group comparison ({}): {:?}\n",
         decision.statistic, decision.decision
     ));
-    for (name, role) in [
+    if let Some(study) = &decision.study {
+        text.push_str(&format!(
+            "  study {}: {} declared acquisitions, {} present, {} complete; minimum {} per role\n",
+            study.adapter.name(),
+            study.declared_acquisitions,
+            study.present_acquisitions,
+            study.complete_acquisitions,
+            study.minimum_acquisitions
+        ));
+    }
+    for (name, group) in [
         ("baseline", &decision.roles.baseline),
         ("candidate", &decision.roles.candidate),
         ("reference", &decision.roles.reference),
     ] {
-        match role.statistic {
-            Some(statistic) => text.push_str(&format!(
-                "  {name}: {} samples, mean {:.3} ns, {}, eligible {}\n",
-                role.samples,
-                display(statistic),
-                role.exerciser,
-                role.eligible
-            )),
-            None => text.push_str(&format!("  {name}: unavailable\n")),
+        text.push_str(&format!(
+            "  {name}: revision {:?}, {}/{} complete, eligible {}\n",
+            group.revision, group.complete, group.declared, group.eligible
+        ));
+        for view in &group.acquisitions {
+            match view.statistic {
+                Some(statistic) => text.push_str(&format!(
+                    "    {}: {}/{} ns\n",
+                    view.slot, statistic.numerator, statistic.denominator
+                )),
+                None => text.push_str(&format!("    {}: unavailable\n", view.slot)),
+            }
+            for reason in view.invalid.iter().chain(&view.unavailable) {
+                text.push_str(&format!("      {reason:?}\n"));
+            }
         }
     }
     if let Some(bounds) = decision.adverse_bounds {

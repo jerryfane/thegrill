@@ -9,32 +9,29 @@ process is touched. The operation is drawn from the pinned anchor's own
 `make_layer`, `routing`, `time_fn` and `set_cap` functions; its parity check
 uses `_err_stats` and `_assert_e3_within` from the pinned tolerance file.
 
-Pinned public sources (verified by hash at run time; a mismatch aborts before
-any device work):
+Pinned public sources (verified by hash from bytes read at run time; a mismatch
+aborts before any device work):
 
   MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks
   revision f906ee990596486e10ddbe381efa6f0e496f77e3
     tests/bench_e3_microbench.py  f57e4fa6726b0110c44ce56b0b0968ba425e566ace6d89f2db3872aae13889ec
     tests/test_exl3_overlay.py    8777254d47cdbb89186ba3bd1ac2437cbebc7987e0791d36c68e7bccb3df2b35
 
-Frozen cell: apply_exl3_experts, hidden 4096, intermediate 1024, experts 288,
-topk 8, tokens 1024, layer_seed 0, routing_seed 1, parity routing seed 3,
-activation seed 3, skew 1.0, tier E3 grouped, cap 32, warmups 2, measured
-iterations 5; synthetic Zipf routing, never served routing; parity at
-production geometry asserted before any timing; every measured sample requires
-the effective tier and the last fallback to be grouped, so a silent lower-tier
-fallback is withheld rather than timed as E3.
+Every retained sample preserves the timer's own representation
+(`repr(float(value))`, including scientific notation) and the exact rational
+nanosecond duration converted from that decimal. Nothing is rounded to a whole
+nanosecond and no digit is rejected for being finer than the declared clock
+resolution: the declared resolution describes the advertised timer class, not a
+quantization of the reported value. Non-finite or negative samples cannot be
+represented as a duration, so they are retained as a failure and the grid stays
+incomplete rather than being silently repaired.
 
-Declared deviations from the anchor, both additive:
-  * the timed activation tensor is drawn from a seeded generator using the
-    declared activation seed (the anchor draws it unseeded); shape, dtype and
-    routing are unchanged;
-  * the pinned candidate change axis is the adapter revision string in the
-    plan, so comparisons here are revision-to-revision, never cell searches.
-
-Raw device-event millisecond samples are retained with three fractional
-digits (microsecond precision) and converted to exact nanoseconds; no
-sub-microsecond digit is invented.
+Every runtime pin is reported as an observation of what the process actually
+saw (installed torch/NCCL versions, the loaded exl3 module file hash, the device
+name, the parameters actually used, how many pinned sources were verified from
+bytes rather than echoed). No declared implementation pin is echoed back as
+observed kernel provenance, and none of these observations is authenticated
+execution evidence.
 
 Usage (inside a separately authorized device window only):
 
@@ -44,8 +41,6 @@ Usage (inside a separately authorized device window only):
       --program tools/microbench/exl3_e3_grouped.py \
       --authorize-device-window \
       -- --checkout /path/to/GLM-5.3-Flash-EXL3-2x-DGX-Sparks
-
-Without `--out`, the artifact body is printed to stdout for the collector.
 """
 
 from __future__ import annotations
@@ -55,6 +50,7 @@ import decimal
 import hashlib
 import importlib.util
 import json
+import math
 import os
 import sys
 import time
@@ -63,7 +59,7 @@ import traceback
 ADAPTER = "exl3-e3-grouped"
 KIND = "microbench-artifact-v1"
 VERSION = 1
-REVISION_PIN = "f906ee990596486e10ddbe381efa6f0e496f77e3"
+CLOCK_UNIT_NS = 1_000_000  # milliseconds -> nanoseconds
 
 ANCHOR = "tests/bench_e3_microbench.py"
 PARITY = "tests/test_exl3_overlay.py"
@@ -113,7 +109,94 @@ FROZEN_OPERATION = {
 
 WARMUPS = 2
 ITERATIONS = 5
-SAMPLE_DECIMALS = 3
+
+ARTIFACT_KEYS = {
+    "kind",
+    "version",
+    "adapter",
+    "revision",
+    "operation",
+    "provenance",
+    "submitted_provenance",
+    "program_sha256",
+    "kernel_revision",
+    "sources",
+    "observations",
+    "topology",
+    "clock",
+    "execution",
+    "samples",
+    "correctness",
+    "failures",
+}
+FAILURE_KINDS = {
+    "deadline-exceeded",
+    "allowance-exceeded",
+    "tier-fallback",
+    "rank-missing",
+    "incomplete-samples",
+    "correctness-failed",
+    "non-finite",
+    "adapter-error",
+}
+OBSERVATION_NAMES = {
+    "torch-version",
+    "nccl-version",
+    "exl3-module-sha256",
+    "device",
+    "experts",
+    "topk",
+    "tokens",
+    "hidden",
+    "intermediate",
+    "cap",
+    "skew-milli",
+    "routing-seed",
+    "layer-seed",
+    "parity-routing-seed",
+    "activation-seed",
+    "fallback-tier",
+    "world",
+    "numel",
+    "dtype",
+    "op",
+    "sources-verified",
+    "sources-declared",
+}
+REQUIRED_OBSERVATIONS = {
+    "torch-version",
+    "nccl-version",
+    "exl3-module-sha256",
+    "device",
+    "experts",
+    "topk",
+    "tokens",
+    "hidden",
+    "intermediate",
+    "cap",
+    "skew-milli",
+    "routing-seed",
+    "layer-seed",
+    "parity-routing-seed",
+    "activation-seed",
+    "fallback-tier",
+    "sources-verified",
+    "sources-declared",
+}
+PINNED_OBSERVATIONS = {
+    "experts": "288",
+    "topk": "8",
+    "tokens": "1024",
+    "hidden": "4096",
+    "intermediate": "1024",
+    "cap": "32",
+    "skew-milli": "1000",
+    "routing-seed": "1",
+    "layer-seed": "0",
+    "parity-routing-seed": "3",
+    "activation-seed": "3",
+    "fallback-tier": "e3-grouped",
+}
 
 
 def abort(message: str) -> "NoReturn":  # type: ignore[name-defined]
@@ -129,33 +212,121 @@ def sha256_file(path: str) -> str:
     return digest.hexdigest()
 
 
-def ns_from_ms_text(text: str) -> int:
-    """Exact millisecond-text to nanosecond conversion, mirroring the collector."""
-    value = decimal.Decimal(text)
-    scaled = value * 1_000_000
-    if scaled != scaled.to_integral_value():
-        raise ValueError(f"duration {text} ms is finer than one nanosecond")
-    return int(scaled)
+def sample_duration(value: object) -> tuple[str, dict] | str:
+    """Return `(raw, duration)` or a failure token.
+
+    `raw` is the timer's own representation, never a re-formatted value; the
+    duration is the exact rational nanosecond conversion of that decimal.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return "adapter-error"
+    milliseconds = float(value)
+    if not math.isfinite(milliseconds):
+        return "non-finite"
+    if milliseconds < 0:
+        return "negative"
+    text = repr(milliseconds)
+    nanoseconds = decimal.Decimal(text) * CLOCK_UNIT_NS
+    numerator, denominator = nanoseconds.as_integer_ratio()
+    return text, {"numerator": numerator, "denominator": denominator}
 
 
-def ms_text(milliseconds: float) -> str:
-    """Three fractional digits: microsecond precision, never sub-microsecond."""
-    return f"{milliseconds:.{SAMPLE_DECIMALS}f}"
+def artifact_body(
+    plan: dict,
+    sources: list[dict],
+    observations: list[dict],
+    kernel_revision: str,
+    device: int,
+    samples: list[dict],
+    execution: dict,
+    correctness: dict,
+    failures: list[dict],
+) -> dict:
+    """Assemble the wire document. Pure: no device or environment access."""
+    return {
+        "kind": KIND,
+        "version": VERSION,
+        "adapter": ADAPTER,
+        "revision": plan["revision"],
+        "operation": FROZEN_OPERATION,
+        "provenance": "native_observed",
+        "submitted_provenance": None,
+        "program_sha256": plan["program_sha256"],
+        "kernel_revision": kernel_revision,
+        "sources": sources,
+        "observations": observations,
+        "topology": {
+            "scope": "device",
+            "world": None,
+            "ranks": [{"index": 0, "device": device}],
+        },
+        "clock": CLOCK,
+        "execution": execution,
+        "samples": samples,
+        "correctness": correctness,
+        "failures": failures,
+    }
 
 
-def decimal9(value: float) -> str:
-    """Plain fixed-point text; fixed exponent form is rejected by the collector."""
-    return f"{value:.9f}"
-
-
-def load_module(path: str, name: str):
-    spec = importlib.util.spec_from_file_location(name, path)
-    if spec is None or spec.loader is None:
-        abort(f"cannot load pinned module at {path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    spec.loader.exec_module(module)
-    return module
+def validate_body(body: dict, plan: dict) -> None:
+    """Fail closed if the document would not match the collector's contract."""
+    if set(body) != ARTIFACT_KEYS:
+        abort(
+            "artifact keys differ from the collector contract: "
+            f"missing={sorted(ARTIFACT_KEYS - set(body))} extra={sorted(set(body) - ARTIFACT_KEYS)}"
+        )
+    if body["kind"] != KIND or body["version"] != VERSION or body["adapter"] != ADAPTER:
+        abort("artifact kind/version/adapter mismatch")
+    if body["revision"] != plan.get("revision"):
+        abort("artifact revision does not match the plan")
+    if body["operation"] != FROZEN_OPERATION:
+        abort("artifact operation is not the frozen cell")
+    if body["clock"] != CLOCK:
+        abort("artifact clock is not the declared contract")
+    if body["program_sha256"] != plan.get("program_sha256"):
+        abort("artifact program_sha256 does not match the plan")
+    if not isinstance(body["kernel_revision"], str) or not body["kernel_revision"]:
+        abort("kernel_revision must be a nonempty observed runtime identity")
+    for source in body["sources"]:
+        if set(source) != {"path", "sha256"} or len(source["sha256"]) != 64:
+            abort("artifact source entries must be {path, sha256}")
+    names = [observation["name"] for observation in body["observations"]]
+    if set(names) != REQUIRED_OBSERVATIONS or len(names) != len(set(names)):
+        abort(f"observation set mismatch: {sorted(set(names) ^ REQUIRED_OBSERVATIONS)}")
+    for observation in body["observations"]:
+        if observation["name"] not in OBSERVATION_NAMES:
+            abort(f"observation name {observation['name']!r} is not in the closed set")
+        expected = PINNED_OBSERVATIONS.get(observation["name"])
+        if expected is not None and observation["value"] != expected:
+            abort(f"observation {observation['name']} is {observation['value']!r}, expected {expected!r}")
+    topology = body["topology"]
+    if topology.get("scope") != "device" or len(topology.get("ranks", [])) != 1:
+        abort("device topology must declare exactly one rank")
+    execution = body["execution"]
+    if execution["warmups"] != WARMUPS or execution["iterations"] != ITERATIONS:
+        abort("execution warmups/iterations are not the frozen cell")
+    for position, sample in enumerate(body["samples"]):
+        if set(sample) != {"index", "rank", "repetition", "raw", "duration"}:
+            abort("sample keys differ from the collector contract")
+        if sample["index"] != position or sample["rank"] is not None or sample["repetition"] is not None:
+            abort("device samples must be a flat 0..iterations-1 sequence")
+        if not isinstance(sample["raw"], str) or not sample["raw"]:
+            abort("sample raw must be the timer's nonempty decimal representation")
+        duration = sample["duration"]
+        if set(duration) != {"numerator", "denominator"}:
+            abort("sample duration must be a rational object")
+        if not all(isinstance(duration[key], int) for key in ("numerator", "denominator")):
+            abort("sample duration members must be integers")
+        if duration["denominator"] <= 0 or duration["numerator"] < 0:
+            abort("sample duration must be a nonnegative rational")
+    correctness = body["correctness"]
+    if correctness.get("kind") != "e3-parity" or correctness.get("reference") != REFERENCE_ID:
+        abort("correctness record is not the pinned E3 parity check")
+    if correctness.get("tolerance") != dict({"kind": "e3-rel"}, **TOLERANCE_MILLI):
+        abort("correctness tolerance is not the frozen E3 tolerance")
+    for failure in body["failures"]:
+        if set(failure) != {"kind", "detail"} or failure["kind"] not in FAILURE_KINDS:
+            abort(f"retained failure {failure.get('kind')!r} is not in the closed set")
 
 
 def check_plan(plan: dict) -> None:
@@ -169,9 +340,9 @@ def check_plan(plan: dict) -> None:
         abort("plan clock is not the pinned cuda-event-ms contract")
     if plan.get("warmups") != WARMUPS or plan.get("iterations") != ITERATIONS:
         abort(f"plan must declare warmups {WARMUPS} and iterations {ITERATIONS}")
-    tolerance = (plan.get("correctness") or {}).get("tolerance")
     if (plan.get("correctness") or {}).get("reference") != REFERENCE_ID:
         abort("plan correctness reference is not the pinned LinearEXL3 loop")
+    tolerance = (plan.get("correctness") or {}).get("tolerance")
     if not isinstance(tolerance, dict) or tolerance.get("kind") != "e3-rel":
         abort("plan correctness tolerance is not the frozen E3 relative tolerance")
     for key, value in TOLERANCE_MILLI.items():
@@ -183,40 +354,63 @@ def check_plan(plan: dict) -> None:
             abort(f"plan allowance {key} must be a positive integer")
     if not plan.get("program_sha256"):
         abort("plan must pin program_sha256 for an external adapter")
-
-
-def verify_sources(plan: dict, checkout: str) -> list[dict]:
-    """Verify every declared source pin and return the exact declared list."""
-    self_path = os.path.abspath(__file__)
-    observed_self = sha256_file(self_path)
-    sources = plan.get("sources") or []
-    if not sources:
+    if not plan.get("sources"):
         abort("plan must declare its pinned sources")
-    reported = []
-    for source in sources:
+
+
+def verify_sources(plan: dict, checkout: str) -> tuple[list[dict], int, int]:
+    """Verify every declared pin from bytes on this host and report it.
+
+    Returns the observed sources plus the verified/declared counts. This
+    adapter resolves every pin inside the pinned checkout, so nothing is echoed
+    as a declaration; Grill still checks the observed hash set against the
+    declaration.
+    """
+    self_path = os.path.abspath(__file__)
+    if sha256_file(self_path) != plan.get("program_sha256"):
+        abort("this adapter does not match plan.program_sha256; re-pin instead of running it")
+    declared_hashes = set()
+    observed = []
+    verified = 0
+    for source in plan["sources"]:
         declared = source.get("path")
         declared_sha = source.get("sha256")
         if not isinstance(declared, str) or not isinstance(declared_sha, str):
             abort("plan sources must be {path, sha256} objects")
-        resolved = declared
-        if declared == os.path.relpath(self_path) or os.path.basename(declared) == os.path.basename(
-            self_path
-        ):
+        if os.path.basename(declared) == os.path.basename(self_path):
             resolved = self_path
-        elif not os.path.isabs(declared):
+        elif os.path.isabs(declared):
+            resolved = declared
+        else:
             resolved = os.path.join(checkout, declared)
         if not os.path.isfile(resolved):
             abort(f"pinned source is missing: {declared}")
-        observed = sha256_file(resolved)
-        if observed != declared_sha:
-            abort(f"pinned source hash mismatch for {declared}: {observed} != {declared_sha}")
-        reported.append({"path": declared, "sha256": observed})
-    if observed_self != plan.get("program_sha256"):
-        abort("this adapter does not match plan.program_sha256; re-pin instead of running it")
-    return reported
+        observed_sha = sha256_file(resolved)
+        if observed_sha != declared_sha:
+            abort(f"pinned source hash mismatch for {declared}: {observed_sha} != {declared_sha}")
+        observed.append({"path": os.path.realpath(resolved), "sha256": observed_sha})
+        declared_hashes.add(observed_sha)
+        verified += 1
+    if declared_hashes != {source["sha256"] for source in plan["sources"]}:
+        abort("observed source hashes differ from the declared pin set")
+    if not os.path.isfile(os.path.join(checkout, ANCHOR)) or not os.path.isfile(
+        os.path.join(checkout, PARITY)
+    ):
+        abort("the pinned checkout does not contain both pinned source files")
+    return observed, verified, 0
 
 
-def parity(anchor, parity_module, torch, apply_exl3_experts, apply_exl3_python_loop, layer, seed_routing, seed_activation):
+def load_module(path: str, name: str):
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        abort(f"cannot load pinned module at {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def parity(anchor, parity_module, torch, apply_exl3_experts, apply_exl3_python_loop, layer):
     """Production-geometry parity before any timing, using the pinned tolerances."""
     from vllm.model_executor.layers.quantization.exl3 import _record_exl3_fat_resolution
 
@@ -231,9 +425,9 @@ def parity(anchor, parity_module, torch, apply_exl3_experts, apply_exl3_python_l
             "E3 grouped tier is not effective: "
             f"{layer._exl3_fat_effective_tier} ({layer._exl3_fat_tier_reason})"
         )
-    generator = torch.Generator().manual_seed(seed_activation)
+    generator = torch.Generator().manual_seed(FROZEN_OPERATION["activation_seed"])
     activation = torch.randn(tokens, hidden, generator=generator).half().cuda()
-    ids, weights = anchor.routing(tokens, skew=1.0, seed=seed_routing)
+    ids, weights = anchor.routing(tokens, skew=1.0, seed=FROZEN_OPERATION["parity_routing_seed"])
     loop = apply_exl3_python_loop(activation, ids.long(), weights, layer._exl3_inners, None, 10.0)
 
     anchor.set_cap(layer, cap)
@@ -249,7 +443,6 @@ def parity(anchor, parity_module, torch, apply_exl3_experts, apply_exl3_python_l
     fallback_e3 = layer._exl3_last_fat_fallback
     candidate_repeat = apply_exl3_experts(activation, ids, weights, layer)
     e3 = parity_module._err_stats(loop, candidate)
-    repeat = parity_module._err_stats(candidate, candidate_repeat)
 
     detail = None
     passed = False
@@ -263,20 +456,17 @@ def parity(anchor, parity_module, torch, apply_exl3_experts, apply_exl3_python_l
             passed = True
         except AssertionError as error:
             detail = str(error)
-    finite = bool(e3["finite"]) and bool(e2["finite"]) and bool(repeat["finite"])
+    finite = bool(e3["finite"]) and bool(e2["finite"])
     if not finite:
         passed = False
         detail = detail or "parity statistics were not finite"
     del activation, loop, reference, candidate, candidate_repeat
-    return {
-        "e2": e2,
-        "e3": e3,
-        "repeat": repeat,
-        "passed": passed,
-        "finite": finite,
-        "detail": detail,
-        "fallback": fallback_e3,
-    }
+    return {"e2": e2, "e3": e3, "passed": passed, "finite": finite, "detail": detail}
+
+
+def decimal9(value: float) -> str:
+    """Plain fixed-point text; fixed exponent form is rejected by the collector."""
+    return f"{value:.9f}"
 
 
 def main() -> int:
@@ -295,7 +485,7 @@ def main() -> int:
         plan = json.loads(handle.read())
 
     check_plan(plan)
-    sources = verify_sources(plan, args.checkout)
+    sources, verified, declared = verify_sources(plan, args.checkout)
 
     anchor_path = os.path.join(args.checkout, ANCHOR)
     parity_path = os.path.join(args.checkout, PARITY)
@@ -333,10 +523,14 @@ def main() -> int:
                 "EXL3_MOE_ROW_TILE": "0",
             }
         )
+        module_path = getattr(sys.modules[apply_exl3_experts.__module__], "__file__", None)
+        if not module_path or not os.path.isfile(module_path):
+            abort("cannot observe the loaded exl3 module file")
+        device = torch.cuda.get_device_name(torch.cuda.current_device())
         kernel_revision = (
             f"torch:{torch.__version__};"
             f"nccl:{'.'.join(str(part) for part in torch.cuda.nccl.version())};"
-            f"anchor:{REVISION_PIN}"
+            f"exl3-module:{sha256_file(module_path)}"
         )
 
         layer = anchor.make_layer(
@@ -352,8 +546,6 @@ def main() -> int:
             apply_exl3_experts,
             apply_exl3_python_loop,
             layer,
-            FROZEN_OPERATION["parity_routing_seed"],
-            FROZEN_OPERATION["activation_seed"],
         )
 
         # Timing cell: one prospectively fixed shape, routing and tier.
@@ -390,27 +582,26 @@ def main() -> int:
                 warm=WARMUPS,
             )
             observed_fallback = layer._exl3_last_fat_fallback
-            if observed_fallback != "grouped":
-                failures.append(
-                    {
-                        "kind": "tier-fallback",
-                        "detail": f"last fallback after timing was {observed_fallback!r}, not 'grouped'",
-                    }
-                )
             for index, value in enumerate(times_ms):
-                text = ms_text(float(value))
-                try:
-                    nanos = ns_from_ms_text(text)
-                except ValueError as error:
-                    failures.append({"kind": "adapter-error", "detail": str(error)})
-                    nanos = 0
+                converted = sample_duration(value)
+                if isinstance(converted, str):
+                    # A value that cannot be represented as a duration is
+                    # retained as a failure; the grid stays incomplete.
+                    failures.append(
+                        {
+                            "kind": "non-finite" if converted == "non-finite" else "adapter-error",
+                            "detail": f"sample {index} could not be represented: {converted}",
+                        }
+                    )
+                    continue
+                raw, duration = converted
                 samples.append(
                     {
-                        "index": index,
+                        "index": len(samples),
                         "rank": None,
                         "repetition": None,
-                        "raw": text,
-                        "duration_ns": nanos,
+                        "raw": raw,
+                        "duration": duration,
                     }
                 )
         torch.cuda.synchronize()
@@ -425,6 +616,13 @@ def main() -> int:
             * FROZEN_OPERATION["intermediate"]
         )
         memory_bytes = int(max(peak_bytes, before_bytes))
+        if observed_fallback is not None and observed_fallback != "e3-grouped":
+            failures.append(
+                {
+                    "kind": "tier-fallback",
+                    "detail": f"last fallback after timing was {observed_fallback!r}, not 'e3-grouped'",
+                }
+            )
         if work_units > plan["allowance"]["work_units"]:
             failures.append(
                 {
@@ -464,24 +662,41 @@ def main() -> int:
         if not grade["finite"]:
             failures.append({"kind": "non-finite", "detail": "parity statistics were not finite"})
 
-        artifact = {
-            "kind": KIND,
-            "version": VERSION,
-            "adapter": ADAPTER,
-            "revision": plan["revision"],
-            "operation": FROZEN_OPERATION,
-            "provenance": "native_observed",
-            "submitted_provenance": None,
-            "program_sha256": plan["program_sha256"],
-            "kernel_revision": kernel_revision,
-            "sources": sources,
-            "topology": {
-                "scope": "device",
-                "world": None,
-                "ranks": [{"index": 0, "device": int(torch.cuda.current_device())}],
+        observations = [
+            {"name": "torch-version", "value": str(torch.__version__)},
+            {"name": "nccl-version", "value": ".".join(str(part) for part in torch.cuda.nccl.version())},
+            {"name": "exl3-module-sha256", "value": sha256_file(module_path)},
+            {"name": "device", "value": device},
+            {"name": "experts", "value": str(FROZEN_OPERATION["experts"])},
+            {"name": "topk", "value": str(FROZEN_OPERATION["topk"])},
+            {"name": "tokens", "value": str(FROZEN_OPERATION["tokens"])},
+            {"name": "hidden", "value": str(FROZEN_OPERATION["hidden"])},
+            {"name": "intermediate", "value": str(FROZEN_OPERATION["intermediate"])},
+            {"name": "cap", "value": str(FROZEN_OPERATION["cap"])},
+            {"name": "skew-milli", "value": str(FROZEN_OPERATION["skew_milli"])},
+            {"name": "routing-seed", "value": str(FROZEN_OPERATION["routing_seed"])},
+            {"name": "layer-seed", "value": str(FROZEN_OPERATION["layer_seed"])},
+            {"name": "parity-routing-seed", "value": str(FROZEN_OPERATION["parity_routing_seed"])},
+            {"name": "activation-seed", "value": str(FROZEN_OPERATION["activation_seed"])},
+            {
+                # Never echo the declared tier as an observation: when timing
+                # did not run there is nothing observed to report, and the
+                # collector rejects an unavailable value rather than passing it.
+                "name": "fallback-tier",
+                "value": observed_fallback if observed_fallback is not None else "unavailable",
             },
-            "clock": CLOCK,
-            "execution": {
+            {"name": "sources-verified", "value": str(verified)},
+            {"name": "sources-declared", "value": str(declared)},
+        ]
+
+        body = artifact_body(
+            plan,
+            sources,
+            observations,
+            kernel_revision,
+            int(torch.cuda.current_device()),
+            samples,
+            {
                 "warmups": WARMUPS,
                 "iterations": ITERATIONS,
                 "deadline_ms": deadline_ms,
@@ -491,8 +706,7 @@ def main() -> int:
                 "timed_out": timed_out,
                 "observed_fallback": observed_fallback,
             },
-            "samples": samples,
-            "correctness": {
+            {
                 "kind": "e3-parity",
                 "reference": REFERENCE_ID,
                 "finite": grade["finite"],
@@ -514,20 +728,21 @@ def main() -> int:
                 "outcome": "pass" if grade["passed"] else "fail",
                 "detail": grade["detail"],
             },
-            "failures": failures,
-        }
+            failures,
+        )
     except SystemExit:
         raise
     except BaseException:  # noqa: BLE001  (retain the traceback for the operator)
         traceback.print_exc()
         return 3
 
-    body = json.dumps(artifact, indent=2, sort_keys=False)
+    validate_body(body, plan)
+    encoded = json.dumps(body, indent=2, sort_keys=False)
     if args.out:
         with open(args.out, "w", encoding="utf-8") as handle:
-            handle.write(body + "\n")
+            handle.write(encoded + "\n")
     if args.stdout or not args.out:
-        sys.stdout.write(body + "\n")
+        sys.stdout.write(encoded + "\n")
         sys.stdout.flush()
     return 0
 

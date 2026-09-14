@@ -3,11 +3,11 @@
   "version": 1,
   "adapter": "exl3-e3-grouped",
   "revision": "exl3-e3-grouped-cap32-v1",
-  "program_sha256": "8355f8ca7c2dac0c70d2e27e1b4d4486dd45f6edcd1dc053187349a4a4ab8db6",
+  "program_sha256": "248f7fe2976fe20065f6262b1e51d6c4c2a6ae21a937910beed1e858f36cd53e",
   "sources": [
     {
       "path": "tools/microbench/exl3_e3_grouped.py",
-      "sha256": "8355f8ca7c2dac0c70d2e27e1b4d4486dd45f6edcd1dc053187349a4a4ab8db6"
+      "sha256": "248f7fe2976fe20065f6262b1e51d6c4c2a6ae21a937910beed1e858f36cd53e"
     },
     {
       "path": "tests/bench_e3_microbench.py",

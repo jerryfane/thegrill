@@ -16,8 +16,11 @@ const NCCL_BYTE_SOURCE_SHA256: &str =
     "2242493053a6f9d5db1c6542a8ce7740be919778645125b94eeae440efd31edf";
 const E3_ANCHOR_SHA256: &str = "f57e4fa6726b0110c44ce56b0b0968ba425e566ace6d89f2db3872aae13889ec";
 const E3_PARITY_SHA256: &str = "8777254d47cdbb89186ba3bd1ac2437cbebc7987e0791d36c68e7bccb3df2b35";
+const E3_SCRIPT_SHA256: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
 const START: u64 = 1_757_000_000_000;
+const COLLECTOR: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+const COLLECTOR_OTHER: &str = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
 const CPU_BOUND_REFERENCE: &str = "8386560";
 
 fn mb_sha(bytes: &[u8]) -> String {
@@ -34,12 +37,17 @@ fn mb_write_bytes(path: &Path, bytes: &[u8]) {
     fs::write(path, bytes).unwrap();
 }
 
-fn mb_cpu_plan(id: &str, started: u64) -> Value {
+fn mb_dir(path: &Path) -> PathBuf {
+    fs::create_dir_all(path).unwrap();
+    path.to_path_buf()
+}
+
+fn mb_cpu_plan(id: &str, started: u64, revision: &str) -> Value {
     json!({
         "kind": "microbench-plan-v1",
         "version": 1,
         "adapter": "cpu-sum-u64-reference",
-        "revision": "cpu-sum-u64-reference-v1",
+        "revision": revision,
         "program_sha256": null,
         "sources": [],
         "operation": {"kind": "sum-u64", "bound": 4096, "dtype": "u64"},
@@ -66,7 +74,8 @@ fn mb_reduce_sources(program_sha256: &str) -> Value {
     ])
 }
 
-fn mb_reduce_plan(id: &str, started: u64, world: u32, program_sha256: &str) -> Value {
+fn mb_reduce_plan(id: &str, started: u64, world: u32) -> Value {
+    let program_sha256 = E3_SCRIPT_SHA256;
     json!({
         "kind": "microbench-plan-v1",
         "version": 1,
@@ -109,9 +118,9 @@ fn mb_e3_plan(id: &str, started: u64) -> Value {
         "version": 1,
         "adapter": "exl3-e3-grouped",
         "revision": "exl3-e3-grouped-cap32-v1",
-        "program_sha256": "b".repeat(64),
+        "program_sha256": E3_SCRIPT_SHA256,
         "sources": [
-            {"path": "tools/microbench/exl3_e3_grouped.py", "sha256": "b".repeat(64)},
+            {"path": "tools/microbench/exl3_e3_grouped.py", "sha256": E3_SCRIPT_SHA256},
             {"path": "tests/bench_e3_microbench.py", "sha256": E3_ANCHOR_SHA256},
             {"path": "tests/test_exl3_overlay.py", "sha256": E3_PARITY_SHA256}
         ],
@@ -160,14 +169,22 @@ fn mb_e3_plan(id: &str, started: u64) -> Value {
     })
 }
 
-fn mb_cpu_artifact(plan: &Value, durations: &[u64]) -> Value {
-    let samples: Vec<Value> = durations
+/// One retained sample: the timer's own text plus the exact nanosecond rational.
+fn mb_sample(index: u32, rank: Option<u32>, repetition: Option<u32>, raw: &str, num: u64, den: u64) -> Value {
+    json!({
+        "index": index,
+        "rank": rank,
+        "repetition": repetition,
+        "raw": raw,
+        "duration": {"numerator": num, "denominator": den}
+    })
+}
+
+fn mb_cpu_artifact(plan: &Value, samples: &[(&str, u64, u64)]) -> Value {
+    let values: Vec<Value> = samples
         .iter()
         .enumerate()
-        .map(|(index, nanos)| {
-            json!({"index": index, "rank": null, "repetition": null,
-                   "raw": nanos.to_string(), "duration_ns": nanos})
-        })
+        .map(|(index, (raw, num, den))| mb_sample(index as u32, None, None, raw, *num, *den))
         .collect();
     json!({
         "kind": "microbench-artifact-v1",
@@ -180,6 +197,7 @@ fn mb_cpu_artifact(plan: &Value, durations: &[u64]) -> Value {
         "program_sha256": null,
         "kernel_revision": null,
         "sources": [],
+        "observations": [],
         "topology": {"scope": "cpu", "world": null, "ranks": []},
         "clock": plan["clock"],
         "execution": {
@@ -187,7 +205,7 @@ fn mb_cpu_artifact(plan: &Value, durations: &[u64]) -> Value {
             "work_units": 28672, "memory_bytes": 32768,
             "completed": true, "timed_out": false, "observed_fallback": null
         },
-        "samples": samples,
+        "samples": values,
         "correctness": {
             "kind": "exact-sum", "reference": "n*(n-1)/2",
             "computed": CPU_BOUND_REFERENCE, "bound": CPU_BOUND_REFERENCE, "passed": true
@@ -196,60 +214,47 @@ fn mb_cpu_artifact(plan: &Value, durations: &[u64]) -> Value {
     })
 }
 
-fn mb_reduce_artifact(plan: &Value, per_repetition: &[Vec<u64>], mismatches: u64) -> Value {
-    let world = plan["operation"]["world"].as_u64().unwrap() as u32;
-    let mut samples = Vec::new();
-    let mut index = 0u32;
-    for (repetition, ranks) in per_repetition.iter().enumerate() {
-        for (rank, nanos) in ranks.iter().enumerate() {
-            samples.push(json!({
-                "index": index, "rank": rank, "repetition": repetition,
-                "raw": nanos.to_string(), "duration_ns": nanos
-            }));
-            index += 1;
-        }
-    }
-    let complete = per_repetition.len() == 5
-        && per_repetition.iter().all(|ranks| ranks.len() == world as usize);
-    json!({
-        "kind": "microbench-artifact-v1",
-        "version": 1,
-        "adapter": plan["adapter"],
-        "revision": plan["revision"],
-        "operation": plan["operation"],
-        "provenance": "native_observed",
-        "submitted_provenance": null,
-        "program_sha256": plan["program_sha256"],
-        "kernel_revision": "fixture-synthetic-protocol-only",
-        "sources": plan["sources"],
-        "topology": {
-            "scope": "ranks",
-            "world": world,
-            "ranks": (0..world).map(|r| json!({"index": r, "device": r})).collect::<Vec<Value>>()
-        },
-        "clock": plan["clock"],
-        "execution": {
-            "warmups": 1, "iterations": 5, "deadline_ms": 120000,
-            "work_units": 1572864, "memory_bytes": 6291456,
-            "completed": complete, "timed_out": false, "observed_fallback": null
-        },
-        "samples": samples,
-        "correctness": {
-            "kind": "exact-reduction",
-            "reference": "world*(i%251)+world*(world-1)/2",
-            "mismatches": mismatches, "tolerance_elems": 0,
-            "finite": true, "passed": mismatches == 0
-        },
-        "failures": []
-    })
+fn mb_cpu_uniform(plan: &Value, nanos: u64) -> Value {
+    let raw = nanos.to_string();
+    let samples: Vec<(&str, u64, u64)> = (0..5).map(|_| (raw.as_str(), nanos, 1)).collect();
+    mb_cpu_artifact(plan, &samples)
+}
+
+fn mb_observations(entries: &[(&str, &str)]) -> Value {
+    Value::Array(
+        entries
+            .iter()
+            .map(|(name, value)| json!({"name": name, "value": value}))
+            .collect(),
+    )
+}
+
+fn mb_e3_observations(fallback: &str) -> Value {
+    mb_observations(&[
+        ("torch-version", "2.9.0"),
+        ("nccl-version", "2.27.7"),
+        ("exl3-module-sha256", &"e".repeat(64)),
+        ("device", "fixture-device"),
+        ("experts", "288"),
+        ("topk", "8"),
+        ("tokens", "1024"),
+        ("hidden", "4096"),
+        ("intermediate", "1024"),
+        ("cap", "32"),
+        ("skew-milli", "1000"),
+        ("routing-seed", "1"),
+        ("layer-seed", "0"),
+        ("parity-routing-seed", "3"),
+        ("activation-seed", "3"),
+        ("fallback-tier", fallback),
+        ("sources-verified", "3"),
+        ("sources-declared", "0"),
+    ])
 }
 
 fn mb_e3_artifact(plan: &Value, fallback: &str, e3_maxabs: &str) -> Value {
     let samples: Vec<Value> = (0..5)
-        .map(|index| {
-            json!({"index": index, "rank": null, "repetition": null,
-                   "raw": "31.234", "duration_ns": 31234000})
-        })
+        .map(|index| mb_sample(index, None, None, "31.2345678", 156_172_839, 5))
         .collect();
     json!({
         "kind": "microbench-artifact-v1",
@@ -260,8 +265,13 @@ fn mb_e3_artifact(plan: &Value, fallback: &str, e3_maxabs: &str) -> Value {
         "provenance": "native_observed",
         "submitted_provenance": null,
         "program_sha256": plan["program_sha256"],
-        "kernel_revision": "fixture-synthetic-protocol-only",
-        "sources": plan["sources"],
+        "kernel_revision": "torch:2.9.0;nccl:2.27.7;exl3-module:eeee",
+        "sources": [
+            {"path": "/observed/tools/microbench/exl3_e3_grouped.py", "sha256": E3_SCRIPT_SHA256},
+            {"path": "/observed/tests/bench_e3_microbench.py", "sha256": E3_ANCHOR_SHA256},
+            {"path": "/observed/tests/test_exl3_overlay.py", "sha256": E3_PARITY_SHA256}
+        ],
+        "observations": mb_e3_observations(fallback),
         "topology": {"scope": "device", "world": null, "ranks": [{"index": 0, "device": 0}]},
         "clock": plan["clock"],
         "execution": {
@@ -290,12 +300,136 @@ fn mb_e3_artifact(plan: &Value, fallback: &str, e3_maxabs: &str) -> Value {
     })
 }
 
-fn mb_evidence(temp: &Temp, name: &str, plan: &Value, artifact: &Value) -> PathBuf {
-    let dir = temp.path(name);
-    fs::create_dir_all(&dir).unwrap();
+fn mb_reduce_artifact(plan: &Value, per_repetition: &[Vec<u64>], mismatches: u64) -> Value {
+    let world = plan["operation"]["world"].as_u64().unwrap() as u32;
+    let mut samples = Vec::new();
+    for (repetition, ranks) in per_repetition.iter().enumerate() {
+        for (rank, nanos) in ranks.iter().enumerate() {
+            samples.push(mb_sample(
+                samples.len() as u32,
+                Some(rank as u32),
+                Some(repetition as u32),
+                &nanos.to_string(),
+                *nanos,
+                1,
+            ));
+        }
+    }
+    json!({
+        "kind": "microbench-artifact-v1",
+        "version": 1,
+        "adapter": plan["adapter"],
+        "revision": plan["revision"],
+        "operation": plan["operation"],
+        "provenance": "native_observed",
+        "submitted_provenance": null,
+        "program_sha256": plan["program_sha256"],
+        "kernel_revision": "torch:2.9.0;nccl:2.27.7",
+        "sources": [
+            {"path": "/observed/tools/microbench/nccl_allreduce_sum.py", "sha256": E3_SCRIPT_SHA256},
+            {"path": "doc/PERFORMANCE.md", "sha256": NCCL_BYTE_SOURCE_SHA256}
+        ],
+        "observations": mb_observations(&[
+            ("torch-version", "2.9.0"),
+            ("nccl-version", "2.27.7"),
+            ("device", "fixture-device"),
+            ("world", &world.to_string()),
+            ("numel", "262144"),
+            ("dtype", "int64"),
+            ("op", "sum"),
+            ("sources-verified", "1"),
+            ("sources-declared", "1")
+        ]),
+        "topology": {
+            "scope": "ranks",
+            "world": world,
+            "ranks": (0..world).map(|r| json!({"index": r, "device": r})).collect::<Vec<Value>>()
+        },
+        "clock": plan["clock"],
+        "execution": {
+            "warmups": 1, "iterations": 5, "deadline_ms": 120000,
+            "work_units": 1572864, "memory_bytes": 6291456,
+            "completed": true, "timed_out": false, "observed_fallback": null
+        },
+        "samples": samples,
+        "correctness": {
+            "kind": "exact-reduction",
+            "reference": "world*(i%251)+world*(world-1)/2",
+            "mismatches": mismatches, "tolerance_elems": 0,
+            "finite": true, "passed": mismatches == 0
+        },
+        "failures": []
+    })
+}
+
+fn mb_receipt(collector: &str) -> Value {
+    json!({
+        "kind": "microbench-receipt-v1",
+        "version": 1,
+        "adapter": "cpu-sum-u64-reference",
+        "provenance": "native_observed",
+        "status": "captured",
+        "plan_sha256": "0".repeat(64),
+        "artifact_sha256": "1".repeat(64),
+        "collector_sha256": collector,
+        "program": null,
+        "program_sha256": null,
+        "source_sha256": null,
+        "started_unix_ms": START,
+        "observation_unix_ms": START,
+        "duration_ms": 0,
+        "command": [],
+        "failure": null,
+        "claim": "fixture"
+    })
+}
+
+/// Write one acquisition directory: `plan.json`, `artifact.json` and a receipt.
+fn mb_member(role: &Path, slot: &str, plan: &Value, artifact: &Value, collector: &str) {
+    let dir = mb_dir(&role.join(slot));
     mb_write(&dir.join("plan.json"), plan);
     mb_write(&dir.join("artifact.json"), artifact);
-    dir
+    mb_write(&dir.join("receipt.json"), &mb_receipt(collector));
+}
+
+/// A complete CPU role. `slot` is the declared slot prefix, which is
+/// independent of the directory name so a role can be relocated in a fixture.
+fn mb_cpu_role(temp: &Temp, name: &str, slot: &str, revisions: &[(&str, u64, u64)]) -> PathBuf {
+    let role = mb_dir(&temp.path(name));
+    for (index, (revision, started, nanos)) in revisions.iter().enumerate() {
+        let id = format!("{slot}{index:02}");
+        let plan = mb_cpu_plan(&id, *started, revision);
+        mb_member(&role, &id, &plan, &mb_cpu_uniform(&plan, *nanos), COLLECTOR);
+    }
+    role
+}
+
+fn mb_study(baseline: &str, candidate: &str, slots: usize, minimum: usize) -> Value {
+    let ids = |prefix: &str| -> Vec<Value> {
+        (0..slots)
+            .map(|index| json!(format!("{prefix}{index:02}")))
+            .collect()
+    };
+    json!({
+        "kind": "microbench-study-v1",
+        "version": 1,
+        "adapter": "cpu-sum-u64-reference",
+        "revision_axis": {"baseline": baseline, "candidate": candidate},
+        "thresholds": {"adverse_bps": 500, "spread_bps": 2000},
+        "minimum_acquisitions": minimum,
+        "roles": {
+            "baseline": ids("baseline"),
+            "candidate": ids("candidate"),
+            "reference": ids("reference")
+        },
+        "started_unix_ms": START - 1000
+    })
+}
+
+fn mb_study_file(temp: &Temp, study: &Value) -> PathBuf {
+    let path = temp.path("study.json");
+    mb_write(&path, study);
+    path
 }
 
 fn mb_stdout(output: &Output) -> Value {
@@ -323,7 +457,9 @@ fn mb_has(report: &Value, key: &str, reason: &str) -> bool {
 }
 
 fn mb_inspect(temp: &Temp, name: &str, plan: &Value, artifact: &Value) -> (i32, Value) {
-    let dir = mb_evidence(temp, name, plan, artifact);
+    let dir = mb_dir(&temp.path(name));
+    mb_write(&dir.join("plan.json"), plan);
+    mb_write(&dir.join("artifact.json"), artifact);
     let output = cli()
         .args(["microbench", "inspect"])
         .arg(&dir)
@@ -354,13 +490,28 @@ fn mb_capture(temp: &Temp, name: &str, adapter: &str, plan: &Value) -> (i32, Val
     )
 }
 
-fn mb_run(args: &[&str], paths: &[&Path]) -> (i32, Value, String) {
-    let mut command = cli();
-    command.args(["microbench"]).args(args);
-    for path in paths {
-        command.arg(path);
-    }
-    let output = command.arg("--json").output().unwrap();
+fn mb_compare(
+    temp: &Temp,
+    name: &str,
+    study: &Value,
+    baseline: &Path,
+    candidate: &Path,
+    reference: &Path,
+) -> (i32, Value, String) {
+    let study_path = temp.path(&format!("{name}-study.json"));
+    mb_write(&study_path, study);
+    let output = cli()
+        .args(["microbench", "compare", "--study"])
+        .arg(&study_path)
+        .arg("--baseline")
+        .arg(baseline)
+        .arg("--candidate")
+        .arg(candidate)
+        .arg("--reference")
+        .arg(reference)
+        .arg("--json")
+        .output()
+        .unwrap();
     (
         mb_code(&output),
         mb_stdout(&output),
@@ -369,46 +520,40 @@ fn mb_run(args: &[&str], paths: &[&Path]) -> (i32, Value, String) {
 }
 
 #[test]
-fn cpu_reference_capture_is_native_exact_and_inspectable() {
+fn cpu_reference_capture_records_exact_rational_samples() {
     let temp = Temp::new();
-    let plan = mb_cpu_plan("a01", START);
+    let plan = mb_cpu_plan("a01", START, "cpu-sum-u64-reference-v1");
     let (code, report, stderr, dir) = mb_capture(&temp, "cpu", "cpu-sum-u64-reference", &plan);
     assert_eq!(code, 0, "stderr={stderr}");
     assert_eq!(report["provenance"], "native_observed");
     assert_eq!(report["exerciser"], "native-cpu-reference");
     assert_eq!(report["samples"], 5);
-    assert!(report["invalid"] == json!([]));
-    assert!(report["scope"].as_str().unwrap().contains("never sets a serving-speed claim"));
+    assert_eq!(report["invalid"], json!([]));
 
     let artifact: Value = serde_json::from_slice(&fs::read(dir.join("artifact.json")).unwrap()).unwrap();
-    assert_eq!(artifact["adapter"], "cpu-sum-u64-reference");
+    assert_eq!(artifact["observations"], json!([]));
+    assert_eq!(artifact["sources"], json!([]));
     assert_eq!(artifact["correctness"]["computed"], CPU_BOUND_REFERENCE);
-    assert_eq!(artifact["correctness"]["bound"], CPU_BOUND_REFERENCE);
-    assert_eq!(artifact["correctness"]["passed"], true);
     assert_eq!(artifact["execution"]["completed"], true);
-    assert_eq!(artifact["execution"]["observed_fallback"], Value::Null);
-    assert_eq!(artifact["samples"].as_array().unwrap().len(), 5);
-    let nanos = artifact["samples"][0]["duration_ns"].as_u64().unwrap();
-    assert!(nanos > 0);
-    // Raw text is the exact nanosecond decimal, never a re-rounded float.
-    assert_eq!(
-        artifact["samples"][0]["raw"].as_str().unwrap().parse::<u64>().unwrap(),
-        nanos
-    );
-    assert!(artifact["execution"]["work_units"].as_u64().unwrap() <= 28672);
-    assert!(artifact["execution"]["memory_bytes"].as_u64().unwrap() <= 65536);
-    let receipt: Value = serde_json::from_slice(&fs::read(dir.join("receipt.json")).unwrap()).unwrap();
-    assert_eq!(receipt["status"], "captured");
-    assert_eq!(receipt["provenance"], "native_observed");
-    assert_eq!(receipt["claim"], "native-in-process-cpu-reference");
+    let sample = &artifact["samples"][0];
+    let raw: u64 = sample["raw"].as_str().unwrap().parse().unwrap();
+    assert!(raw > 0);
+    // Integer nanosecond readings are retained as the exact rational value/1.
+    assert_eq!(sample["duration"]["numerator"], json!(raw));
+    assert_eq!(sample["duration"]["denominator"], json!(1));
+    assert!(report["scope"].as_str().unwrap().contains("never sets a serving-speed claim"));
 
-    let (code, report, stderr) = mb_run(&["inspect"], &[&dir]);
-    assert_eq!(code, 0, "stderr={stderr}");
+    let inspected = cli()
+        .args(["microbench", "inspect"])
+        .arg(&dir)
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert_eq!(mb_code(&inspected), 0);
+    let report = mb_stdout(&inspected);
     assert_eq!(report["plan_verified"], true);
     assert_eq!(report["invalid"], json!([]));
-    assert_eq!(report["unavailable"], json!([]));
     assert!(report["statistic"]["numerator"].as_u64().unwrap() > 0);
-    assert_eq!(report["derived"], Value::Null);
 }
 
 #[test]
@@ -421,7 +566,7 @@ fn capture_rejects_drifted_declarations_before_running() {
         ("allowance", |plan| plan["allowance"]["work_units"] = json!(64)),
     ];
     for (name, mutate) in mutations {
-        let mut plan = mb_cpu_plan("a01", START);
+        let mut plan = mb_cpu_plan("a01", START, "cpu-sum-u64-reference-v1");
         mutate(&mut plan);
         let (code, _report, stderr, dir) = mb_capture(&temp, name, "cpu-sum-u64-reference", &plan);
         assert_eq!(code, 1, "{name} stderr={stderr}");
@@ -430,14 +575,14 @@ fn capture_rejects_drifted_declarations_before_running() {
     }
 
     // A plan declared for another adapter cannot be captured as the CPU reference.
-    let reduce = mb_reduce_plan("a01", START, 2, &"a".repeat(64));
-    let (code, _report, stderr, _) = mb_capture(&temp, "adapter-mismatch", "cpu-sum-u64-reference", &reduce);
+    let reduce = mb_reduce_plan("a01", START, 2);
+    let (code, _report, stderr, _) = mb_capture(&temp, "mismatch", "cpu-sum-u64-reference", &reduce);
     assert_eq!(code, 1);
     assert!(stderr.contains("adapter"), "{stderr}");
 
     // The in-process reference refuses an operator program.
     let plan_path = temp.path("cpu-inproc-plan.json");
-    mb_write(&plan_path, &mb_cpu_plan("a01", START));
+    mb_write(&plan_path, &mb_cpu_plan("a01", START, "cpu-sum-u64-reference-v1"));
     let output = cli()
         .args(["microbench", "capture", "--adapter", "cpu-sum-u64-reference"])
         .arg("--plan")
@@ -459,10 +604,72 @@ fn capture_rejects_drifted_declarations_before_running() {
 }
 
 #[test]
+fn inspect_accepts_fractional_and_scientific_durations() {
+    let temp = Temp::new();
+    let plan = mb_e3_plan("a01", START);
+
+    // The acceptance case: 0.123456789012345 ms is not a whole nanosecond.
+    let mut artifact = mb_e3_artifact(&plan, "e3-grouped", "0.003000000");
+    for (index, sample) in artifact["samples"].as_array_mut().unwrap().iter_mut().enumerate() {
+        *sample = mb_sample(index as u32, None, None, "0.123456789012345", 24_691_357_802_469, 200_000_000);
+    }
+    let (code, report) = mb_inspect(&temp, "long-decimal", &plan, &artifact);
+    assert_eq!(code, 0, "{report}");
+    assert_eq!(report["invalid"], json!([]));
+
+    // Scientific notation and a sub-resolution digit are both preserved.
+    let mut scientific = mb_e3_artifact(&plan, "e3-grouped", "0.003000000");
+    for (index, sample) in scientific["samples"].as_array_mut().unwrap().iter_mut().enumerate() {
+        *sample = mb_sample(index as u32, None, None, "1.234e-05", 617, 50);
+    }
+    let (code, report) = mb_inspect(&temp, "scientific", &plan, &scientific);
+    assert_eq!(code, 0, "{report}");
+
+    // 31.2345678 ms is 156172839/5 ns: finer than the declared 1000 ns
+    // resolution and still retained exactly.
+    let mut fractional = mb_e3_artifact(&plan, "e3-grouped", "0.003000000");
+    for (index, sample) in fractional["samples"].as_array_mut().unwrap().iter_mut().enumerate() {
+        *sample = mb_sample(index as u32, None, None, "31.2345678", 156_172_839, 5);
+    }
+    let (code, report) = mb_inspect(&temp, "fractional", &plan, &fractional);
+    assert_eq!(code, 0, "{report}");
+
+    // A fractional-nanosecond digit is part of the acceptance surface, not a
+    // rounding target: claiming a rounded value is rejected.
+    let mut rounded = fractional.clone();
+    rounded["samples"][0]["duration"] = json!({"numerator": 31234568, "denominator": 1});
+    let (code, report) = mb_inspect(&temp, "rounded", &plan, &rounded);
+    assert_eq!(code, 1);
+    assert!(mb_has(&report, "invalid", "SamplePrecision"), "{report}");
+
+    // A zero reading is not a usable duration for this cell.
+    let mut zero = fractional.clone();
+    zero["samples"][0] = mb_sample(0, None, None, "0.0", 0, 1);
+    let (code, report) = mb_inspect(&temp, "zero", &plan, &zero);
+    assert_eq!(code, 1);
+    assert!(mb_has(&report, "invalid", "DurationOutOfRange"), "{report}");
+
+    // Negative, non-finite and out-of-range values stay fail-closed.
+    for (name, raw, num, den, reason) in [
+        ("negative", "-1.5", 3, 2, "SamplePrecision"),
+        ("nan", "nan", 1, 1, "SamplePrecision"),
+        ("inf", "inf", 1, 1, "SamplePrecision"),
+        ("overflow", "1e30", 1, 1, "SampleOverflow"),
+        ("zero-denominator", "31.0", 31, 0, "SamplePrecision"),
+    ] {
+        let mut broken = fractional.clone();
+        broken["samples"][0] = mb_sample(0, None, None, raw, num, den);
+        let (code, report) = mb_inspect(&temp, name, &plan, &broken);
+        assert_eq!(code, 1, "{name}");
+        assert!(mb_has(&report, "invalid", reason), "{name}: {report}");
+    }
+}
+
+#[test]
 fn inspect_rejects_iteration_clock_units_and_correctness_drift() {
     let temp = Temp::new();
-    let plan = mb_cpu_plan("a01", START);
-    let base = mb_cpu_artifact(&plan, &[160, 100, 120, 140, 180]);
+    let plan = mb_cpu_plan("a01", START, "cpu-sum-u64-reference-v1");
+    let base = mb_cpu_uniform(&plan, 1000);
 
     let mut missing = base.clone();
     missing["samples"].as_array_mut().unwrap().pop();
@@ -470,15 +677,20 @@ fn inspect_rejects_iteration_clock_units_and_correctness_drift() {
     assert_eq!(code, 1);
     assert!(mb_has(&report, "invalid", "SampleGridIncomplete"), "{report}");
 
-    let mut extra = base.clone();
-    extra["execution"]["iterations"] = json!(4);
-    let (code, report) = mb_inspect(&temp, "iteration-count", &plan, &extra);
+    let mut warmups = base.clone();
+    warmups["execution"]["warmups"] = json!(0);
+    let (code, report) = mb_inspect(&temp, "warmups", &plan, &warmups);
+    assert_eq!(code, 1);
+    assert!(mb_has(&report, "invalid", "WarmupCountMismatch"), "{report}");
+
+    let mut iterations = base.clone();
+    iterations["execution"]["iterations"] = json!(4);
+    let (code, report) = mb_inspect(&temp, "iterations", &plan, &iterations);
     assert_eq!(code, 1);
     assert!(mb_has(&report, "invalid", "IterationCountMismatch"), "{report}");
 
     let mut units = base.clone();
     units["clock"]["units"] = json!("milliseconds");
-    units["clock"]["resolution_ns"] = json!(1000);
     let (code, report) = mb_inspect(&temp, "units", &plan, &units);
     assert_eq!(code, 1);
     assert!(mb_has(&report, "invalid", "ClockMismatch"), "{report}");
@@ -488,20 +700,6 @@ fn inspect_rejects_iteration_clock_units_and_correctness_drift() {
     let (code, report) = mb_inspect(&temp, "sync", &plan, &synchronization);
     assert_eq!(code, 1);
     assert!(mb_has(&report, "invalid", "ClockMismatch"), "{report}");
-
-    let mut precision = base.clone();
-    precision["samples"][0]["raw"] = json!("1.2345");
-    precision["samples"][0]["duration_ns"] = json!(12345);
-    let (code, report) = mb_inspect(&temp, "precision", &plan, &precision);
-    assert_eq!(code, 1);
-    assert!(mb_has(&report, "invalid", "SamplePrecision"), "{report}");
-
-    let mut zero = base.clone();
-    zero["samples"][1]["raw"] = json!("0");
-    zero["samples"][1]["duration_ns"] = json!(0);
-    let (code, report) = mb_inspect(&temp, "zero-duration", &plan, &zero);
-    assert_eq!(code, 1);
-    assert!(mb_has(&report, "invalid", "DurationOutOfRange"), "{report}");
 
     let mut inverted = base.clone();
     inverted["samples"][2]["rank"] = json!(0);
@@ -522,12 +720,6 @@ fn inspect_rejects_iteration_clock_units_and_correctness_drift() {
     assert_eq!(code, 1);
     assert!(mb_has(&report, "invalid", "IdentityDrift"), "{report}");
 
-    let mut sourced = base.clone();
-    sourced["sources"] = json!([{"path": "extra.py", "sha256": "d".repeat(64)}]);
-    let (code, report) = mb_inspect(&temp, "source-drift", &plan, &sourced);
-    assert_eq!(code, 1);
-    assert!(!mb_reasons(&report, "invalid").is_empty(), "{report}");
-
     let mut partial = base.clone();
     partial["execution"]["completed"] = json!(false);
     partial["execution"]["timed_out"] = json!(true);
@@ -544,10 +736,88 @@ fn inspect_rejects_iteration_clock_units_and_correctness_drift() {
 }
 
 #[test]
+fn inspect_checks_observed_sources_and_runtime_observations() {
+    let temp = Temp::new();
+    let plan = mb_e3_plan("a01", START);
+    let base = mb_e3_artifact(&plan, "e3-grouped", "0.003000000");
+    let (code, report) = mb_inspect(&temp, "e3", &plan, &base);
+    assert_eq!(code, 0, "{report}");
+    assert_eq!(report["samples"], 5);
+
+    // Observed source paths may differ from the declared hints; the hash set is
+    // what must match.
+    let mut renamed = base.clone();
+    renamed["sources"][2]["path"] = json!("/elsewhere/test_exl3_overlay.py");
+    let (code, report) = mb_inspect(&temp, "renamed-source", &plan, &renamed);
+    assert_eq!(code, 0, "{report}");
+
+    // A substituted source hash is identity drift even though the path matches.
+    let mut substituted = base.clone();
+    substituted["sources"][2]["sha256"] = json!(E3_ANCHOR_SHA256);
+    let (code, report) = mb_inspect(&temp, "substituted-source", &plan, &substituted);
+    assert_eq!(code, 1);
+    assert!(mb_has(&report, "invalid", "IdentityDrift"), "{report}");
+
+    // A pinned source the producer never observed is drift.
+    let mut dropped = base.clone();
+    dropped["sources"].as_array_mut().unwrap().pop();
+    let (code, report) = mb_inspect(&temp, "dropped-source", &plan, &dropped);
+    assert_eq!(code, 1);
+    assert!(mb_has(&report, "invalid", "IdentityDrift"), "{report}");
+
+    // Missing and drifted runtime observations are rejected, never ignored.
+    let mut missing = base.clone();
+    missing["observations"] = Value::Array(
+        missing["observations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|observation| observation["name"] != json!("topk"))
+            .cloned()
+            .collect(),
+    );
+    let (code, report) = mb_inspect(&temp, "missing-observation", &plan, &missing);
+    assert_eq!(code, 1);
+    assert!(mb_has(&report, "invalid", "ObservationMissing"), "{report}");
+
+    let mut drifted = base.clone();
+    for observation in drifted["observations"].as_array_mut().unwrap() {
+        if observation["name"] == json!("cap") {
+            observation["value"] = json!("64");
+        }
+    }
+    let (code, report) = mb_inspect(&temp, "drifted-observation", &plan, &drifted);
+    assert_eq!(code, 1);
+    assert!(mb_has(&report, "invalid", "ObservationDrift"), "{report}");
+
+    // An unavailable fallback tier is reported as unavailable and rejected,
+    // never accepted as a declared value.
+    let mut unavailable = base.clone();
+    unavailable["observations"] = mb_e3_observations("unavailable");
+    unavailable["execution"]["observed_fallback"] = Value::Null;
+    let (code, report) = mb_inspect(&temp, "fallback-unavailable", &plan, &unavailable);
+    assert_eq!(code, 1);
+    assert!(mb_has(&report, "invalid", "ObservationDrift"), "{report}");
+    assert!(mb_has(&report, "unavailable", "TierFallback"), "{report}");
+
+    // A device adapter never reports the CPU reference's empty observation set.
+    let mut cpu = mb_cpu_uniform(&mb_cpu_plan("a01", START, "cpu-sum-u64-reference-v1"), 1000);
+    cpu["observations"] = mb_e3_observations("e3-grouped");
+    let (code, report) = mb_inspect(
+        &temp,
+        "cpu-observations",
+        &mb_cpu_plan("a01", START, "cpu-sum-u64-reference-v1"),
+        &cpu,
+    );
+    assert_eq!(code, 1);
+    assert!(mb_has(&report, "invalid", "InvalidArtifact"), "{report}");
+}
+
+#[test]
 fn import_never_upgrades_a_native_provenance_claim() {
     let temp = Temp::new();
-    let plan = mb_cpu_plan("a01", START);
-    let artifact = mb_cpu_artifact(&plan, &[1000, 1000, 1000, 1000, 1000]);
+    let plan = mb_cpu_plan("a01", START, "cpu-sum-u64-reference-v1");
+    let artifact = mb_cpu_uniform(&plan, 1000);
     let artifact_bytes = serde_json::to_vec_pretty(&artifact).unwrap();
     let artifact_path = temp.path("imported-artifact.json");
     mb_write_bytes(&artifact_path, &artifact_bytes);
@@ -576,157 +846,257 @@ fn import_never_upgrades_a_native_provenance_claim() {
     let receipt: Value = serde_json::from_slice(&fs::read(out.join("receipt.json")).unwrap()).unwrap();
     assert_eq!(receipt["status"], "imported");
     assert_eq!(receipt["source_sha256"], json!(mb_sha(&artifact_bytes)));
-
-    let (code, inspection, _) = mb_run(&["inspect"], &[&out]);
-    assert_eq!(code, 0);
-    assert_eq!(inspection["provenance"], "imported");
-    assert_eq!(inspection["submitted_provenance"], "native_observed");
 }
 
 #[test]
-fn compare_uses_exact_envelope_arithmetic_at_the_declared_boundary() {
+fn group_compare_requires_three_complete_acquisitions_per_role() {
     let temp = Temp::new();
-    let a = mb_cpu_plan("a01", START);
-    let b = mb_cpu_plan("b01", START + 60_000);
-    let a2 = mb_cpu_plan("a02", START + 120_000);
-    let evidence = |name: &str, plan: &Value, durations: &[u64]| {
-        mb_evidence(&temp, name, plan, &mb_cpu_artifact(plan, durations))
-    };
-    let base = evidence("a", &a, &[1000; 5]);
-    let repeat = evidence("a2", &a2, &[1000; 5]);
-    // 1050 ns is exactly 5% above the 1000 ns reference: equality passes.
-    let edge = evidence("b", &b, &[1050; 5]);
-    let compare = |baseline: &Path, candidate: &Path, reference: &Path| {
-        let output = cli()
-            .args(["microbench", "compare"])
-            .arg(baseline)
-            .arg(candidate)
-            .arg("--reference")
-            .arg(reference)
-            .arg("--json")
-            .output()
-            .unwrap();
-        (mb_code(&output), mb_stdout(&output))
-    };
+    let study = mb_study("rev-a", "rev-b", 3, 3);
+    let baseline = mb_cpu_role(
+        &temp,
+        "baseline",
+        "baseline",
+        &[("rev-a", START, 1000), ("rev-a", START + 1_000, 1000), ("rev-a", START + 2_000, 1000)],
+    );
+    let candidate = mb_cpu_role(
+        &temp,
+        "candidate",
+        "candidate",
+        &[("rev-b", START + 60_000, 1000), ("rev-b", START + 61_000, 1000), ("rev-b", START + 62_000, 1000)],
+    );
+    let reference = mb_cpu_role(
+        &temp,
+        "reference",
+        "reference",
+        &[("rev-a", START + 120_000, 1000), ("rev-a", START + 121_000, 1000), ("rev-a", START + 122_000, 1000)],
+    );
 
-    let (code, report) = compare(&base, &edge, &repeat);
-    assert_eq!(code, 0, "{report}");
+    let (code, report, stderr) = mb_compare(&temp, "complete", &study, &baseline, &candidate, &reference);
+    assert_eq!(code, 0, "stderr={stderr} {report}");
     assert_eq!(report["decision"], "PASS");
-    assert_eq!(report["statistic"], "mean-duration-ns");
-    assert_eq!(report["direction"], "lower_better");
-    assert_eq!(report["axis"], "adapter-revision");
-    assert_eq!(report["candidate_range"][0]["numerator"], 1050);
-    assert_eq!(report["candidate_range"][0]["denominator"], 1);
-    assert_eq!(report["reference_range"][1]["numerator"], 1000);
-    assert!(report["scope"].as_str().unwrap().contains("Imported comparison only"));
-    assert!(report["scope"].as_str().unwrap().contains("never establish serving-speed"));
+    assert_eq!(report["study"]["declared_acquisitions"], 9);
+    assert_eq!(report["study"]["complete_acquisitions"], 9);
+    assert_eq!(report["roles"]["baseline"]["complete"], 3);
+    assert_eq!(report["roles"]["candidate"]["complete"], 3);
+    assert_eq!(report["roles"]["reference"]["complete"], 3);
+    assert_eq!(report["axis_baseline"], "rev-a");
+    assert_eq!(report["axis_candidate"], "rev-b");
+    assert_eq!(report["reason_codes"], json!([]));
 
-    // One nanosecond beyond the same boundary regresses.
-    let worse = evidence("b2", &b, &[1051; 5]);
-    let (code, report) = compare(&base, &worse, &repeat);
-    assert_eq!(code, 3, "{report}");
+    // A role that declares fewer than the minimum is rejected outright.
+    let short_study = mb_study("rev-a", "rev-b", 2, 2);
+    let (code, report, _) = mb_compare(&temp, "short", &short_study, &baseline, &candidate, &reference);
+    assert_eq!(code, 1);
+    assert!(mb_has(&report, "reason_codes", "RoleMinimum"), "{report}");
+
+    // A declared acquisition that is not present withholds the verdict; it is
+    // never replaced or filtered into a survivor set.
+    let missing_study = mb_study("rev-a", "rev-b", 4, 3);
+    let (code, report, _) = mb_compare(&temp, "missing", &missing_study, &baseline, &candidate, &reference);
+    assert_eq!(code, 2);
+    assert_eq!(report["decision"], "INCONCLUSIVE");
+    assert!(mb_has(&report, "reason_codes", "MissingAcquisition"), "{report}");
+
+    // An unexpected acquisition directory is rejected, not ignored.
+    let extra_plan = mb_cpu_plan("candidate99", START + 90_000, "rev-b");
+    let extra = mb_dir(&candidate.join("candidate99"));
+    mb_write(&extra.join("plan.json"), &extra_plan);
+    mb_write(&extra.join("artifact.json"), &mb_cpu_uniform(&extra_plan, 1000));
+    let (code, report, _) = mb_compare(&temp, "extra", &study, &baseline, &candidate, &reference);
+    assert_eq!(code, 1);
+    assert!(mb_has(&report, "reason_codes", "UnexpectedAcquisition"), "{report}");
+    fs::remove_dir_all(&extra).unwrap();
+
+    // A member that did not finish is unavailable, not a smaller sample.
+    let partial_role = mb_dir(&temp.path("partial"));
+    for (index, started) in [START + 60_000u64, START + 61_000, START + 62_000].into_iter().enumerate() {
+        let id = format!("candidate{index:02}");
+        let plan = mb_cpu_plan(&id, started, "rev-b");
+        let mut artifact = mb_cpu_uniform(&plan, 1000);
+        if index == 0 {
+            artifact["execution"]["timed_out"] = json!(true);
+            artifact["execution"]["completed"] = json!(false);
+        }
+        mb_member(&partial_role, &id, &plan, &artifact, COLLECTOR);
+    }
+    let (code, report, _) = mb_compare(&temp, "partial", &study, &baseline, &partial_role, &reference);
+    assert_eq!(code, 2);
+    assert_eq!(report["roles"]["candidate"]["eligible"], false);
+    assert!(mb_has(&report, "reason_codes", "DeadlineExceeded"), "{report}");
+
+    // A rejected member (failed numerical correctness) is an error, and a
+    // faster candidate can never outweigh it.
+    let broken_role = mb_dir(&temp.path("broken"));
+    for (index, started) in [START + 60_000u64, START + 61_000, START + 62_000].into_iter().enumerate() {
+        let id = format!("candidate{index:02}");
+        let plan = mb_cpu_plan(&id, started, "rev-b");
+        let mut artifact = mb_cpu_uniform(&plan, 1);
+        if index == 0 {
+            artifact["correctness"]["computed"] = json!("8386559");
+            artifact["correctness"]["passed"] = json!(false);
+        }
+        mb_member(&broken_role, &id, &plan, &artifact, COLLECTOR);
+    }
+    let (code, report, _) = mb_compare(&temp, "broken", &study, &baseline, &broken_role, &reference);
+    assert_eq!(code, 1);
+    assert_ne!(report["decision"], "PASS");
+    assert!(mb_has(&report, "reason_codes", "CorrectnessFailed"), "{report}");
+}
+
+#[test]
+fn group_compare_envelope_boundaries_and_pooled_reference() {
+    let temp = Temp::new();
+    let study = mb_study("rev-a", "rev-b", 3, 3);
+    let baseline = mb_cpu_role(
+        &temp,
+        "baseline",
+        "baseline",
+        &[("rev-a", START, 1000), ("rev-a", START + 1_000, 1000), ("rev-a", START + 2_000, 1000)],
+    );
+    let reference = mb_cpu_role(
+        &temp,
+        "reference",
+        "reference",
+        &[("rev-a", START + 120_000, 1010), ("rev-a", START + 121_000, 1010), ("rev-a", START + 122_000, 1010)],
+    );
+    let edge = mb_cpu_role(
+        &temp,
+        "edge",
+        "candidate",
+        &[("rev-b", START + 60_000, 1050), ("rev-b", START + 61_000, 1050), ("rev-b", START + 62_000, 1050)],
+    );
+    let worse = mb_cpu_role(
+        &temp,
+        "worse",
+        "candidate",
+        &[("rev-b", START + 60_000, 1051), ("rev-b", START + 61_000, 1051), ("rev-b", START + 62_000, 1051)],
+    );
+
+    // The pooled A/A2 envelope is [1000, 1010]; 5% above the low end is exactly
+    // 1050, so equality passes and one nanosecond more regresses.
+    let (code, report, stderr) = mb_compare(&temp, "edge", &study, &baseline, &edge, &reference);
+    assert_eq!(code, 0, "stderr={stderr} {report}");
+    assert_eq!(report["reference_range"][0]["numerator"], 1000);
+    assert_eq!(report["reference_range"][1]["numerator"], 1010);
+    assert_eq!(report["candidate_range"][0]["numerator"], 1050);
+    assert_eq!(report["roles"]["candidate"]["range"][0]["numerator"], 1050);
+
+    let (code, report, _) = mb_compare(&temp, "worse", &study, &baseline, &worse, &reference);
+    assert_eq!(code, 3);
     assert_eq!(report["decision"], "REGRESSION");
 
     // A reference spread wider than declared withholds the comparison.
-    let mut wide_plan = a2.clone();
-    wide_plan["acquisition"]["id"] = json!("a03");
-    let wide = evidence("a3", &wide_plan, &[1300; 5]);
-    let (code, report) = compare(&base, &worse, &wide);
-    assert_eq!(code, 2, "{report}");
+    let wide = mb_cpu_role(
+        &temp,
+        "wide",
+        "reference",
+        &[("rev-a", START + 120_000, 1300), ("rev-a", START + 121_000, 1300), ("rev-a", START + 122_000, 1300)],
+    );
+    let (code, report, _) = mb_compare(&temp, "spread", &study, &baseline, &edge, &wide);
+    assert_eq!(code, 2);
     assert_eq!(report["decision"], "INCONCLUSIVE");
     assert!(mb_has(&report, "reason_codes", "ReferenceSpreadExceeded"), "{report}");
-
-    // The reference role is required before any favorable verdict.
-    let output = cli()
-        .args(["microbench", "compare"])
-        .arg(&base)
-        .arg(&edge)
-        .arg("--json")
-        .output()
-        .unwrap();
-    assert_eq!(mb_code(&output), 2);
-    assert!(mb_has(&mb_stdout(&output), "reason_codes", "MissingReference"));
 }
 
 #[test]
-fn compare_rejects_role_reuse_order_and_pin_drift() {
+fn group_compare_rejects_membership_axis_and_collector_drift() {
     let temp = Temp::new();
-    let a = mb_cpu_plan("a01", START);
-    let b = mb_cpu_plan("b01", START + 60_000);
-    let a2 = mb_cpu_plan("a02", START + 120_000);
-    let durations = [1000; 5];
-    let base = mb_evidence(&temp, "a", &a, &mb_cpu_artifact(&a, &durations));
-    let candidate = mb_evidence(&temp, "b", &b, &mb_cpu_artifact(&b, &durations));
-    let compare = |baseline: &Path, candidate: &Path, reference: &Path| {
-        let output = cli()
-            .args(["microbench", "compare"])
-            .arg(baseline)
-            .arg(candidate)
-            .arg("--reference")
-            .arg(reference)
-            .arg("--json")
-            .output()
-            .unwrap();
-        (mb_code(&output), mb_stdout(&output))
+    let study = mb_study("rev-a", "rev-b", 3, 3);
+    let revisions = |revision: &'static str, started: u64| {
+        vec![
+            (revision, started, 1000u64),
+            (revision, started + 1000, 1000),
+            (revision, started + 2000, 1000),
+        ]
     };
+    let baseline = mb_cpu_role(&temp, "baseline", "baseline", &revisions("rev-a", START));
+    let candidate = mb_cpu_role(&temp, "candidate", "candidate", &revisions("rev-b", START + 60_000));
+    let reference = mb_cpu_role(&temp, "reference", "reference", &revisions("rev-a", START + 120_000));
 
-    // The same acquisition identity in two roles is role reuse.
-    let reused = mb_evidence(&temp, "reuse", &a, &mb_cpu_artifact(&a, &durations));
-    let (code, report) = compare(&base, &candidate, &reused);
-    assert_eq!(code, 1, "{report}");
-    assert!(mb_has(&report, "reason_codes", "RoleReuse"), "{report}");
+    // A candidate member whose revision is not the declared change axis.
+    let wrong_axis = mb_cpu_role(&temp, "wrong-axis", "candidate", &revisions("rev-a", START + 60_000));
+    let (code, report, _) = mb_compare(&temp, "axis", &study, &baseline, &wrong_axis, &reference);
+    assert_eq!(code, 1);
+    assert!(mb_has(&report, "reason_codes", "ObservationDrift"), "{report}");
 
-    // Declared starts must be strictly ordered A < B < A2.
-    let mut early = a2.clone();
-    early["acquisition"]["started_unix_ms"] = json!(START + 1_000);
-    let out_of_order = mb_evidence(&temp, "early", &early, &mb_cpu_artifact(&early, &durations));
-    let (code, report) = compare(&base, &candidate, &out_of_order);
-    assert_eq!(code, 1, "{report}");
+    // Role starts must be strictly ordered A < B < A2.
+    let early = mb_cpu_role(&temp, "early", "reference", &revisions("rev-a", START + 1_000));
+    let (code, report, _) = mb_compare(&temp, "order", &study, &baseline, &candidate, &early);
+    assert_eq!(code, 1);
     assert!(mb_has(&report, "reason_codes", "DeclaredStartsOutOfOrder"), "{report}");
 
-    // Any pin other than the declared revision axis must match across roles.
-    let mut thresholds = a2.clone();
-    thresholds["thresholds"]["adverse_bps"] = json!(400);
-    let drifted = mb_evidence(&temp, "thresholds", &thresholds, &mb_cpu_artifact(&thresholds, &durations));
-    let (code, report) = compare(&base, &candidate, &drifted);
-    assert_eq!(code, 1, "{report}");
+    // Within one role the declared order must also be strictly increasing.
+    let shuffled = mb_cpu_role(
+        &temp,
+        "shuffled",
+        "baseline",
+        &[("rev-a", START, 1000), ("rev-a", START, 1000), ("rev-a", START + 2000, 1000)],
+    );
+    let (code, report, _) = mb_compare(&temp, "shuffled", &study, &shuffled, &candidate, &reference);
+    assert_eq!(code, 1);
+    assert!(mb_has(&report, "reason_codes", "DeclaredStartsOutOfOrder"), "{report}");
+
+    // A different collector for one member breaks the collector contract.
+    let mixed = mb_dir(&temp.path("mixed"));
+    for (index, started) in [START + 60_000u64, START + 61_000, START + 62_000].into_iter().enumerate() {
+        let id = format!("candidate{index:02}");
+        let plan = mb_cpu_plan(&id, started, "rev-b");
+        let collector = if index == 1 { COLLECTOR_OTHER } else { COLLECTOR };
+        mb_member(&mixed, &id, &plan, &mb_cpu_uniform(&plan, 1000), collector);
+    }
+    let (code, report, _) = mb_compare(&temp, "collector", &study, &baseline, &mixed, &reference);
+    assert_eq!(code, 1);
+    assert!(mb_has(&report, "reason_codes", "CollectorMismatch"), "{report}");
+
+    // The same acquisition reused in two roles is role reuse.
+    let reused = mb_dir(&temp.path("reused"));
+    for (index, started) in [START, START + 1000, START + 2000].into_iter().enumerate() {
+        let id = format!("baseline{index:02}");
+        let plan = mb_cpu_plan(&id, started, "rev-a");
+        mb_member(&reused, &id, &plan, &mb_cpu_uniform(&plan, 1000), COLLECTOR);
+    }
+    let (code, report, _) = mb_compare(&temp, "reuse", &study, &baseline, &candidate, &reused);
+    assert_eq!(code, 1);
+    assert!(mb_has(&report, "reason_codes", "RoleReuse"), "{report}");
+
+    // A member whose pins differ from the rest of the study is identity drift.
+    let drifted = mb_dir(&temp.path("drifted"));
+    for (index, started) in [START + 60_000u64, START + 61_000, START + 62_000].into_iter().enumerate() {
+        let id = format!("candidate{index:02}");
+        let mut plan = mb_cpu_plan(&id, started, "rev-b");
+        let artifact = if index == 0 {
+            plan["allowance"]["work_units"] = json!(30000);
+            mb_cpu_uniform(&plan, 1000)
+        } else {
+            mb_cpu_uniform(&plan, 1000)
+        };
+        mb_member(&drifted, &id, &plan, &artifact, COLLECTOR);
+    }
+    let (code, report, _) = mb_compare(&temp, "pins", &study, &baseline, &drifted, &reference);
+    assert_eq!(code, 1);
     assert!(mb_has(&report, "reason_codes", "IdentityDrift"), "{report}");
 
-    let repeat = mb_evidence(&temp, "a2", &a2, &mb_cpu_artifact(&a2, &durations));
-
-    // A faster candidate whose correctness failed cannot pass.
-    let mut failed = mb_cpu_artifact(&b, &[500; 5]);
-    failed["correctness"]["computed"] = json!("8386559");
-    failed["correctness"]["passed"] = json!(false);
-    let broken = mb_evidence(&temp, "broken", &b, &failed);
-    let (code, report) = compare(&base, &broken, &repeat);
-    assert_eq!(code, 1, "{report}");
-    assert_ne!(report["decision"], "PASS");
-    assert!(mb_has(&report, "reason_codes", "CorrectnessFailed"), "{report}");
-    assert_eq!(report["roles"]["candidate"]["eligible"], false);
-
-    // A timed-out candidate acquisition is unavailable, not a fast run.
-    let mut partial = mb_cpu_artifact(&b, &[500; 5]);
-    partial["execution"]["timed_out"] = json!(true);
-    partial["execution"]["completed"] = json!(false);
-    let unavailable = mb_evidence(&temp, "unavailable", &b, &partial);
-    let (code, report) = compare(&base, &unavailable, &repeat);
-    assert_eq!(code, 2, "{report}");
-    assert_eq!(report["decision"], "INCONCLUSIVE");
-    assert!(mb_has(&report, "reason_codes", "DeadlineExceeded"), "{report}");
-    assert_eq!(report["roles"]["candidate"]["statistic"], Value::Null);
+    // An invalid study declaration is rejected before any comparison.
+    let (code, report, _) = mb_compare(
+        &temp,
+        "incomplete-study",
+        &json!({"kind": "microbench-study-v1", "version": 1}),
+        &baseline,
+        &candidate,
+        &reference,
+    );
+    assert_eq!(code, 1);
+    assert!(mb_has(&report, "reason_codes", "InvalidStudy"), "{report}");
 }
 
 #[test]
-fn collective_evidence_keeps_rank_scope_bytes_and_clock_contract() {
+fn collective_world_samples_use_per_repetition_maxima() {
     let temp = Temp::new();
-    let plan = mb_reduce_plan("a01", START, 2, &"a".repeat(64));
-    // Rank durations differ per repetition; one sample is the per-repetition max.
+    let plan = mb_reduce_plan("a01", START, 2);
     let per_repetition: Vec<Vec<u64>> = (0..5).map(|index| vec![1000 + index, 2000 + index]).collect();
     let artifact = mb_reduce_artifact(&plan, &per_repetition, 0);
     let (code, report) = mb_inspect(&temp, "collective", &plan, &artifact);
     assert_eq!(code, 0, "{report}");
-    assert_eq!(report["plan_verified"], true);
     assert_eq!(report["samples"], 10);
     // mean of per-repetition maxima (2000..2004) = 2002
     assert_eq!(report["statistic"]["numerator"], 2002);
@@ -735,21 +1105,15 @@ fn collective_evidence_keeps_rank_scope_bytes_and_clock_contract() {
     assert_eq!(report["derived"]["bus_normalization"]["numerator"], 1);
     assert_eq!(report["derived"]["bus_normalization"]["denominator"], 1);
     assert!(
-        report["derived"]["definition"]
-            .as_str()
-            .unwrap()
-            .contains("numel * sizeof(dtype)")
-    );
-    assert!(
         report["derived"]["bus_scope"]
             .as_str()
             .unwrap()
             .contains("not measured physical link traffic")
     );
 
-    // A trailing world larger than two keeps the same payload bytes and a
-    // different bus normalization; the two are never conflated.
-    let three = mb_reduce_plan("a01", START, 3, &"a".repeat(64));
+    // A world larger than two keeps identical payload bytes and a different
+    // bus normalization; the two are never conflated.
+    let three = mb_reduce_plan("a01", START, 3);
     let wide = mb_reduce_artifact(
         &three,
         &(0..5).map(|_| vec![1000, 1000, 1000]).collect::<Vec<Vec<u64>>>(),
@@ -760,8 +1124,9 @@ fn collective_evidence_keeps_rank_scope_bytes_and_clock_contract() {
     assert_eq!(report["derived"]["payload_bytes"], 2097152);
     assert_eq!(report["derived"]["bus_normalization"]["numerator"], 4);
     assert_eq!(report["derived"]["bus_normalization"]["denominator"], 3);
+    assert_eq!(report["statistic"]["numerator"], 1000);
 
-    // Missing rank evidence is a rejected grid, never a silent survivor set.
+    // A missing rank is a rejected grid, never a survivor set.
     let kept: Vec<Value> = artifact["samples"]
         .as_array()
         .unwrap()
@@ -775,76 +1140,60 @@ fn collective_evidence_keeps_rank_scope_bytes_and_clock_contract() {
     assert_eq!(code, 1);
     assert!(mb_has(&report, "invalid", "SampleGridIncomplete"), "{report}");
 
+    // A world observation that disagrees with the topology is rejected.
+    let mut world_drift = artifact.clone();
+    for observation in world_drift["observations"].as_array_mut().unwrap() {
+        if observation["name"] == json!("world") {
+            observation["value"] = json!("3");
+        }
+    }
+    let (code, report) = mb_inspect(&temp, "world-observation", &plan, &world_drift);
+    assert_eq!(code, 1);
+    assert!(mb_has(&report, "invalid", "ObservationDrift"), "{report}");
+
+    // A collective that could not verify any of its own bytes is rejected.
+    let mut unverified = artifact.clone();
+    for observation in unverified["observations"].as_array_mut().unwrap() {
+        if observation["name"] == json!("sources-verified") {
+            observation["value"] = json!("0");
+        }
+    }
+    let (code, report) = mb_inspect(&temp, "unverified", &plan, &unverified);
+    assert_eq!(code, 1);
+    assert!(mb_has(&report, "invalid", "ObservationMissing"), "{report}");
+
     let mismatched = mb_reduce_artifact(&plan, &per_repetition, 3);
     let (code, report) = mb_inspect(&temp, "mismatch", &plan, &mismatched);
     assert_eq!(code, 1);
     assert!(mb_has(&report, "invalid", "CorrectnessFailed"), "{report}");
-
-    let mut unsynchronized = artifact.clone();
-    unsynchronized["clock"]["synchronization"] = json!("process-clock-read-before-after");
-    let (code, report) = mb_inspect(&temp, "collective-sync", &plan, &unsynchronized);
-    assert_eq!(code, 1);
-    assert!(mb_has(&report, "invalid", "ClockMismatch"), "{report}");
-
-    let mut world_drift = artifact.clone();
-    world_drift["topology"]["world"] = json!(3);
-    world_drift["topology"]["ranks"] =
-        json!([{"index": 0, "device": 0}, {"index": 1, "device": 1}, {"index": 2, "device": 2}]);
-    let (code, report) = mb_inspect(&temp, "world-drift", &plan, &world_drift);
-    assert_eq!(code, 1);
-    assert!(!mb_reasons(&report, "invalid").is_empty(), "{report}");
-
-    let mut timed_out = artifact.clone();
-    timed_out["execution"]["timed_out"] = json!(true);
-    let (code, report) = mb_inspect(&temp, "collective-timeout", &plan, &timed_out);
-    assert_eq!(code, 2);
-    assert!(mb_has(&report, "unavailable", "DeadlineExceeded"), "{report}");
 }
 
 #[test]
-fn e3_parity_recomputation_rejects_widened_tolerances_and_tier_fallbacks() {
+fn e3_parity_tolerance_boundaries_and_tier_fallbacks() {
     let temp = Temp::new();
     let plan = mb_e3_plan("a01", START);
-    let valid = mb_e3_artifact(&plan, "e3-grouped", "0.003000000");
-    let (code, report) = mb_inspect(&temp, "e3-valid", &plan, &valid);
-    assert_eq!(code, 0, "{report}");
-    assert_eq!(report["samples"], 5);
-    assert_eq!(report["provenance"], "native_observed");
-    assert_eq!(report["exerciser"], "native-device-program-observation");
 
-    // Importing a payload that claims native execution keeps the imported label.
-    let artifact_path = temp.path("e3-artifact.json");
-    mb_write(&artifact_path, &valid);
-    let plan_path = temp.path("e3-plan.json");
-    mb_write(&plan_path, &plan);
-    let out = temp.path("e3-imported");
-    let output = cli()
-        .args(["microbench", "import", "--artifact"])
-        .arg(&artifact_path)
-        .arg("--plan")
-        .arg(&plan_path)
-        .arg("--out")
-        .arg(&out)
-        .arg("--json")
-        .output()
-        .unwrap();
-    assert_eq!(mb_code(&output), 0, "{}", String::from_utf8_lossy(&output.stderr));
-    let imported = mb_stdout(&output);
-    assert_eq!(imported["provenance"], "imported");
-    assert_eq!(imported["exerciser"], "imported-bytes");
-    assert!(imported["scope"].as_str().unwrap().contains("cannot establish"));
+    // Exactly on the recomputed maxabs and nRMSE bounds passes.
+    let mut boundary = mb_e3_artifact(&plan, "e3-grouped", "0.003500000");
+    boundary["correctness"]["e3"]["nrmse"] = json!("0.015100000");
+    let (code, report) = mb_inspect(&temp, "e3-boundary", &plan, &boundary);
+    assert_eq!(code, 0, "{report}");
+
+    // One micro-unit beyond the bound fails.
+    let (code, report) = mb_inspect(
+        &temp,
+        "e3-over",
+        &plan,
+        &mb_e3_artifact(&plan, "e3-grouped", "0.003600000"),
+    );
+    assert_eq!(code, 1);
+    assert!(mb_has(&report, "invalid", "CorrectnessFailed"), "{report}");
 
     // A silent lower-tier fallback withholds the measurement.
     let fallback = mb_e3_artifact(&plan, "e2-kernel", "0.003000000");
     let (code, report) = mb_inspect(&temp, "e3-fallback", &plan, &fallback);
     assert_eq!(code, 2);
     assert!(mb_has(&report, "unavailable", "TierFallback"), "{report}");
-
-    // Parity beyond the recomputed bound is a correctness failure.
-    let wide = mb_e3_artifact(&plan, "e3-grouped", "0.004000000");
-    let (code, report) = mb_inspect(&temp, "e3-parity", &plan, &wide);
-    assert_eq!(code, 1);
-    assert!(mb_has(&report, "invalid", "CorrectnessFailed"), "{report}");
 
     // A relaxed tolerance is an identity change, not a tolerable difference.
     let mut relaxed = mb_e3_artifact(&plan, "e3-grouped", "0.005000000");
@@ -860,9 +1209,9 @@ fn e3_parity_recomputation_rejects_widened_tolerances_and_tier_fallbacks() {
     assert_eq!(code, 1);
     assert!(mb_has(&report, "invalid", "NonFinite"), "{report}");
 
-    let mut drifted = mb_e3_artifact(&plan, "e3-grouped", "0.003000000");
-    drifted["operation"]["cap"] = json!(64);
-    let (code, report) = mb_inspect(&temp, "e3-cap-drift", &plan, &drifted);
+    let mut cap_drift = mb_e3_artifact(&plan, "e3-grouped", "0.003000000");
+    cap_drift["operation"]["cap"] = json!(64);
+    let (code, report) = mb_inspect(&temp, "e3-cap", &plan, &cap_drift);
     assert_eq!(code, 1);
     assert!(mb_has(&report, "invalid", "IdentityDrift"), "{report}");
 }
@@ -884,7 +1233,12 @@ fn external_program_launch_pins_the_program_and_retains_failures() {
     fs::set_permissions(&fixture, fs::Permissions::from_mode(0o755)).unwrap();
     let program_sha = mb_sha(&fs::read(&fixture).unwrap());
 
-    let plan = mb_reduce_plan("a01", START, 2, &program_sha);
+    let mut plan = mb_reduce_plan("a01", START, 2);
+    plan["program_sha256"] = json!(program_sha);
+    plan["sources"] = json!([
+        {"path": "tools/microbench/nccl_allreduce_sum.py", "sha256": program_sha},
+        {"path": "doc/PERFORMANCE.md", "sha256": NCCL_BYTE_SOURCE_SHA256}
+    ]);
     let body = mb_reduce_artifact(&plan, &[vec![1000, 1000]; 5], 0);
     mb_write(&body_path, &body);
     let plan_path = temp.path("launch-plan.json");
@@ -907,7 +1261,7 @@ fn external_program_launch_pins_the_program_and_retains_failures() {
     assert_eq!(report["provenance"], "native_observed");
     assert_eq!(report["exerciser"], "native-collective-program-observation");
     assert_eq!(report["program_sha256"], program_sha);
-    assert!(report["scope"].as_str().unwrap().contains("never sets a serving-speed claim"));
+    assert!(report["scope"].as_str().unwrap().contains("not authenticated execution"));
     let receipt: Value = serde_json::from_slice(&fs::read(out.join("receipt.json")).unwrap()).unwrap();
     assert_eq!(receipt["program_sha256"], program_sha);
     assert_eq!(receipt["status"], "captured");

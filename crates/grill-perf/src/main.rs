@@ -210,8 +210,7 @@ fn execute(cli: Cli) -> model::Result<u8> {
         Command::Microbench {
             command: MicrobenchCommand::Compare(options),
         } => {
-            let decision =
-                microbench::compare(&options.baseline, &options.candidate, options.reference.as_deref());
+            let decision = microbench::compare(&options);
             if options.json {
                 print_json(&decision)?;
             } else {

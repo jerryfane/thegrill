@@ -1070,7 +1070,8 @@ kernel or collective changed. The subcommands are `capture` (run the
 in-process CPU reference, or one explicitly declared adapter program), `import`
 (validate retained producer bytes and record them with imported provenance),
 `inspect` (validate and print identity, samples, byte definitions and retained
-failures) and `compare` (A/B/A2 with the shared exact envelope arithmetic).
+failures) and `compare` (a declared study with the shared exact envelope
+arithmetic).
 
 Provenance is `declared`, `imported` or `native_observed`, and importing never
 upgrades it: a payload that claims native execution keeps that claim only in
@@ -1081,13 +1082,24 @@ the current CPU-only authorization only the in-process `sum_u64` reference runs:
 it proves native operation execution, sample recording, inspection and exact
 comparison, not GPU support.
 
-Frozen cells, clock/unit/synchronization contracts, the pinned public E3 and
-nccl-tests sources with their hashes, the exact-decimal sample rule, the
-collective rank-scope sample unit, and the corrected byte definitions
-(`payload_bytes = numel * sizeof(dtype)`; `2*(world-1)/world` is the labelled
-nccl-tests bus normalization, never measured link traffic) are specified in
-[the kernel and collective protocol](KERNEL-FABRIC.md), together with the CPU
-smoke plan and the explicitly unexercised device gaps.
+A comparison needs a prospectively declared study of **at least three complete
+measured acquisitions in each of the A, B and A2 roles**. Slots are declared
+before capture, membership is exact (an undeclared directory is an error, a
+declared but missing or failed acquisition withholds the verdict rather than
+being replaced or filtered), every pin except the declared revision axis must
+match, and the A/A2 statistics are pooled into the reference envelope. Each
+sample keeps the timer's own decimal representation and its exact rational
+nanosecond duration, so a fractional nanosecond and a scientific-notation
+device sample survive unrounded.
+
+Frozen cells, clock/unit/synchronization contracts with declared timer
+resolution, the study and group-comparison contract, observed-source and
+runtime-observation pins, the pinned public E3 and nccl-tests sources with
+their hashes, the collective rank-scope sample unit, and the corrected byte
+definitions (`payload_bytes = numel * sizeof(dtype)`; `2*(world-1)/world` is the
+labelled nccl-tests bus normalization, never measured link traffic) are
+specified in [the kernel and collective protocol](KERNEL-FABRIC.md), together
+with the CPU smoke plan and the explicitly unexercised device gaps.
 
 ## Optional provider snapshots
 

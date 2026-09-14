@@ -13,7 +13,11 @@ Three states are separate and never silently upgraded:
 | `imported` | Bytes this collector parsed but did not produce. Importing always records `imported`, even when the payload claims native execution; the payload's own claim is retained in `submitted_provenance` for audit. |
 | `native_observed` | Bytes produced by a program this collector launched, or by the in-process CPU reference. This records *observation*, never authenticated execution. |
 
-A kernel or collective result never sets a serving-speed claim. That needs a
+Every runtime pin inside an artifact (installed versions, loaded module hash,
+device names, the parameters actually used, how many pinned sources were read
+from bytes) is an unauthenticated observation of what the producing process saw.
+No declared implementation pin is echoed back as observed kernel provenance. A
+kernel or collective result never sets a serving-speed claim; that needs a
 separately linked serving acquisition.
 
 ## Commands
@@ -22,7 +26,7 @@ separately linked serving acquisition.
 grill-perf microbench capture --adapter <id> --plan PLAN --out DIR [--program PATH] [--authorize-device-window] [-- ARGS...]
 grill-perf microbench import --artifact FILE --plan PLAN --out DIR
 grill-perf microbench inspect PATH
-grill-perf microbench compare BASELINE CANDIDATE [--reference A2]
+grill-perf microbench compare --study STUDY --baseline DIR --candidate DIR --reference DIR
 ```
 
 `capture` writes `plan.json`, `artifact.json` and `receipt.json` into a fresh
@@ -31,9 +35,10 @@ three files with `provenance: imported`, so retained producer bytes can be
 compared offline without ever being labelled as exercised.
 
 Exit codes follow the existing observed-envelope order: `0` PASS, `1` ERROR
-(invalid, corrupt or identity-drifted evidence), `2` INCONCLUSIVE (retained but
-unavailable), `3` REGRESSION. `compare` uses the shared `envelope.rs` exact
-rational arithmetic — no second statistical engine.
+(invalid, corrupt, drifted or incomplete-declaration evidence), `2`
+INCONCLUSIVE (retained but unavailable), `3` REGRESSION. `compare` uses the
+shared `envelope.rs` exact rational arithmetic — no second statistical engine
+and no floating-point decision path.
 
 ## Closed adapters and frozen cells
 
@@ -44,12 +49,13 @@ rational arithmetic — no second statistical engine.
 | `nccl-allreduce-sum` | Ranks | Operator program under `torchrun` | `all_reduce` SUM, `int64`, numel 262144, declared world and ranks 0..world-1, warmups 1, measured iterations 5 |
 
 The frozen cells are checked in code, not only documented: a plan that changes
-the shape, cap, skew, tier, dtype, routing, clock or bit-width is rejected with
-`IdentityDrift` before anything runs. There is no shape, cap, skew, tier or
-world search, no best-median summary, no `torch.cuda.empty_cache()`, no remote
-discovery and no script-hook framework. A plan names one adapter; the device
-adapters additionally name one explicit `--program` whose SHA-256 the collector
-hashes and checks against `plan.program_sha256`.
+the shape, cap, skew, tier, dtype, routing, clock, warmup count or bit-width is
+rejected with `IdentityDrift` / `WarmupCountMismatch` / `IterationCountMismatch`
+before anything runs. There is no shape, cap, skew, tier or world search, no
+best-median summary, no `torch.cuda.empty_cache()`, no remote discovery and no
+script-hook framework. A plan names one adapter; the device adapters
+additionally name one explicit `--program` whose SHA-256 the collector hashes
+and checks against `plan.program_sha256`.
 
 Device and collective capture is behind `--authorize-device-window`. Without
 it, `capture` refuses before creating any output directory. Under the current
@@ -59,9 +65,8 @@ the device adapters are delivered callable code and remain unexercised.
 ## Pinned public sources
 
 The two device adapters bind to reviewed public sources. The hashes below were
-recorded before implementation and are re-verified at run time; a mismatch
-aborts before any device work. Plans ship with the same pins and the collector
-requires `artifact.sources == plan.sources` exactly.
+recorded before implementation and are re-verified at run time from the bytes
+the adapter reads; a mismatch aborts before any device work.
 
 ```
 MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks @ f906ee990596486e10ddbe381efa6f0e496f77e3
@@ -76,10 +81,18 @@ from the pinned anchor and `_err_stats` / `_assert_e3_within` from the pinned
 tolerance file; it never calls the anchor's `main()`. `nccl_allreduce_sum.py`
 uses the pinned byte definitions for its reported bandwidth labels.
 
-A declared source path that does not exist on the producing host stays a
-declaration retained verbatim, never silently dropped or rewritten. The one pin
-the collector verifies directly is `program_sha256`, because the collector
-hashes the program it launched.
+**Sources are observed, not echoed.** A plan pins `sources[].sha256` (paths are
+declared hints). The artifact retains the sources the producer actually read
+with the hashes it computed from those bytes; the collector requires the
+observed hash set to equal the pinned hash set exactly, so a producer cannot
+drop, add or substitute a pin, while a different filesystem path for the same
+bytes is fine. Each adapter also reports how many pins it verified from bytes
+(`sources-verified`) and how many it could only echo as declarations
+(`sources-declared`). The E3 adapter requires every pin to be verified; the
+collective adapter always verifies at least its own program and may declare a
+reference document it cannot resolve on the producing host. The one pin the
+collector verifies directly is `program_sha256`, because it hashes the program
+it launched.
 
 ## Correctness is not optional
 
@@ -89,10 +102,12 @@ with the frozen tolerances (`E3_TOL_FACTOR = 1.5`, `E3_TOL_ABS_REL = 1e-3`,
 The collector recomputes every bound exactly from the retained `ref_max` and E2
 statistics and compares the E3 statistics against them, so a widened tolerance
 or an out-of-contract tolerance value is an identity error rather than a
-tolerated difference. Non-finite statistics fail closed.
+tolerated difference. Non-finite statistics fail closed; the coarse bound is
+strict, the others inclusive.
 
-The effective tier and the last observed fallback must both be `grouped`; a
-silent lower-tier fallback is withheld (`TierFallback`), never timed as E3.
+The effective tier and the last observed fallback must both be `grouped`, and
+the reported `fallback-tier` observation must say so; a silent lower-tier
+fallback is withheld (`TierFallback`) or rejected as drift, never timed as E3.
 Numerical work uses synthetic Zipf routing, labelled synthetic in the operation
 identity — it is not the served routing distribution.
 
@@ -104,20 +119,40 @@ comparison ERROR or INCONCLUSIVE, never PASS.
 
 ## Clocks, units and samples
 
-Every artifact carries exactly one clock identity, kind, units, resolution and
-synchronization contract, and the plan must declare the identical contract:
+Every artifact carries exactly one clock identity, kind, units, declared
+resolution and synchronization contract, and the plan must declare the identical
+contract:
 
-| Adapter | Clock | Units | Resolution | Synchronization |
+| Adapter | Clock | Units | Declared resolution | Synchronization |
 |---|---|---|---|---|
 | `cpu-sum-u64-reference` | `process-monotonic-ns` | nanoseconds | 1 ns | read before and after the operation |
 | `exl3-e3-grouped` | `cuda-event-ms` | milliseconds | 1000 ns | CUDA events with a device synchronize before each read |
 | `nccl-allreduce-sum` | `rank-monotonic-ns` | nanoseconds | 1 ns | completed collective barrier before and after the timed collective |
 
-Each sample retains the exact decimal text produced by the adapter timer and
-the exact nanosecond integer converted from that text. The collector re-derives
-the integer and rejects any mismatch, any decimal finer than one nanosecond,
-and any value with digits finer than the declared resolution. Sub-microsecond
-device-event digits are therefore not representable and are never invented.
+Each sample retains two things:
+
+* `raw` — the timer's own decimal representation, preserved verbatim. This
+  includes scientific notation (`1.234e-05`) and any number of fractional
+  digits the timer returned;
+* `duration` — the exact rational nanosecond conversion of `raw`, reduced, with
+  `{numerator, denominator}`. A fractional nanosecond is retained as a
+  fraction, never rounded.
+
+Concrete examples, all accepted:
+
+| `raw` (ms) | `duration` (ns) |
+|---|---|
+| `31.234` | `31234000/1` |
+| `31.2345678` | `156172839/5` |
+| `0.123456789012345` | `24691357802469/200000000` |
+| `1.234e-05` | `617/50` |
+
+The declared clock resolution describes the advertised timer class. It **never**
+rounds, quantizes or gates a retained value: a digit finer than the declared
+resolution is preserved rather than rejected, and the exact decimal expansion
+of a value a timer returned as a float is not a precision or accuracy claim.
+Zero, negative, non-finite, over-long and non-representable values fail closed
+(`DurationOutOfRange`, `SamplePrecision`, `SampleOverflow`).
 
 Durations from different clock identities are never subtracted. Rank scope
 records only per-rank durations; one completed world repetition is one sample,
@@ -143,25 +178,83 @@ substituted for the algorithm payload. `microbench inspect` prints both.
 Every plan declares finite `work_units`, `memory_bytes` and `deadline_ms`
 before execution. The collector rejects a plan whose declared allowance cannot
 cover the frozen cell, and withholds evidence whose observed work or memory
-exceeds the declaration. An operator program is killed at the declared Grill-side
-deadline; the partial run is retained as a failed receipt with no artifact, so a
-timeout can never masquerade as an empty successful measurement.
+exceeds the declaration. An operator program is killed at the declared
+Grill-side deadline; the partial run is retained as a failed receipt with no
+artifact, so a timeout can never masquerade as an empty successful measurement.
+
+## Study shape: at least three complete acquisitions per role
+
+A native domain comparison needs a **prospectively declared study**, written
+before any acquisition runs:
+
+```json
+{
+  "kind": "microbench-study-v1",
+  "version": 1,
+  "adapter": "cpu-sum-u64-reference",
+  "revision_axis": { "baseline": "cpu-sum-u64-reference-v1", "candidate": "cpu-sum-u64-reference-v2" },
+  "thresholds": { "adverse_bps": 500, "spread_bps": 2000 },
+  "minimum_acquisitions": 3,
+  "roles": {
+    "baseline": ["baseline00", "baseline01", "baseline02"],
+    "candidate": ["candidate00", "candidate01", "candidate02"],
+    "reference": ["reference00", "reference01", "reference02"]
+  },
+  "started_unix_ms": 1757000000000
+}
+```
+
+* `minimum_acquisitions` must be at least `3`, and every role must declare at
+  least that many slots; each slot names one acquisition directory inside the
+  role directory, and the slot id must equal that acquisition's plan
+  `acquisition.id`.
+* The declared `revision_axis` is the only permitted difference between the
+  arms: baseline and reference members must carry `baseline`, candidate members
+  `candidate`, and every other pin (adapter, program hash, source pin set,
+  operation, clock, warmups, iterations, allowance, correctness contract,
+  thresholds) must match across the entire study. A study whose two revisions
+  are identical is an A/A control and is rejected.
+* Declared starts must be strictly increasing inside each role, and every
+  baseline start must precede every candidate start, which must precede every
+  reference start. No acquisition may start before `started_unix_ms`.
+* Every acquisition in a study must have been recorded by one collector
+  identity; a mixed set is `CollectorMismatch`.
+
+Each acquisition directory is exactly what `capture`/`import` produce
+(`plan.json`, `artifact.json`, `receipt.json`), so a role directory looks like:
+
+```
+baseline/
+  baseline00/{plan.json,artifact.json,receipt.json}
+  baseline01/...
+  baseline02/...
+```
+
+`compare` loads exactly the declared membership. A directory that is present but
+not declared is an error (`UnexpectedAcquisition`); a declared slot that is
+missing, failed, timed out, incomplete or unusable withholds the comparison
+(`MissingAcquisition` plus the specific reason). **Missing or failed
+acquisitions are never replaced, filtered or dropped, and there is no
+one-acquisition-per-role shortcut.**
 
 ## Comparison contract
 
-`compare` requires three distinct, strictly ordered acquisition identities
-`A < B < A2`. Every pin — adapter, program hash, sources, operation, clock,
-warmups, iterations, allowance, correctness contract and thresholds — must
-match across roles; the only admitted difference axis is `revision`, which is
-reported in the output. Distinct ids, strictly increasing declared starts and
-non-duplicated evidence are enforced.
+Within one acquisition the statistic is the exact arithmetic mean of the
+measured samples, or for rank scope the exact mean of the complete
+per-repetition maxima. Roles are then compared by statistic:
 
-The statistic is the exact arithmetic mean per acquisition. The reference range
-spans A and A2; the candidate range is the candidate acquisition. The shared
-envelope assessment then applies the plan's `adverse_bps` and `spread_bps`.
-These are finite empirical statistics of one declared cell, not precision,
-confidence, IID or production-percentile guarantees, and not universal capacity
-or adoption verdicts.
+* the reference envelope pools the acquisition statistics of the **baseline and
+  reference (A/A2) roles**;
+* the candidate envelope is the candidate role's acquisition statistics;
+* the shared envelope assessment applies the study's `adverse_bps` and
+  `spread_bps` in exact rational arithmetic.
+
+The result retains every acquisition statistic, both role revisions, the
+per-role and pooled ranges, the adverse bounds, the uniform collector identity,
+the evaluator binary digest, the study digest and every reason code. These are
+finite empirical statistics of one declared cell, not precision, confidence,
+IID or production-percentile guarantees, and not universal capacity or adoption
+verdicts.
 
 ## CPU reference smoke plan
 
@@ -173,20 +266,39 @@ cd <checkout>
 cargo test -p grill-perf --locked --bin grill-perf microbench_model -- --test-threads=1
 cargo test -p grill-perf --locked --test cli microbench -- --test-threads=1
 
-# Real native CPU reference capture, inspection and comparison:
 TMP=$(mktemp -d)
-cp crates/grill-perf/examples/microbench-cpu-sum-u64.json "$TMP/plan.json"
-grill-perf microbench capture --adapter cpu-sum-u64-reference \
-  --plan "$TMP/plan.json" --out "$TMP/capture" --json
-grill-perf microbench inspect "$TMP/capture" --json
+# Nine real native CPU captures: three baseline, three candidate, three
+# reference. Copy the example plan and change only acquisition.id,
+# acquisition.started_unix_ms and (for the candidate arm) revision.
+plan() { # $1=slot $2=started $3=revision
+  sed -e "s/\"a01\"/\"$1\"/" -e "s/1757000000000/$2/" \
+      -e "s/cpu-sum-u64-reference-v1/$3/" \
+      crates/grill-perf/examples/microbench-cpu-sum-u64.json > "$TMP/$1.json"
+}
+mkdir -p "$TMP/baseline" "$TMP/candidate" "$TMP/reference"
+for index in 00 01 02; do
+  plan "baseline$index" $((1757000000000 + 10#$index * 1000)) cpu-sum-u64-reference-v1
+  plan "candidate$index" $((1757000060000 + 10#$index * 1000)) cpu-sum-u64-reference-v2
+  plan "reference$index" $((1757000120000 + 10#$index * 1000)) cpu-sum-u64-reference-v1
+  for role in baseline candidate reference; do
+    grill-perf microbench capture --adapter cpu-sum-u64-reference \
+      --plan "$TMP/$role$index.json" --out "$TMP/$role/$role$index" --json
+    grill-perf microbench inspect "$TMP/$role/$role$index" --json
+  done
+done
+grill-perf microbench compare \
+  --study crates/grill-perf/examples/microbench-study-cpu.json \
+  --baseline "$TMP/baseline" --candidate "$TMP/candidate" --reference "$TMP/reference" --json
 ```
 
-The capture runs a real `sum_u64` reduction over `0..4096` with warmups 2 and
-five measured iterations, records exact nanosecond samples on the process
-monotonic clock, and validates the exact `n*(n-1)/2` reference. To compare, run
-`capture` three times with distinct `acquisition.id`/`started_unix_ms` values
-and pass the directories to `microbench compare` as A, B and `--reference A2`.
-Copy the example plan and change only those two fields and `revision`.
+The study example must be edited to match the slot ids and start times used
+above (its `started_unix_ms` must not be later than any capture). Each capture
+runs a real `sum_u64` reduction over `0..4096` with warmups 2 and five measured
+iterations, records exact nanosecond rational samples on the process monotonic
+clock, and validates the exact `n*(n-1)/2` reference. The candidate arm should
+differ only in `revision` for an A/A control, or in the declared code change
+under test; the tool does not care which, it enforces that everything else
+matches.
 
 Device adapters are *not* exercised by this plan. A device window additionally
 requires the pinned checkout paths, `--authorize-device-window`, and the
@@ -206,7 +318,8 @@ grill-perf microbench capture --adapter nccl-allreduce-sum \
 ```
 
 The pinned example plans carry the shipped adapter hashes; editing an adapter
-without re-pinning its plan is rejected by design.
+without re-pinning its plan is rejected by design, and each adapter refuses to
+run when its own bytes do not match `plan.program_sha256`.
 
 ## What this protocol deliberately does not claim
 
@@ -217,5 +330,6 @@ without re-pinning its plan is rejected by design.
   observation only and needs a separately linked serving acquisition.
 * Precision, confidence, IID, production percentiles, capacity or adoption.
 * Authenticated execution. `native_observed` means this collector launched a
-  program and retained its bytes within a bounded deadline; it cannot attest
-  what that program actually did.
+  program and retained its bytes within a bounded deadline, and that the
+  program's own observations were structurally consistent with the frozen cell;
+  it cannot attest what that program actually did.
