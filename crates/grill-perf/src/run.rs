@@ -127,6 +127,8 @@ pub struct PreflightReport<'a> {
     acquisition_budget: Option<crate::acquisition::Budget>,
     #[serde(skip_serializing_if = "Option::is_none")]
     acquisition: Option<crate::acquisition::Protocol>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resources: Option<crate::serving_resources::Config>,
 }
 
 pub fn preflight(o: &CommonArgs) -> Result<PreflightReport<'_>> {
@@ -159,6 +161,7 @@ pub fn preflight(o: &CommonArgs) -> Result<PreflightReport<'_>> {
         schedule_budget: admitted.schedule_budget,
         acquisition_budget: admitted.acquisition_budget,
         acquisition: admitted.workload.acquisition,
+        resources: admitted.workload.resources,
     })
 }
 
@@ -187,6 +190,14 @@ pub fn execute_bounded(o: &Options, deadline: Instant) -> Result<Summary> {
     if o.common.metrics_url.is_some() {
         return Err("metrics diagnostics are unsupported in bounded capture; use the advanced unbounded run path".into());
     }
+    execute_inner(o, Some(deadline))
+}
+/// Capacity admits a finite workload6 study, including the existing bounded
+/// metrics2 observer. Its global deadline never authorizes another request.
+pub fn execute_capacity_bounded(o: &Options, deadline: Instant) -> Result<Summary> {
+    let source = evidence::read(&o.common.workload, FILE_CAP)?;
+    let workload: Workload = serde_json::from_slice(&source).map_err(|e| e.to_string())?;
+    if workload.version != 6 { return Err("capacity requires workload6".into()); }
     execute_inner(o, Some(deadline))
 }
 
@@ -549,12 +560,14 @@ fn collect(
         let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).map_err(|_| "cannot subscribe to termination signal")?;
         let mut sequence = crate::sequence::State::default();
         let capture_origin = Instant::now();
+        let mut resource_session = crate::serving_resources::Session::new(root, plan, plan_hash, capture_origin);
         let deadline = if plan.version == 5 {
             let allowance = crate::acquisition::budget(&plan.workload)?.wall_time_ceiling_us;
             let acquisition_deadline = capture_origin.checked_add(Duration::from_micros(allowance)).ok_or("acquisition deadline overflow")?;
             Some(deadline.map_or(acquisition_deadline, |d| d.min(acquisition_deadline)))
         } else { deadline };
         let body_context = wire::BodyContext::from(plan);
+        let acquisition_operation = async {
         for spec in &plan.waves[first_wave..] {
             if interrupted() { summary.status = "interrupted".into(); break; }
             if deadline.is_some_and(|deadline| Instant::now() >= deadline) { summary.status = "budget-exhausted".into(); break; }
@@ -566,6 +579,7 @@ fn collect(
                 None => lifecycle::admission(&session_dir)?,
             };
             if lifecycle::requested(&session_dir)? { summary.status = "paused".into(); break; }
+            resource_session.begin(spec.index).await?;
             let preparation = Instant::now();
             let requests: Vec<_> = match (0..spec.concurrency).map(|lane| sequence.request(&body_context, spec, lane)).collect::<Result<_>>() {
                 Ok(requests) => requests,
@@ -691,6 +705,7 @@ fn collect(
             let (eligible, tokens, rate) = crate::schedule::throughput(&attempts, elapsed_us, schedule.as_ref());
             let wave = Wave { version: if matches!(plan.version, 4 | 5) { 2 } else { 1 }, plan_sha256: plan_hash.into(), reservation_sha256, spec: spec.clone(), attempts, elapsed_us, dispatch_spread_us, preparation_us, reservation_publication_us, body_publication_us: wire::us(publication), completion_tokens: tokens, achieved_completion_tokens_per_second: rate, eligible, metrics, schedule, acquisition_clock };
             evidence::publish(&dir, "wave.json", &wave)?;
+            resource_session.member(&wave);
             summary.wave_publication_us += wire::us(publication);
             summary.wave_preparation_us += preparation_us;
             summary.reservation_publication_us += reservation_publication_us;
@@ -719,6 +734,13 @@ fn collect(
             if budget_expired { summary.status = "budget-exhausted".into(); break; }
             if *cancellation.borrow() { summary.status = "interrupted".into(); break; }
         }
+        Ok::<(), String>(())
+        }.await;
+        // Always drain the caller-owned observer before the terminal run receipt,
+        // including errors, cancellation, local publication and incomplete groups.
+        let resource_result = resource_session.finish(acquisition_operation.is_err() || summary.status != "completed").await;
+        acquisition_operation?;
+        resource_result?;
         Ok::<(), String>(())
     });
     if let Err(error) = operation {

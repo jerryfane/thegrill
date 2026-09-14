@@ -196,6 +196,9 @@ pub fn parse(
     workload: &Workload,
     telemetry: Option<&crate::metrics::Protocol>,
 ) -> Result<Policy, Reason> {
+    // Attached serving resources are explicitly review-only. A throughput
+    // policy cannot turn an unqualified resource/capacity claim into PASS.
+    if workload.resources.is_some() { return Err(Reason::PolicyScopeMismatch); }
     if bytes.len() > CAP {
         return Err(Reason::InvalidPolicy);
     }

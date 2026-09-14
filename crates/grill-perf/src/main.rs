@@ -1,5 +1,7 @@
 mod acquisition;
 mod bundle;
+mod capacity;
+mod retention;
 mod envelope;
 mod evidence;
 mod lifecycle;
@@ -9,6 +11,7 @@ mod model;
 mod policy;
 mod resources;
 mod run;
+mod serving_resources;
 mod schedule;
 mod selection;
 mod sequence;
@@ -32,6 +35,11 @@ struct Cli {
 }
 #[derive(Subcommand)]
 enum Command {
+    /// Finite prospective context/load and retention studies; operator recovery only.
+    Capacity {
+        #[command(subcommand)]
+        command: capacity::Command,
+    },
     /// Explicit bounded host resource observation and offline domain evidence.
     Resource {
         #[command(subcommand)]
@@ -128,6 +136,7 @@ fn execute(cli: Cli) -> model::Result<u8> {
     match cli.command {
         Command::Resource { command } => resources::execute(command),
         Command::Startup { command } => startup::execute(command),
+        Command::Capacity { command } => capacity::execute(command),
         Command::Baseline(options) => {
             let report = study::baseline(&options)?;
             show_study(&report, options.json)
@@ -274,7 +283,7 @@ fn execute(cli: Cli) -> model::Result<u8> {
                 let complete = [&acquisition.baseline, &acquisition.candidate].into_iter()
                     .chain(acquisition.reference.iter())
                     .all(|report| !report.records.is_empty() && report.records.iter().all(|r| r.complete_eligible));
-                return Ok(if complete { 0 } else { 2 });
+                return Ok(if complete && acquisition.baseline.resources.is_none() { 0 } else { 2 });
             }
             if json {
                 print_json(&comparison)?;

@@ -32,7 +32,7 @@ fn loaded(workload: Workload, latency: u64) -> evidence::Loaded {
         "source_sha256":"2".repeat(64),"model":"fixture","cache_evidence_source":"provider-reported",
         "endpoint":"http://127.0.0.1:9/v1/chat/completions","local_http":true,"pool_max_idle_per_host":2,
         "started_unix_ms":1,"waves":specs})).unwrap();
-    evidence::Loaded {plan,waves,states:Vec::new(),metrics:None,policy:None,plan_sha256:String::new(),evidence_sha256:String::new(),lineage_sha256:String::new(),
+    evidence::Loaded {plan,waves,states:Vec::new(),metrics:None,policy:None,resources:Vec::new(),plan_sha256:String::new(),evidence_sha256:String::new(),lineage_sha256:String::new(),
         history:crate::lifecycle::History {count:1,next_wave:0,last_status:Some("completed".into()),open:false,evidence_sha256:String::new(),lineage_sha256:String::new()} }
 }
 fn policy(workload: &Workload, version:u32) -> Value {

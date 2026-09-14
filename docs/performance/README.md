@@ -1193,6 +1193,17 @@ A/B/A2 comparisons. It does not change the default serving collector, execute
 GPU sources, or implement capacity/retention studies. Imported device/provider
 bytes remain imported evidence; source delivery is not live qualification.
 
+## Finite capacity and acquisition resources
+
+[`capacity preflight/run/inspect`](CAPACITY.md) adds explicit workload6
+complete-acquisition resource attachments and finite context/load/retention studies.
+The existing native serving/sequence collector is reused; every failed cell and
+undispatched remainder is retained. Attached resources are review-only outside
+prospective capacity limits, and throughput policies cannot silently PASS them.
+The source-pinned backend eviction hook is distinct from provider-reported misses
+or preemptions. No automatic stress search, reset, retry or operator recovery exists;
+largest successful tested cell is not safe universal capacity or live qualification.
+
 ## Deployment declarations and privacy
 
 `--deployment FILE` optionally records a closed JSON object with nullable

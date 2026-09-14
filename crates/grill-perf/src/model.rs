@@ -163,6 +163,8 @@ pub struct Workload {
     pub schedule: Option<Vec<crate::schedule::Scenario>>,
     #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "present")]
     pub acquisition: Option<crate::acquisition::Protocol>,
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "present")]
+    pub resources: Option<crate::serving_resources::Config>,
 }
 pub(crate) fn identifier(s: &str) -> bool {
     !s.is_empty()
@@ -204,6 +206,7 @@ impl Workload {
             return Err("schedule requires workload version 4".into());
         }
         crate::acquisition::validate(self)?;
+        if self.version != 6 && self.resources.is_some() { return Err("resources require workload6".into()); }
         crate::sequence::validate(self)?;
         if self.cases.is_empty()
             || self.cases.len() > 128
@@ -355,6 +358,7 @@ impl Workload {
         if attempts > MAX_ATTEMPTS || waves > if self.version == 6 { crate::acquisition::WAVE_CAP as u64 } else { 1024 } {
             return Err("workload exceeds attempt or versioned wave limit".into());
         }
+        if let Some(resources) = &self.resources { resources.validate(self)?; }
         Ok(())
     }
     pub fn waves(&self) -> Vec<WaveSpec> {

@@ -284,6 +284,8 @@ pub struct Report {
     pub scope: &'static str,
     pub protocol: Protocol,
     pub records: Vec<Record>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resources: Option<serde_json::Value>,
 }
 #[derive(Serialize)]
 pub struct Comparison {
@@ -324,5 +326,9 @@ pub fn report(run: &crate::evidence::Loaded) -> Option<Report> {
             record.whole_conversation_wall_us = record.settled_offset_us.zip(record.started_offset_us).and_then(|(end,start)| end.checked_sub(start));
         }
     }
-    Some(Report { scope: "declared-acquisitions-with-all-required-controls; capture-monotonic-microseconds; descriptive-not-an-automatic-policy-verdict", protocol: protocol.clone(), records })
+    Some(Report { scope: "declared-acquisitions-with-all-required-controls; capture-monotonic-microseconds; descriptive-not-an-automatic-policy-verdict", protocol: protocol.clone(), records,
+        resources: run.plan.workload.resources.as_ref().map(|_| serde_json::json!({
+            "mode": "review_only", "acquisitions": run.resources,
+            "capacity_qualification": "unavailable-through-throughput-policy"
+        })) })
 }

@@ -3845,3 +3845,6 @@ mod schedule_tests;
 mod acquisition_tests;
 #[path = "support/microbench.rs"]
 mod microbench_tests;
+
+#[path = "support/serving_resources.rs"]
+mod serving_resource_tests;

@@ -192,6 +192,7 @@ pub struct Loaded {
     pub plan_sha256: String,
     pub evidence_sha256: String,
     pub lineage_sha256: String,
+    pub resources: Vec<crate::serving_resources::Report>,
 }
 pub fn load(root: &Path) -> Result<Loaded> {
     load_verified(root).map_err(|error| error.detail)
@@ -543,6 +544,10 @@ pub(crate) fn load_verified(root: &Path) -> Result<Loaded, LoadError> {
     let history = crate::lifecycle::history(root, &plan, &plan_hash, &states, &waves)?;
     fingerprint.update(history.evidence_sha256.as_bytes());
     lineage.update(history.lineage_sha256.as_bytes());
+    let resources = crate::serving_resources::replay(root, &plan, &plan_hash, &waves)?;
+    for resource in &resources {
+        if let Some(hash) = &resource.sha256 { fingerprint.update(hash.as_bytes()); lineage.update(hash.as_bytes()); }
+    }
     Ok(Loaded {
         metrics: crate::metrics::summarize(plan.metrics.as_ref(), metrics_budget, metrics_waves),
         plan,
@@ -550,6 +555,7 @@ pub(crate) fn load_verified(root: &Path) -> Result<Loaded, LoadError> {
         states,
         history,
         policy,
+        resources,
         plan_sha256: plan_hash,
         evidence_sha256: hex(&fingerprint.finalize()),
         lineage_sha256: hex(&lineage.finalize()),
