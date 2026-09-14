@@ -107,6 +107,7 @@ def main():
     journal_module.install(journal, Pool, Manager)
     manager = Manager(Pool(args.capacity))
     totals = {"queries": 0, "hits": 0, "tokens": 0, "cached": 0, "compute": 0, "requests": 0}
+    epoch = time.time()
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *_):
@@ -137,11 +138,11 @@ def main():
             if not args.missing_counters:
                 for name, value in names.items():
                     lines.extend([f"vllm:{name}_total{{{labels}}} {value}",
-                                  f"vllm:{name}_created{{{labels}}} 1700000000"])
+                                  f"vllm:{name}_created{{{labels}}} {epoch}"])
                 for source, value in [("local_compute", totals["compute"]), ("local_cache_hit", totals["cached"]), ("external_kv_transfer", 0)]:
                     selected = labels + ',source="' + source + '"'
                     lines.extend([f"vllm:prompt_tokens_by_source_total{{{selected}}} {value}",
-                                  f"vllm:prompt_tokens_by_source_created{{{selected}}} 1700000000"])
+                                  f"vllm:prompt_tokens_by_source_created{{{selected}}} {epoch}"])
             self.reply(200, ("\n".join(lines) + "\n").encode(), "text/plain; version=0.0.4")
 
         def do_POST(self):
