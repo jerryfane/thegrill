@@ -1,6 +1,6 @@
 # Performance release notes
 
-## Version 0.2.0 — unreleased claim-coverage expansion
+## Version 0.2.0 — experimental claim-coverage expansion
 
 - Add explicit policy2 first-generated, first-answer and client-completion
   latency gates on homogeneous flat workloads, plus complete-wave worst-lane
@@ -77,8 +77,9 @@
   dependency lock entries and feature declarations are unchanged; the notice
   ledger was re-reviewed for the two workspace package-version changes.
 
-This version is not published. Exact-head packaging/installation, independent
-review and real-adapter/live qualification are separate gates. Source or fixture
+Publication status and exact source/artifact identities are recorded by the
+versioned GitHub Release. Exact-head packaging/installation, independent review
+and real-adapter/live qualification are separate gates. Source or fixture
 success does not close them, and mandatory maintainer adoption is not implied.
 
 ## Version 0.1.0 — published prerelease

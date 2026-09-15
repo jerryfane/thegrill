@@ -17,16 +17,18 @@ import stat
 import sys
 import time
 
+_COMMON_FRONTEND_SHA256 = "cd4b83e85dc9d5aae808348d336e59b3064bee697012750d23c786de082a1c53"
+
 SOURCE_CONTRACT = "vllm-0.27.0-uvicorn-0.34.0-sha256-v1"
 SOURCE_PINS = {
-    "vllm/entrypoints/openai/api_server.py": "cd4b83e85dc9d5aae808348d336e59b3064bee697012750d23c786de082a1c53",
+    "vllm/entrypoints/openai/api_server.py": _COMMON_FRONTEND_SHA256,
     "vllm/entrypoints/launcher.py": "caf4c4517a62f05abe5998409de73af70e91d99dfab3819a4b359ba44af0da91",
     "vllm/v1/engine/async_llm.py": "81a0cae6d5da22140f509a59d6c6bb8fc6ee1572da2a2cd793b5830222d18bcc",
     "uvicorn/server.py": "8dd3d150523fd140a9981c41f0fae963b869b20c064dd94ab7422bc453748e6f",
 }
 SOURCE_CONTRACT_487 = "vllm-487ecf187-uvicorn-0.52.4-sha256-v1"
 SOURCE_PINS_487 = {
-    "vllm/entrypoints/openai/api_server.py": "cd4b83e85dc9d5aae808348d336e59b3064bee697012750d23c786de082a1c53",
+    "vllm/entrypoints/openai/api_server.py": _COMMON_FRONTEND_SHA256,
     "vllm/entrypoints/launcher.py": "94566e08afbe40aef653184aa49bb1cfc6bdc8e9bf10881ae05cab65475bcd2e",
     "vllm/v1/engine/async_llm.py": "bceed0b3f5f0c834fef79525f2462a092f082390f0070526280abc95945837dd",
     "uvicorn/server.py": "7c1dbd656835c9cdd6f92078ffc80bcc6007824ab322aff15435bd89c068e0be",
