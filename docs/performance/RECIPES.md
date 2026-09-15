@@ -10,8 +10,9 @@ forwards, flush caches, retry controls or upload results.
 Follow **[Install and first capture](INSTALL.md)** for the authoritative pinned
 artifact/source fallback, declaration construction, baseline, optional unchanged
 control, separate operator change, candidate check and offline report commands.
-There are no published releases yet; a reviewed staged artifact works outside a
-checkout. The archive's executable is `$GRILL_HOME/bin/grill-perf`, exposed in
+Published prereleases and separately reviewed staged artifacts work outside a
+checkout. Pin the exact version and target; the executable is
+`$GRILL_HOME/bin/grill-perf`, exposed in
 the examples as the absolute `GRILL_PERF` path.
 
 A recipe supplies known values to that workflow; it does not generate its own

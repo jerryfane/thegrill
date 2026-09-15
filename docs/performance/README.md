@@ -12,9 +12,10 @@ qualify real recipe startup, hidden-warmup suppression or persistent model KV.
 ## Baseline, change, check
 
 Start with **[Install and first capture](INSTALL.md)** for the authoritative
-staged-archive/source-fallback workflow, declarations, optional unchanged control,
-candidate check, offline replay and actionable failures. There are no published
-releases yet. The default path needs no policy file or statistical settings.
+published-prerelease or reviewed staged-archive workflow, source fallback,
+declarations, optional unchanged control, candidate check and offline replay.
+Pin the exact version and target. The default path needs no policy file or
+statistical settings.
 This guide is the detailed measurement and evidence reference.
 
 Use the existing declaration from [the first-run guide](INSTALL.md#supply-the-unavoidable-facts-once):
