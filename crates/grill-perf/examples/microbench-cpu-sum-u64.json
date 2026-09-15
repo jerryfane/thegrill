@@ -1,0 +1,41 @@
+{
+  "kind": "microbench-plan-v1",
+  "version": 1,
+  "adapter": "cpu-sum-u64-reference",
+  "revision": "0000000000000000000000000000000000000000000000000000000000000000",
+  "program_sha256": null,
+  "sources": [],
+  "operation": {
+    "kind": "sum-u64",
+    "bound": 4096,
+    "dtype": "u64"
+  },
+  "clock": {
+    "id": "process-monotonic-ns",
+    "kind": "process_monotonic",
+    "units": "nanoseconds",
+    "resolution_ns": 1,
+    "synchronization": "process-clock-read-before-after"
+  },
+  "warmups": 2,
+  "iterations": 5,
+  "allowance": {
+    "work_units": 28672,
+    "memory_bytes": 65536,
+    "deadline_ms": 5000
+  },
+  "correctness": {
+    "reference": "n*(n-1)/2",
+    "tolerance": {
+      "kind": "exact-u64"
+    }
+  },
+  "thresholds": {
+    "adverse_bps": 500,
+    "spread_bps": 2000
+  },
+  "acquisition": {
+    "id": "a01",
+    "started_unix_ms": 1757000000000
+  }
+}

@@ -4,12 +4,18 @@
 It does not start servers, download models or grade answer quality. Performance
 capture and assessment are separate from `grill` quality evaluation.
 
+Explicit startup/bootstrap and operator-restart cache studies use the separate
+[`startup` domain commands](STARTUP.md), not serving Waves or the default
+baseline/check workflow. Their local-process producer and CPU fixtures do not
+qualify real recipe startup, hidden-warmup suppression or persistent model KV.
+
 ## Baseline, change, check
 
 Start with **[Install and first capture](INSTALL.md)** for the authoritative
-staged-archive/source-fallback workflow, declarations, optional unchanged control,
-candidate check, offline replay and actionable failures. There are no published
-releases yet. The default path needs no policy file or statistical settings.
+published-prerelease or reviewed staged-archive workflow, source fallback,
+declarations, optional unchanged control, candidate check and offline replay.
+Pin the exact version and target. The default path needs no policy file or
+statistical settings.
 This guide is the detailed measurement and evidence reference.
 
 Use the existing declaration from [the first-run guide](INSTALL.md#supply-the-unavoidable-facts-once):
@@ -386,6 +392,224 @@ Parsing or output failures can share exit values without producing a decision.
 Raw-run `compare` exit 0 remains an eligibility-only result, never `PASS`.
 Capture comparison uses the result vocabulary above, not this policy envelope.
 
+### Policy2 first-output and finite fairness gates
+
+Policy `"version": 2` with `"method": "observed-envelope-v2"` uses the same
+prospective pins, A/B/A2 qualification, complete warmups and measured repetitions,
+exact ordered completion-token matching, tolerance arithmetic and exit meanings.
+It emits decision JSON version 2. Policy1 remains version 1 with its original
+four metrics and output shape; the default C1 and selected descriptive workflows
+are unchanged.
+
+Policy2 supports homogeneous flat workloads1/3 and named scheduled workload4.
+In addition to the four old metrics, each cell may declare these lower-is-better
+gates:
+
+| Metric | Exact sample and population |
+|---|---|
+| `first_generated_text_us` | `(first_generated_text_us, 1)` per eligible measured lane, including generated reasoning text |
+| `first_answer_text_us` | `(first_answer_text_us, 1)` per eligible measured lane, distinct from first generated reasoning |
+| `completion_latency_us` | `(settle_us, 1)` per eligible measured lane: client completion, not terminal, last text or whole-wave elapsed time |
+| `worst_lane_first_answer_us` | `(max(first_answer_text_us), 1)` once per complete measured wave |
+| `first_answer_max_min_ratio` | `(max(first_answer_text_us), min(first_answer_text_us))` once per complete measured wave |
+
+All times are relative to that lane's dispatch. Dispatch offsets are never added
+to service latencies. Missing or zero observations are unavailable; headers,
+first body, terminal and settlement cannot substitute for missing first text.
+Worst-lane and max/min require at least two admitted lanes, every lane complete
+and eligible, and every first-answer latency positive. Admission rejects these
+two gates on a single-lane cell. No survivor-only maximum or ratio is evaluated.
+
+Coverage distinguishes wave repetitions from lane observations. The three-trial
+minimum counts acquired waves, never three peers inside one wave. Each fairness
+gate produces one sample per repetition; per-lane extrema remain descriptive
+observations within those repetitions, not an independent-lane confidence model.
+Policy2 gate `sample_unit` states this distinction. Max/min is dimensionless:
+its numerator is the slowest first-answer service latency and denominator the
+fastest within the same wave; a smaller ratio does not alone establish a better
+worst latency, so declare both gates when both properties matter.
+
+Actual reported-hit eligibility permits first-generated/answer latency gates.
+It does not create a cold-prefill sample: positive reported cached tokens still
+make `prefill_tokens_per_second` unavailable. Equal latency or passing a narrowly
+declared gate does not prove cache attribution, semantic correctness or general
+fairness. Failed output/cache eligibility and unequal ordered output amounts
+remain blocking reasons rather than exclusions.
+
+For workload4, `cells[].cell` selects the exact scenario ID. Per-lane latency
+gates require `metrics[].lane` with an exact lane ID; fairness aggregates forbid
+`lane` and require an overlap scenario. Every scenario has a nonempty policy
+entry, including solos. Empty legacy cells cannot produce PASS. The four
+historical throughput/wave metrics are forbidden on heterogeneous schedules:
+unlike lane token rates are never pooled into a decision.
+
+The matched solo must have identical case, full effective settings, warmup and
+trial counts, and equal observed output amounts in the same phase/repetition.
+Every required solo and overlap acquisition must qualify. Each generated-output
+dependency must show the source's generated-text interval positively intersecting
+the target's prefill interval. A fixed-offset overlap lane must participate in a
+positive mixed decode/prefill interval. In-flight overlap or a delayed terminal
+alone is insufficient. Missing controls or false required overlap withhold gates.
+The report retains the `lane` selector and `sample_unit` for each gate.
+Homogeneous workloads reject `lane`; all present-null selectors are invalid.
+Policy1 rejects all new metric names and lane fields.
+
+Policy2 also accepts a prospective root `required_telemetry` array. It requires
+metrics version 2 and retains a separate assessment for every A/B/A2 role.
+Missing promised observations yield INCONCLUSIVE; a candidate's refuted
+zero-counter requirement yields REGRESSION; a refuted baseline or repeat
+withholds reference qualification. Invalid required evidence yields ERROR.
+Optional diagnostics still do not alter eligibility. See
+[provider accounting](PROVIDER-ACCOUNTING.md#required-telemetry-in-policy2) for
+the exact selectors, isolation declaration and source limits.
+
+### Workload6 acquisitions and policy3
+
+Native `preflight`, `run`, raw-run `compare` and `decide` admit workload6 under
+plan5/reservation2/wave2 with `generated-text-arrival-v2`. Workloads1–5 and
+policies1/2 retain their historical limits and meanings; neither policy1 nor
+policy2 accepts workload6. Legacy selected capture/baseline/check reject
+workloads4–6 before dispatch. Workload6 cannot resume a partial acquisition.
+
+The required workload root `acquisition` is a closed tagged object:
+
+```json
+{"kind":"flat","input_bytes":2097152}
+```
+
+or:
+
+```json
+{
+  "kind":"conversation",
+  "repetitions":3,
+  "warmup_repetitions":1,
+  "measured_steps":["lookup","followup"],
+  "input_bytes":1048576,
+  "retained_history_bytes":1048576
+}
+```
+
+There is no schedule/acquisition combination. Flat mode allows only
+`portable-chat-v1` or `vllm-fixed-v1`, cell trials1–1000 and warmups0–20.
+Conversation mode requires `vllm-conversation-v3`, repetitions1–1000,
+warmup_repetitions0–20, at most128 ordered steps, and cells C1/trials1/warmup0.
+`measured_steps` is a nonempty unique list of **case IDs**, not cell IDs.
+All other required primes, controls, tools and followups still qualify and
+consume traffic; they are excluded only from step performance gates.
+
+Input caps are positive and at most2MiB, retained shared history at most256MiB,
+source at most4MiB, capture attempts and waves each at most10000. Old workloads
+keep their former1024-wave and128KiB content/history limits. Input bytes mean
+actual encoded bytes, not tokenizer counts or128K tokens. Preflight checks all
+expanded declared inputs. Unknown actual parent outputs consume the declared
+input/history allowance at runtime, never an expected-answer substitute.
+Exceeding input allowance retains `acquisition-failure.json` with version1,
+exact `wave` and replay-checked `detail`; exceeding retained output/history
+allowance retains the response and failed sequence check. No truncated prompt,
+replacement acquisition or hidden retry is used.
+
+Preflight's `acquisition_budget` reports `warmup_requests`, `control_requests`,
+`measured_requests`, `output_token_ceiling`, `encoded_input_byte_ceiling`,
+`response_byte_ceiling`, `tool_trace_byte_ceiling`, `wall_time_ceiling_us`,
+`retained_history_bytes` and `serialized_bounds_not_rss_guarantees`.
+The last flag is always true: allocator/process RSS is not certified by these
+serialization/buffer bounds. Active input, response/parser and tool trace buffers
+plus shared retained history must fit `limits.wave_buffer_bytes`. Shared message
+payloads use immutable Rc ownership; branches do not duplicate every prefix.
+The wall allowance is the sum of declared wave total deadlines, enforced across
+the capture including between-step work; blocking filesystem publication remains
+cooperative rather than a hard real-time guarantee.
+
+Each workload6 WaveSpec contains `acquisition: {"phase":"warmup"|"measured",
+"index":N}`. Flat identity is scoped by cell ID. Conversation steps all share
+their acquisition phase and index; prime/control status never changes Phase.
+All steps settle in order before another acquisition begins. Conversation cache
+namespace is SHA256 of UTF-8
+`grill-acquisition-v1:{original_namespace}:{phase}:{index}`; phases are exactly
+`warmup`/`measured`, index is decimal, and the existing history suffix follows
+the digest. State resets between acquisitions; actual acquired parent outputs
+and fixed-tool call IDs/results remain linked inside each acquisition.
+
+Every new Wave records `acquisition_clock: {clock_id, kind, units,
+started_offset_us, settled_offset_us}`. `clock_id` is the exact parent plan
+SHA256, `kind` is exactly `std_instant_monotonic`, and `units` is exactly
+`microseconds`; the clock origin is capture-local, not Unix time. Recorded
+microsecond quantization is not a claim of hardware clock resolution. Existing
+Timing fields remain lane/wave-relative. Replay checks ordered offsets and exact final lane
+settlement. Whole-conversation wall time is last required settlement minus first
+required step start, including controls and inter-step work, excluding observer
+setup before that first step. It is not summed step latency or a token-rate mean.
+Raw comparison JSON version5 adds `acquisition` baseline/candidate/reference
+reports, each with `protocol`, `scope` and all declared `records`. Records retain
+identity, flat cell, required/measured/missing/ineligible steps, start/settlement,
+complete eligibility and nullable `whole_conversation_wall_us`. Incomplete
+acquisitions have no favorable whole sample. Cell summaries separately label
+`performance_measured` and retain every measured-repetition `sequence_checks`.
+
+Policy `"version":3`, `"method":"observed-envelope-v3"` requires workload6,
+min_trials3–1000, and at least one warmup per gated population. Conversation
+population counts come from protocol repetitions, not cell.trials. Policy cells
+cover exactly the cells whose case IDs are in measured_steps (all cells in flat
+mode). Existing per-cell metrics remain explicit; `first_tool_delta_us` and
+`first_validated_tool_call_us` are additional lower-is-better metrics admitted
+only on measured fixed-tool steps. They never borrow first text, headers or
+terminal timestamps. Failed required warmups/controls invalidate qualification.
+
+Optional root `whole_conversation` is
+`{"max_regression_bps":500,"max_reference_spread_bps":1000}` and is illegal in
+flat mode. Optional nonempty `tail` has at most256 entries:
+
+```json
+{
+  "target":{"kind":"completion","cell":"c1"},
+  "percentile":"p95",
+  "max_regression_bps":500,
+  "max_reference_spread_bps":1000
+}
+```
+
+`completion` is flat-only. Conversation targets are exactly
+`{"kind":"whole_conversation"}`. Percentile is exactly `p95` or `p99`; duplicates
+of target/percentile and first-output tail selectors are rejected. Completion
+population is one maximum settle_us across **all** complete eligible lanes per
+measured wave. Conversation population is one complete required acquisition wall
+duration. Warmups are never samples. p95 requires at least200 samples and p99
+at least1000 in each A/B/A2 role and target; insufficient populations yield
+INCONCLUSIVE with no statistic. Missing any declared acquisition also withholds
+the point estimate instead of computing a survivor-only percentile.
+
+Statistic is the sorted value at 1-based `ceil(p*n)`, no interpolation. The floor
+supplies at least10 nominal upper-tail observations; it is **not** a confidence,
+precision, IID, causal or production-percentile guarantee. Policy3 decision JSON
+adds optional `whole_conversation` and `tail` gates, retaining target, percentile,
+population counts, separate A/A2 statistic ranges, candidate range and the exact
+reference-envelope decision. Gate fields retain existing threshold/reason/exit
+meanings and ERROR > REGRESSION > INCONCLUSIVE > PASS precedence. All ordered
+required outputs must match amounts across roles, including conversation
+controls and warmups. Root `required_telemetry` carries forward unchanged from
+policy2; optional diagnostics never turn unavailable required evidence into PASS.
+
+The explicit source examples are `crates/grill-perf/examples/flat-acquisitions-v6.json`
+and `crates/grill-perf/examples/conversation-acquisitions-v6.json`. This command
+is offline admission only; it does not connect to the example port:
+
+```sh
+grill-perf preflight crates/grill-perf/examples/conversation-acquisitions-v6.json \
+  --endpoint http://127.0.0.1:9/v1/chat/completions \
+  --model synthetic-fixture --local-http --json
+```
+
+After an operator separately provides the intended endpoint and allowance,
+`run` takes the same workload/options plus `--out NEW_RUN` and an optional
+prospectively pinned `--policy POLICY.json`. No command launches a model service.
+Use `compare A B --reference A2 --json` for descriptive replay and
+`decide A B --reference A2 --json` for the captured policy verdict.
+
+Source implementation and authored CPU fixtures are not execution qualification.
+New real-provider, empirical-tail, larger-history and adoption claims still need
+their separately authorized evidence and independent review.
+
 ## Build and use
 
 Requirements match the workspace: Linux, Rust/Cargo 1.98 and the native build
@@ -709,6 +933,187 @@ Changing either phase's controls changes workload identity and prevents a
 matched comparison. Existing exact400 recipes and hashes remain unchanged.
 Matching token counts alone is [not sparkDash protocol equivalence](SHARED-RECIPES.md#phase-counts-are-not-protocol-equivalence).
 
+## Finite heterogeneous schedules
+
+Workload **version 4** is the schedule-only contract for raw `preflight`, `run`,
+`pause`/`resume`, and offline raw-run `compare`. It does not change existing
+workload1/2/3 inputs or historical receipts. Capture-v2 `baseline`/`check`
+selections and policy1 do not admit schedule4; no empty `cells` result is treated
+as a successful legacy comparison. Native plan4 pins workload4 and uses
+reservation2/wave2, while preserving `generated-text-arrival-v2`.
+
+Keep `cases` as the existing flat cases and set `cells: []`. Add a nonempty
+`schedule` array of at most 64 scenarios:
+
+```json
+{
+  "version": 4,
+  "name": "synthetic-mixed",
+  "request": {
+    "profile": "portable-chat-v1", "stream": true,
+    "output": {"tokens": 8, "mode": "cap"}, "cache": "observe"
+  },
+  "limits": {
+    "total_ms": 3000, "idle_ms": 1000,
+    "response_bytes": 65536, "wave_buffer_bytes": 33554432
+  },
+  "cases": [
+    {"id": "a", "messages": [{"role": "user", "content": "Write a short sentence."}]},
+    {"id": "b", "messages": [{"role": "user", "content": "Read this synthetic repetition: {fill} Then say done."}],
+     "fill": {"unit": "word ", "repeat": 10000}}
+  ],
+  "cells": [],
+  "schedule": [
+    {"id": "solo-a", "kind": "solo", "warmup_trials": 1, "trials": 3,
+     "lanes": [{"id": "a", "case": "a", "arrival": {"kind": "fixed_offset", "offset_us": 0}}]},
+    {"id": "solo-b", "kind": "solo", "warmup_trials": 1, "trials": 3,
+     "lanes": [{"id": "b", "case": "b",
+       "request": {"profile": "portable-chat-v1", "stream": true, "output": {"tokens": 3, "mode": "cap"}, "cache": "observe"},
+       "arrival": {"kind": "fixed_offset", "offset_us": 0}}]},
+    {"id": "mixed", "kind": "overlap", "warmup_trials": 1, "trials": 3,
+     "lanes": [
+       {"id": "decode", "case": "a",
+        "arrival": {"kind": "fixed_offset", "offset_us": 0},
+        "control": {"scenario": "solo-a", "lane": "a"}},
+       {"id": "prefill", "case": "b",
+        "request": {"profile": "portable-chat-v1", "stream": true, "output": {"tokens": 3, "mode": "cap"}, "cache": "observe"},
+        "arrival": {"kind": "after_first_generated", "lane": "decode", "offset_us": 40000},
+        "control": {"scenario": "solo-b", "lane": "b"}}
+     ]}
+  ]
+}
+```
+
+This is synthetic schedule data, not a tokenizer-qualified long-prefill study.
+Each scenario has 1..64 unique named lanes, 0..20 warmup repetitions and 1..100
+measured repetitions. A solo has exactly one fixed-offset-zero lane and no
+control. Every overlap lane explicitly names a solo lane in the same workload
+with the identical case, complete resolved request settings, and repetition
+counts. Missing solo observations cannot be borrowed from another acquisition.
+Scenario/lane/repetition identities, not completion order, align comparison arms.
+
+An absent lane `request` uses the complete workload request. A present request
+**replaces it entirely**; fields are never merged. Both default and replacement
+must use `portable-chat-v1` or `vllm-fixed-v1`, never conversation profiles or
+steps. The existing phase-output and cache-eligibility rules apply per lane.
+Scheduled seeds use `seed + trial * 64`, without positional lane increments, so
+the same declared lane settings resolve to the same seed in its solo control.
+
+Arrivals are either `fixed_offset {offset_us}` from the admitted scenario's
+single monotonic origin, or `after_first_generated {lane, offset_us}` from an
+earlier-declared lane's first accepted generated text. Any scenario with a text
+trigger requires all lanes to stream. Headers, role-only events, body arrival,
+tool fragments and terminal frames are not generated-text triggers. A missing
+trigger or a source that settles before its dependent dispatch is retained as
+failure, not replaced by fixed-delay traffic.
+
+Admission checks all named lane bodies, settings, seeds, memory, trials and
+warmups prospectively. Existing hard limits remain: 10,000 total attempts, 1,024
+scenario repetitions, 2 MiB encoded requests, 8 MiB response caps and 512 MiB
+maximum wave buffer. `limits.total_ms` additionally bounds the **whole
+scenario**, including every arrival wait; it is not restarted for each new lane.
+There are no retries, replacement lanes, or subsequent scenario admission after
+fatal failure. All admitted peers settle before response/receipt publication.
+Cooperative pause takes effect only after this whole-scenario barrier; explicit
+resume admits only never-started scenarios and remains a continued acquisition,
+not uninterrupted comparison evidence.
+
+For outside-checkout use, point at the exact staged binary and new workload:
+
+```sh
+PERF=/absolute/path/to/staged/bin/grill-perf
+WORK=/absolute/path/to/synthetic-mixed.json
+"$PERF" preflight "$WORK" --endpoint https://your-server.example/v1/chat/completions \
+  --model YOUR_MODEL
+# Only in a separately approved, prospectively budgeted endpoint window:
+"$PERF" run "$WORK" --endpoint https://your-server.example/v1/chat/completions \
+  --model YOUR_MODEL --out /absolute/path/to/new-schedule-run --json
+"$PERF" compare /absolute/path/to/baseline-run /absolute/path/to/candidate-run --json
+```
+
+The example allows **16 requests / 88 output tokens / 1,048,576 response bytes**
+including warmups, at most two admitted lanes, and twelve scenario deadlines
+(36 seconds of network/arrival allowance, not a bound on filesystem stalls).
+Preflight also prints the actual summed encoded request-body bytes and maximum
+admitted lanes. No preflight command performs endpoint discovery or requests.
+Prompt bytes are not tokenizer token counts.
+
+Wave2 retains every lane position, including undispatched failures. In schedule
+observations, `settled_offset_us` and `wave.elapsed_us` both retain actual
+origin-to-barrier duration, including initial waits and cancellation settlement
+tail; the tail is never truncated to manufacture a deadline success.
+Completed lanes do not exempt the whole-scenario barrier from that deadline.
+Timeout classification uses the retained barrier clock, including a scheduler
+delay after the final admission-loop check.
+Undispatched attempts have zero/default response timings, not fictional
+dispatch or service intervals. Dispatch spread uses dispatched lanes only.
+
+Offline replay verifies the exact deterministic lane spec, request/body hashes,
+per-lane controls/usage, trigger offsets, deadlines and all overlap booleans:
+
+- `request_inflight`: positive intersection of dispatch-to-settlement intervals.
+- `generated_text`: positive intersection of first-to-last generated-text intervals.
+- `left_decode_right_prefill` / `right_decode_left_prefill`: positive intersection
+  of one lane's generated-text interval with the other's dispatch-to-first-text
+  interval. Terminal/settlement tails never substitute for last generated text.
+
+Missing or zero-span text intervals do not establish overlap. False actual
+overlap remains visible even when every request completed. The report keeps
+named per-lane first-generated/first-answer/completion observations, matched-solo
+availability, all missing/failing repetitions and descriptive complete-scenario
+throughput. It never pools unlike lane decode/prefill rates into a verdict.
+Exit 0 means complete eligible **descriptive** evidence; incomplete or continued
+evidence gives exit 2, and corrupt/incompatible evidence gives exit 1. These are
+not fairness, mixed-load nonregression or backend-qualification verdicts.
+Prospective named-lane gates use the policy2 contract above through `decide`.
+No GLM/DeepSeek schedule qualification is implied by CPU fixture coverage.
+
+## Kernel and collective microbenchmarks
+
+`grill-perf microbench` keeps kernel and fabric observations in their own
+closed artifact family, because HTTP output speed cannot prove that an isolated
+kernel or collective changed. The subcommands are `capture` (run the
+in-process CPU reference, or one explicitly declared adapter program), `import`
+(validate retained producer bytes and record them with imported provenance),
+`inspect` (validate and print identity, samples, byte definitions and retained
+failures) and `compare` (a declared study with the shared exact envelope
+arithmetic).
+
+Provenance is `declared`, `imported` or `native_observed`, and importing never
+upgrades it: a payload that claims native execution keeps that claim only in
+`submitted_provenance`. A kernel or collective result never sets a
+serving-speed claim; that requires a separately linked serving acquisition.
+Device and collective capture is behind `--authorize-device-window`, and under
+the current CPU-only authorization only the in-process `sum_u64` reference runs:
+it proves native operation execution, sample recording, inspection and exact
+comparison, not GPU support.
+
+A comparison needs a prospectively declared study of **at least three complete
+measured acquisitions in each of the A, B and A2 roles**. Slots are declared
+before capture, membership is exact (an undeclared directory is an error, a
+declared but missing or failed acquisition withholds the verdict rather than
+being replaced or filtered), every pin except the declared revision axis must
+match, and the A/A2 statistics are pooled into the reference envelope. A
+revision is the SHA-256 of the implementation descriptor the producing process
+actually observed — never a free-form operator label and never copied from the
+plan, so a mismatching expectation is retained and rejected at comparison
+rather than synthesized away. Identical revisions in all roles are an admitted
+A/A control, and the observed runtime descriptor is the only permitted change
+axis. Each sample keeps the timer's own decimal representation and its exact
+rational nanosecond duration, so a fractional nanosecond and a
+scientific-notation device sample survive unrounded, and the collective adapter
+is executed directly with an explicit process-group environment instead of
+being wrapped in a launcher.
+
+Frozen cells, clock/unit/synchronization contracts with declared timer
+resolution, the study and group-comparison contract, observed-source and
+runtime-observation pins, the pinned public E3 and nccl-tests sources with
+their hashes, the collective rank-scope sample unit, and the corrected byte
+definitions (`payload_bytes = numel * sizeof(dtype)`; `2*(world-1)/world` is the
+labelled nccl-tests bus normalization, never measured link traffic) are
+specified in [the kernel and collective protocol](KERNEL-FABRIC.md), together
+with the CPU smoke plan and the explicitly unexercised device gaps.
+
 ## Optional provider snapshots
 
 Add `--metrics-url https://your-server.example/metrics` to `run` to retain bounded
@@ -764,6 +1169,41 @@ Metrics endpoints, labels and raw bodies can expose private model names, request
 identifiers or other server content, including unsupported metrics and comments.
 Review all retained bytes before sharing; the allowlist is not a privacy filter.
 See the [snapshot schema and bounds](CONTRACT.md#provider-snapshot-protocol).
+
+### Explicit accounting protocol (metrics version 2)
+
+`--metrics-version 2` selects the versioned accounting protocol described in
+[PROVIDER-ACCOUNTING.md](PROVIDER-ACCOUNTING.md): a closed allowlist of
+server-wide prefix-cache, prompt-source, preemption, draft-round and
+per-position counters with typed units, full label identities, whole-capture
+continuity with exporter-epoch attestation, bounded scrape/series/overhead
+budgets with bounded partial cancellation, and per-position acceptance against
+the provider's own draft-round exposure. Optional version 2 diagnostics never
+change performance eligibility; required evidence is an explicit policy
+declaration that fails closed, so missing or contradicted telemetry is
+unavailable rather than PASS. `--metrics-auth-env NAME` names a metrics-only
+credential: the name is retained, the value is sent only to the metrics endpoint
+and never inherits the model credential. Version 1 runs, plans and receipts keep
+their existing schema and bytes.
+
+## Independent host resource observations
+
+[`resource capture/import/inspect/compare`](RESOURCES.md) provides a bounded
+ordinary Linux process/cgroup/explicit host observer and source-specific offline
+A/B/A2 comparisons. It does not change the default serving collector, execute
+GPU sources, or implement capacity/retention studies. Imported device/provider
+bytes remain imported evidence; source delivery is not live qualification.
+
+## Finite capacity and acquisition resources
+
+[`capacity preflight/run/inspect`](CAPACITY.md) adds explicit workload6
+complete-acquisition resource attachments and finite context/load/retention studies.
+The existing native serving/sequence collector is reused; every failed cell and
+undispatched remainder is retained. Attached resources are review-only outside
+prospective capacity limits, and throughput policies cannot silently PASS them.
+The source-pinned backend eviction hook is distinct from provider-reported misses
+or preemptions. No automatic stress search, reset, retry or operator recovery exists;
+largest successful tested cell is not safe universal capacity or live qualification.
 
 ## Deployment declarations and privacy
 

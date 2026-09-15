@@ -28,6 +28,246 @@ manage serving state separately and obtain approval before model collection.
 Unsupported request controls must fail qualification; never strip a field to
 make a server accept the workload.
 
+## Routine and mixed claim profiles
+
+The `glm-routine-decode-v3.json`, `glm-routine-prefill-v3.json` and
+`glm-mixed-prefill-decode-v4.json` files, and their `deepseek-` counterparts,
+reuse the existing bundle prompts without changing the frozen bundle files.
+They are explicit workload choices, not model detection. GLM-labelled files
+retain `chat_template_kwargs.enable_thinking: false`; DeepSeek-labelled files
+retain `chat_template_kwargs.thinking: false`. A label does not establish that a
+particular backend honors that key. Verify the actual template and retained
+request/response evidence before qualification; never retry with a stripped key.
+
+“Routine” describes the bounded workload scope below, not an agreed maintainer
+requirement or a recommended deployment configuration. Select the rows relevant
+to the change. Do not run every row automatically.
+
+| Profile suffix, for either recipe | Declared scope | Warmup / measured requests per run | Output-token ceiling per run | A/B/A2 requests / output-token ceiling |
+|---|---|---:|---:|---:|
+| `routine-decode-v3` | Structured C1/C2; prose, code and JSON C1; capped warmup32/measured400; observe cache | 6 / 18 | 7,392 | 72 / 22,176 |
+| `routine-prefill-v3` | Approximately 4K/16K input, C1; capped8; required reported-zero prefix hits | 2 / 6 | 64 | 24 / 192 |
+| `mixed-prefill-decode-v4` | Solo decode, solo approximately 4K prefill, then a two-lane mixed scenario; capped decode warmup32/measured400 and prefill8 | 4 / 12 | 2,528 | 48 / 7,584 |
+
+Every cell/scenario has one retained warmup and three measured trials. Decode
+retains the source workload's 360-second wave deadline, 60-second idle deadline,
+1 MiB response limit and 64 MiB wave-buffer limit. Routine prefill retains
+600-second total/idle deadlines, a 64 KiB response limit and a 4 MiB wave buffer.
+Mixed schedules use the decode limits and admit at most two lanes. They contain
+12 waves, at most 16 model requests, and a sum of scenario deadlines of 4,320
+seconds per run. This is not a wall-clock bound on filesystem publication or
+operator work. Output ceilings include warmup and are ceilings, not promises that
+the server generates that many tokens.
+
+Mixed `prefill` dispatch is triggered by the first generated text from `decode`;
+it is not triggered by headers or a role-only delta. `solo-decode/decode` and
+`solo-prefill/prefill` are the named controls. A declared trigger is not proof of
+overlap: require retained decode/prefill overlap for every required repetition.
+Missing triggers, early settlement, cancellation and absent overlap remain in the
+evidence; none is a replacement opportunity.
+
+Source-byte pins for these exact files:
+
+| File | SHA256 |
+|---|---|
+| `glm-routine-decode-v3.json` | `6d075fb8617280ad062393e169f4b162d12840338bbb2749e6871be5672b5846` |
+| `glm-routine-prefill-v3.json` | `f0ddfda5f5bb35b6c1637fd27e02c5ae3ef9aeb37ed5e61fc0b953b52a61edd6` |
+| `glm-mixed-prefill-decode-v4.json` | `886c96c9efeaa4f6bac85e3d19af3408469edd55eb1fdc3a82aedaa3dacce06f` |
+| `deepseek-routine-decode-v3.json` | `2e92488152a007774a1f2614b6e18e83a70b2f4ab8d9d5c052b551a2316f0074` |
+| `deepseek-routine-prefill-v3.json` | `37a121c31bcabb5df8b508edbbf3e216880a514f81d29c3401ff51c6f4d987b9` |
+| `deepseek-mixed-prefill-decode-v4.json` | `0a84ab9151e262af2e38e64c3f62601f385bcf44aa2841b9a4eb9ad12b588559` |
+
+Before an authorized acquisition, select the actual installed collector, exact
+workload and complete prospective policy. Obtain the binary/source pins and
+approve thresholds through the policy workflow below, then run native
+`preflight` with the actual model, endpoint, deployment and policy arguments.
+Preflight dispatches no requests; it validates declarations, not backend support.
+Retain its output and recheck it whenever any input changes. Optional telemetry
+adds its own bounded requests and overhead; it is not included in the model
+request counts above. These six profiles were CPU-fixture captured and replayed,
+including both thinking-key spellings and actual mixed overlap. That does not
+verify real tokenizer lengths, cache behavior or serving performance.
+
+The new source pins are not interchangeable with #45's completed studies.
+Reuse the frozen #45 evidence for its original qualified scope; do not rerun that
+campaign simply to demonstrate these new filenames. A new first-output, mixed,
+cache-accounting or other claim needs the corresponding evidence and gates.
+`compare` is descriptive eligibility, never PASS. A serving decision does not
+establish semantic/JSON/code quality; retain the applicable recipe quality checks
+and use the [single shared report](SHARED-REPORT-TEMPLATE.md).
+
+### Repeated conversation and explicit stress profiles
+
+The following version-6 files have separate `glm-` and `deepseek-` variants with
+the same single, explicit thinking-key mappings described above. They are
+prospective workload declarations, not evidence of backend qualification.
+Do not automatically add stress rows to routine PR traffic.
+
+| Profile suffix | Scope and output | Warmup / measured requests per run | Output-token ceiling per run | A/B/A2 requests / output-token ceiling |
+|---|---|---:|---:|---:|
+| `tools-v6` | Actual streamed tool call, locally supplied result and actual follow-up; capped128 | 2 / 6 | 1,024 | 24 / 3,072 |
+| `history-branches-v6` | Prime/reuse, alternate histories, edit/restore and tool follow-up; capped128 | 11 / 33 | 5,632 | 132 / 16,896 |
+| `long-context-v6` — stress | Four strict-cold C1 sizes, including a 520,000-byte filler; capped1 | 4 / 12 | 16 | 48 / 48 |
+| `p95-stress-v6` — stress | C2, 200 measured waves, exact8 per lane; completion tail and first-output/fairness means | 2 / 400 | 3,216 | 1,206 / 9,648 |
+
+Conversation profiles retain one complete warmup acquisition and three complete
+measured acquisitions. Every required step remains part of completeness and
+whole-conversation wall time. The history profile excludes its two priming steps
+from per-step performance means, not from execution or eligibility. It reuses
+the eleven long-prefix branch cases from `conversation-v2.json`; the separate
+`short-prime`/`short-reuse` probe remains in that unchanged legacy file and is
+**not qualified by this profile**. Required reported-zero/hit checks on the
+selected history cases remain required. The tool-only profile observes cache
+state without claiming reuse.
+
+Tools have a 1 MiB encoded-input allowance and 1 MiB retained-history allowance;
+history branches have 1 MiB and 16 MiB respectively. Their wave-buffer allowances
+are 16 MiB and 32 MiB. Long context has a 2 MiB encoded-input allowance and
+16 MiB wave buffer; p95 has 64 KiB and 16 MiB. All responses are bounded to
+64 KiB. All four profiles use a 360-second wave deadline, with a 60-second idle
+deadline except long context, whose idle deadline is also 360 seconds.
+These are declared serialization/collection bounds, not process-RSS guarantees.
+
+The long-context profile reuses `prefill-ladder-v1.json` prompt data. Its final
+case is explicitly renamed `prefill-large` and declares 130,000 repetitions of
+`" the"` rather than the legacy 131,072, reserving prospective context headroom.
+That is 520,000 filler bytes, **not a measured token count**. Count the actual
+encoded body and use the actual tokenizer/context allowance before dispatch;
+retain provider prompt-token usage before making any context-length claim.
+Neither this case name nor a 128 KiB limit establishes 128K tokens. The frozen
+legacy ladder is unchanged. Never shorten an already declared acquisition after
+a context rejection.
+
+The p95 population is 200 complete measured **waves**, each containing two lanes:
+it is not 400 independent tail observations. The tail sample is the maximum
+completion latency across both eligible lanes. One missing lane or acquisition
+withholds the required tail gate. This profile does not qualify p99; p99 requires
+its separately declared population of at least 1,000 complete observations.
+First-output and fairness means remain distinct from completion-tail statistics.
+
+| File | SHA256 |
+|---|---|
+| `glm-tools-v6.json` | `a2cbebeb24f0ef6cc74dada8ab17c662d6dd54d0f064456be327d1ed6a7d55ce` |
+| `glm-history-branches-v6.json` | `dd461c1c89c0fca5b003d40b205abab35576f83f02547ff924bf142c6e11134c` |
+| `glm-long-context-v6.json` | `ef0a6f381ad5158f73b7756f6e637789cd8c948a81827cdddf4c57176a33402b` |
+| `glm-p95-stress-v6.json` | `b18bccca830672d5dba62c50e252d9730d50d436d7bb362b3c18c8862ed41315` |
+| `deepseek-tools-v6.json` | `609e8d45f9b42b6f990172a2426e2bdc9399803945e38efcc71253f0e453a126` |
+| `deepseek-history-branches-v6.json` | `4849036ee09ecf2cee85745e12be3b6a79da8d64ba8afb77013982dd9d8d9d40` |
+| `deepseek-long-context-v6.json` | `75a15591dadd2a672d6fe37f98c9d12035e36a8efaf48a5c0b14d222620eb844` |
+| `deepseek-p95-stress-v6.json` | `7705bfb554fe39f40e50ea0f7cbbb555f37aa90222e57400a29393de352c946b` |
+
+### Prospective policy3 for the version-6 profiles
+
+After installation, set `GRILL_PERF`, `WORKLOAD` and a fresh `POLICY` path as in
+the workflow below. Explicitly select `CLAIM=conversation`, `long-context` or
+`p95`; set the two approved threshold environment variables
+`MAX_REGRESSION_BPS` and `MAX_REFERENCE_SPREAD_BPS`. The following local authoring
+step hashes actual bytes, dispatches no requests and refuses to replace a policy.
+Thresholds must be approved before collection, not selected from candidate data.
+
+```python
+import hashlib
+import json
+import os
+from pathlib import Path
+
+binary = Path(os.environ["GRILL_PERF"])
+workload_path = Path(os.environ["WORKLOAD"])
+source = workload_path.read_bytes()
+workload = json.loads(source)
+claim = os.environ["CLAIM"]
+threshold = {
+    "max_regression_bps": int(os.environ["MAX_REGRESSION_BPS"]),
+    "max_reference_spread_bps": int(os.environ["MAX_REFERENCE_SPREAD_BPS"]),
+}
+assert workload["version"] == 6
+assert claim in {"conversation", "long-context", "p95"}
+conversation = workload["acquisition"]["kind"] == "conversation"
+assert conversation == (claim == "conversation")
+measured = set(workload["acquisition"].get("measured_steps", []))
+cases = {case["id"]: case for case in workload["cases"]}
+cells = []
+tails = []
+for cell in workload["cells"]:
+    if conversation and cell["case"] not in measured:
+        continue
+    expected = cases[cell["case"]].get("step", {}).get("expect", {}).get("kind")
+    if expected == "tool":
+        metrics = ["first_tool_delta_us", "first_validated_tool_call_us",
+                   "completion_latency_us"]
+    elif claim == "long-context":
+        assert workload["request"]["cache"] == "reported-prefix-zero"
+        metrics = ["prefill_tokens_per_second", "first_generated_text_us",
+                   "completion_latency_us"]
+    else:
+        metrics = ["first_generated_text_us", "first_answer_text_us",
+                   "completion_latency_us"]
+    if claim == "p95":
+        assert cell["trials"] >= 200 and cell["concurrency"] >= 2
+        metrics += ["worst_lane_first_answer_us", "first_answer_max_min_ratio"]
+        tails.append({"target": {"kind": "completion", "cell": cell["id"]},
+                      "percentile": "p95", **threshold})
+    cells.append({"cell": cell["id"],
+                  "metrics": [{"metric": metric, **threshold} for metric in metrics]})
+policy = {
+    "version": 3,
+    "method": "observed-envelope-v3",
+    "id": workload["name"] + "-policy",
+    "collector_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
+    "workload_source_sha256": hashlib.sha256(source).hexdigest(),
+    "min_trials": 3,
+    "cells": cells,
+}
+if conversation:
+    policy["whole_conversation"] = threshold
+if tails:
+    policy["tail"] = tails
+with Path(os.environ["POLICY"]).open("x") as output:
+    json.dump(policy, output, indent=2)
+    output.write("\n")
+```
+
+Retain native `preflight` output with the actual endpoint/model and this policy
+before using the existing A/B/A2 run/decide workflow. Preflight is offline schema
+and budget admission, not tokenizer, cache, thinking-control or backend proof.
+For tools, the two tool-time selectors require actual streamed deltas and a
+validated complete call; text timing cannot substitute for either.
+
+### Remaining claim entrypoints and non-substitution rules
+
+Both recipe families use the same explicit domain workflows; no backend-name
+registry or automatic tuning/collection is introduced.
+
+| Claim | Required evidence path |
+|---|---|
+| First generated/answer output, completion, C2 fairness | Relevant routine decode cells with prospective policy2 latency/fairness selectors, or the explicit policy3 scope above |
+| Mixed interference | Declared solo controls and actual required overlap in `mixed-prefill-decode-v4`; [schedule and policy contract](README.md) |
+| Cache/speculative/preemption accounting | [Bounded provider accounting](PROVIDER-ACCOUNTING.md), selected metrics2 source and exclusive acquisition declaration where required |
+| Whole conversation, branches, actual tools | Version-6 profiles above and [conversation evidence](CONVERSATIONS.md) |
+| Host/device memory and power | [Native resource capture/inspect/compare](RESOURCES.md); `resource-acquisitions-v6.json` for review-only serving attachment |
+| Finite capacity and actual retention eviction/recovery | [Capacity preflight/run/inspect](CAPACITY.md); explicitly selected real source set, native counters and journal, never inference from the small history fixture |
+| Startup and restart-cache lifecycle | [Startup observe/store/reload/inspect/compare](STARTUP.md); actual lifecycle/source/cache identity evidence |
+| E3 kernel and collective/fabric | [Native microbench capture/inspect/compare](KERNEL-FABRIC.md); explicit producer, runtime/source pins and device window |
+
+C4/C8 remains an explicit scope in the existing full decode workloads, not hidden
+routine traffic. Resource/capacity/lifecycle/kernel plans need private actual
+source, process/device and collector identities frozen before collection.
+Examples are not permission to discover processes, reset caches, start services,
+allocate to OOM or initialize devices. Separate authorization is mandatory.
+Telemetry adds its own bounded requests and overhead beyond the model-request
+counts above. Required-hit and deliberately cache-disabled operation are
+incompatible. Inspect suitable existing receipts before changing serving state;
+missing historical fields do not prove a current backend lacks them, zero hits
+do not prove warm reuse, and missing counters are not zero.
+
+Record implemented, CPU-protocol verified, real-adapter exercised and
+live-backend qualified separately for every selected claim in the
+[single report template](SHARED-REPORT-TEMPLATE.md). Preserve every failed,
+unsupported and inconclusive result. Reuse #45 only for its frozen qualified
+scope. Serving throughput cannot substitute for resources, retention, lifecycle,
+kernel, semantic quality or tokenizer evidence. Broader mandatory adoption still
+requires complete coverage reconciliation and explicit maintainer agreement.
+
 ## Install and pin the actual artifact
 
 Follow [download, checksum verification and installation](INSTALL.md) before

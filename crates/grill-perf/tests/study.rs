@@ -18,6 +18,8 @@ mod conversation;
 mod first_run;
 #[path = "support/selection.rs"]
 mod selection;
+#[path = "support/tool_conversation.rs"]
+mod tool_conversation;
 
 static NEXT: AtomicUsize = AtomicUsize::new(0);
 struct Temp(PathBuf);

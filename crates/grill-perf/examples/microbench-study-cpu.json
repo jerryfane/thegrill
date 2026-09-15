@@ -1,0 +1,32 @@
+{
+  "kind": "microbench-study-v1",
+  "version": 1,
+  "adapter": "cpu-sum-u64-reference",
+  "revision_axis": {
+    "baseline": "0000000000000000000000000000000000000000000000000000000000000000",
+    "candidate": "0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "thresholds": {
+    "adverse_bps": 500,
+    "spread_bps": 2000
+  },
+  "minimum_acquisitions": 3,
+  "roles": {
+    "baseline": [
+      "a01",
+      "a02",
+      "a03"
+    ],
+    "candidate": [
+      "b01",
+      "b02",
+      "b03"
+    ],
+    "reference": [
+      "r01",
+      "r02",
+      "r03"
+    ]
+  },
+  "started_unix_ms": 1757000000000
+}

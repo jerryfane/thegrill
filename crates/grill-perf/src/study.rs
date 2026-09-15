@@ -774,6 +774,9 @@ fn collect(
                 deployment: Some(root.join("deployment.json")),
                 policy: None,
                 metrics_url: None,
+                metrics_version: 1,
+                metrics_auth_env: None,
+                metrics_isolation: None,
                 auth_env: manifest.auth_env.clone(),
                 local_http: manifest.local_http,
             },
@@ -917,6 +920,9 @@ fn preflight(
     workload: &Workload,
     selected: Option<&selection::Manifest>,
 ) -> Result<()> {
+    if matches!(workload.version, 4..=6) {
+        return Err("workloads4..6 require native run/preflight/compare/decide; legacy selected capture is unsupported".into());
+    }
     wire::endpoint(&options.endpoint, options.local_http)?;
     wire::credential(options.auth_env.as_deref())?;
     if options.model.is_empty()
@@ -949,9 +955,11 @@ fn preflight(
                 index: 0,
                 phase: Phase::Measured,
                 cell: cell.id.clone(),
-                case: cell.case.clone(),
+                case: Some(cell.case.clone()),
                 trial: 0,
                 concurrency: cell.concurrency,
+                lanes: None,
+                acquisition: None,
             };
             let effective = crate::sequence::settings(workload, &spec);
             text.push_str(&format!(

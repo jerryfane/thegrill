@@ -1,0 +1,120 @@
+{
+  "version": 1,
+  "kind": "capacity-study-v1",
+  "cells": [
+    {
+      "id": "load-1",
+      "context_token_ceiling": 512,
+      "workload": {
+        "version": 6,
+        "name": "capacity-flat-v6",
+        "request": {
+          "profile": "portable-chat-v1",
+          "stream": true,
+          "output": {
+            "tokens": 32,
+            "mode": "cap"
+          },
+          "cache": "observe"
+        },
+        "limits": {
+          "total_ms": 5000,
+          "idle_ms": 2000,
+          "response_bytes": 65536,
+          "wave_buffer_bytes": 16777216
+        },
+        "cases": [
+          {
+            "id": "one",
+            "messages": [
+              {
+                "role": "user",
+                "content": "Return the word sapphire."
+              }
+            ]
+          }
+        ],
+        "cells": [
+          {
+            "id": "c1",
+            "case": "one",
+            "concurrency": 1,
+            "warmup_trials": 1,
+            "trials": 1
+          }
+        ],
+        "acquisition": {
+          "kind": "flat",
+          "input_bytes": 65536
+        }
+      },
+      "success": {
+        "quality": "protocol_only",
+        "require_prompt_usage": true,
+        "resources": {
+          "kind": "not_required_no_resource_claim"
+        }
+      }
+    },
+    {
+      "id": "load-2",
+      "context_token_ceiling": 512,
+      "workload": {
+        "version": 6,
+        "name": "capacity-flat-v6",
+        "request": {
+          "profile": "portable-chat-v1",
+          "stream": true,
+          "output": {
+            "tokens": 32,
+            "mode": "cap"
+          },
+          "cache": "observe"
+        },
+        "limits": {
+          "total_ms": 5000,
+          "idle_ms": 2000,
+          "response_bytes": 65536,
+          "wave_buffer_bytes": 16777216
+        },
+        "cases": [
+          {
+            "id": "one",
+            "messages": [
+              {
+                "role": "user",
+                "content": "Return the word sapphire."
+              }
+            ]
+          }
+        ],
+        "cells": [
+          {
+            "id": "c2",
+            "case": "one",
+            "concurrency": 2,
+            "warmup_trials": 1,
+            "trials": 1
+          }
+        ],
+        "acquisition": {
+          "kind": "flat",
+          "input_bytes": 65536
+        }
+      },
+      "success": {
+        "quality": "protocol_only",
+        "require_prompt_usage": true,
+        "resources": {
+          "kind": "not_required_no_resource_claim"
+        }
+      }
+    }
+  ],
+  "max_requests": 10,
+  "max_output_tokens": 1024,
+  "max_wall_us": 60000000,
+  "retained_bytes": 1073741824,
+  "stop_condition": "first_unsuccessful_cell",
+  "oom_response": "stop_operator_recovery"
+}

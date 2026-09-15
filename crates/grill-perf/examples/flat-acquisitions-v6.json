@@ -1,0 +1,21 @@
+{
+  "version": 6,
+  "name": "flat-acquisitions-v6",
+  "request": {
+    "profile": "portable-chat-v1",
+    "stream": true,
+    "output": {"tokens": 32, "mode": "cap"},
+    "cache": "observe",
+    "temperature_milli": 0,
+    "seed": 0
+  },
+  "limits": {
+    "total_ms": 30000,
+    "idle_ms": 10000,
+    "response_bytes": 65536,
+    "wave_buffer_bytes": 16777216
+  },
+  "cases": [{"id":"one","messages":[{"role":"user","content":"Return the word sapphire."}]}],
+  "cells": [{"id":"c2","case":"one","concurrency":2,"warmup_trials":1,"trials":3}],
+  "acquisition": {"kind":"flat","input_bytes":65536}
+}

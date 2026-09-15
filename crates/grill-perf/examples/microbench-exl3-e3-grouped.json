@@ -1,0 +1,73 @@
+{
+  "kind": "microbench-plan-v1",
+  "version": 1,
+  "adapter": "exl3-e3-grouped",
+  "revision": "0000000000000000000000000000000000000000000000000000000000000000",
+  "program_sha256": "80aa81701286b4d1bd9b44dc8e91acf27614d13621e672a7db55b04f29ce1d01",
+  "sources": [
+    {
+      "path": "tools/microbench/exl3_e3_grouped.py",
+      "sha256": "80aa81701286b4d1bd9b44dc8e91acf27614d13621e672a7db55b04f29ce1d01"
+    },
+    {
+      "path": "tests/bench_e3_microbench.py",
+      "sha256": "f57e4fa6726b0110c44ce56b0b0968ba425e566ace6d89f2db3872aae13889ec"
+    },
+    {
+      "path": "tests/test_exl3_overlay.py",
+      "sha256": "8777254d47cdbb89186ba3bd1ac2437cbebc7987e0791d36c68e7bccb3df2b35"
+    }
+  ],
+  "operation": {
+    "kind": "exl3-experts",
+    "hidden": 4096,
+    "intermediate": 1024,
+    "experts": 288,
+    "topk": 8,
+    "tokens": 1024,
+    "layer_seed": 0,
+    "routing_seed": 1,
+    "parity_routing_seed": 3,
+    "activation_seed": 3,
+    "skew_milli": 1000,
+    "tier": "e3-grouped",
+    "cap": 32,
+    "dtype": "float16",
+    "routing": "synthetic-zipf-permuted",
+    "activation": "randn-fp16-activation-seed-3",
+    "weights": "random-k4-trellis-shared-gate-up-suh"
+  },
+  "clock": {
+    "id": "cuda-event-ms",
+    "kind": "device_event",
+    "units": "milliseconds",
+    "resolution_ns": 1000,
+    "synchronization": "device-event-timing-after-synchronize"
+  },
+  "warmups": 2,
+  "iterations": 5,
+  "allowance": {
+    "work_units": 3000000000000,
+    "memory_bytes": 68719476736,
+    "deadline_ms": 600000
+  },
+  "correctness": {
+    "reference": "apply-exl3-python-loop",
+    "tolerance": {
+      "kind": "e3-rel",
+      "factor_milli": 1500,
+      "abs_rel_micro": 1000,
+      "nrmse_abs_micro": 100,
+      "coarse_abs_milli": 150,
+      "coarse_factor_milli": 80
+    }
+  },
+  "thresholds": {
+    "adverse_bps": 500,
+    "spread_bps": 2000
+  },
+  "acquisition": {
+    "id": "a01",
+    "started_unix_ms": 1757000000000
+  }
+}

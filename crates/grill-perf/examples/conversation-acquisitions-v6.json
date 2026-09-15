@@ -1,0 +1,57 @@
+{
+  "version": 6,
+  "name": "conversation-acquisitions-v6",
+  "request": {
+    "profile": "vllm-conversation-v3",
+    "stream": true,
+    "output": { "tokens": 128, "mode": "cap" },
+    "cache": "observe",
+    "temperature_milli": 0,
+    "top_p_milli": 1000,
+    "seed": 0,
+    "thinking_control": { "kind": "vllm-enable-thinking-v1", "enabled": false }
+  },
+  "limits": {
+    "total_ms": 10000,
+    "idle_ms": 10000,
+    "response_bytes": 65536,
+    "wave_buffer_bytes": 16777216
+  },
+  "cases": [
+    {
+      "id": "lookup",
+      "messages": [
+        { "role": "system", "content": "Use the fixed lookup_fact function when requested; when asked for the returned fact, answer only a JSON object with one string field fact." },
+        { "role": "user", "content": "Call lookup_fact with key harbor." }
+      ],
+      "step": {
+        "history": "harbor",
+        "parent": null,
+        "cache": "observe",
+        "expect": { "kind": "tool", "key": "harbor", "result": "sapphire" }
+      }
+    },
+    {
+      "id": "followup",
+      "messages": [ { "role": "user", "content": "What fact did the tool return?" } ],
+      "step": {
+        "history": "harbor",
+        "parent": "lookup",
+        "cache": "observe",
+        "expect": { "kind": "json", "value": { "fact": "sapphire" }, "strict": null }
+      }
+    }
+  ],
+  "cells": [
+    { "id": "lookup", "case": "lookup", "concurrency": 1, "warmup_trials": 0, "trials": 1 },
+    { "id": "followup", "case": "followup", "concurrency": 1, "warmup_trials": 0, "trials": 1 }
+  ],
+  "acquisition": {
+    "kind": "conversation",
+    "repetitions": 3,
+    "warmup_repetitions": 1,
+    "measured_steps": ["lookup", "followup"],
+    "input_bytes": 1048576,
+    "retained_history_bytes": 1048576
+  }
+}

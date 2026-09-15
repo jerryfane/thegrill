@@ -192,6 +192,7 @@ pub struct Loaded {
     pub plan_sha256: String,
     pub evidence_sha256: String,
     pub lineage_sha256: String,
+    pub resources: Vec<crate::serving_resources::Report>,
 }
 pub fn load(root: &Path) -> Result<Loaded> {
     load_verified(root).map_err(|error| error.detail)
@@ -217,11 +218,11 @@ pub(crate) fn load_verified(root: &Path) -> Result<Loaded, LoadError> {
     directory(root)?;
     let plan_bytes = read(&root.join("plan.json"), 8 * 1024 * 1024)?;
     let plan: Plan = decode(&plan_bytes)?;
-    if !matches!(plan.version, 1..=3) || plan.kind != "performance-run-v1" {
+    if !matches!(plan.version, 1..=5) || plan.kind != "performance-run-v1" {
         return Err("unsupported performance plan".into());
     }
     if match plan.version {
-        3 => plan.metric_contract.as_deref() != Some(METRIC_CONTRACT),
+        3..=5 => plan.metric_contract.as_deref() != Some(METRIC_CONTRACT),
         _ => plan.metric_contract.is_some(),
     } {
         return Err("metric contract does not match plan version".into());
@@ -230,6 +231,15 @@ pub(crate) fn load_verified(root: &Path) -> Result<Loaded, LoadError> {
     if plan.workload.version == 3 && plan.version != 3 {
         return Err("workload version 3 requires native performance plan version 3".into());
     }
+    if (plan.version == 4) != matches!(plan.workload.version, 4 | 5) {
+        return Err("workloads 4 and 5 require plan 4; plan 4 requires workload 4 or 5".into());
+    }
+    if (plan.version == 5) != (plan.workload.version == 6) {
+        return Err("workload6 requires plan5 exclusively".into());
+    }
+    if plan.workload.version == 5 && plan.policy_sha256.is_some() {
+        return Err("workload 5 has no performance policy contract".into());
+    }
     if let Some(deployment) = &plan.deployment {
         deployment.validate()?;
     }
@@ -237,9 +247,11 @@ pub(crate) fn load_verified(root: &Path) -> Result<Loaded, LoadError> {
         if plan.version < 2 {
             return Err("metrics require execution-session provenance".into());
         }
-        config.validate(plan.waves.len(), plan.local_http)?;
+        config.validate(plan.waves.len(), plan.local_http, plan.auth_env.as_deref())?;
     }
-    let expected_mechanism = (plan.workload.request.profile != Profile::PortableChatV1)
+    let expected_mechanism = plan
+        .workload
+        .cache_mechanism_required()
         .then_some("declared-vllm-prefix-cache");
     if plan.cache_mechanism.as_deref() != expected_mechanism
         || plan.cache_evidence_source
@@ -248,10 +260,9 @@ pub(crate) fn load_verified(root: &Path) -> Result<Loaded, LoadError> {
         return Err("cache observation source does not match the request profile".into());
     }
     let expected_pool = plan
-        .workload
-        .cells
+        .waves
         .iter()
-        .map(|c| c.concurrency as usize)
+        .map(|s| s.concurrency as usize)
         .max()
         .unwrap_or(1);
     if plan.pool_max_idle_per_host != expected_pool || plan.collector_sha256.len() != 64 {
@@ -259,7 +270,7 @@ pub(crate) fn load_verified(root: &Path) -> Result<Loaded, LoadError> {
     }
     match (
         &plan.cache_namespace,
-        plan.workload.request.cache != Cache::Observe || plan.workload.salted(),
+        plan.workload.cache_namespace_required(),
     ) {
         (None, false) => (),
         (Some(n), true) if n.len() == 64 && n.bytes().all(|b| b.is_ascii_hexdigit()) => {}
@@ -296,6 +307,7 @@ pub(crate) fn load_verified(root: &Path) -> Result<Loaded, LoadError> {
                 &plan.collector_sha256,
                 &plan.source_sha256,
                 &plan.workload,
+                plan.metrics.as_ref(),
             )
             .map_err(|reason| LoadError {
                 detail: reason.as_str().into(),
@@ -317,20 +329,28 @@ pub(crate) fn load_verified(root: &Path) -> Result<Loaded, LoadError> {
     let mut metrics_waves = Vec::new();
     let mut sequence = crate::sequence::State::default();
     let body_context = crate::wire::BodyContext::from(&plan);
+    let mut fatal_schedule = false;
+    let mut prior_settlement = 0;
     for spec in &plan.waves {
         let dir = wave_dir(root, spec.index);
         if !exists(&dir)? {
+            if plan.version == 5 {
+                fatal_schedule = true;
+            }
             fingerprint.update(b"not_started\0");
             waves.push(None);
             states.push("not_started");
             continue;
+        }
+        if fatal_schedule {
+            return Err("later scenario admitted after fatal schedule outcome".into());
         }
         directory(&dir)?;
         let reservation_bytes = read(&dir.join("reservation.json"), 40 * 1024 * 1024)?;
         let reservation: Reservation = decode(&reservation_bytes)?;
         let reservation_hash = digest(&reservation_bytes);
         fingerprint.update(reservation_hash.as_bytes());
-        if reservation.version != 1
+        if reservation.version != (if matches!(plan.version, 4 | 5) { 2 } else { 1 })
             || reservation.plan_sha256 != plan_hash
             || reservation.wave != *spec
             || reservation.requests.len() != spec.concurrency as usize
@@ -377,7 +397,7 @@ pub(crate) fn load_verified(root: &Path) -> Result<Loaded, LoadError> {
             )
             .as_bytes(),
         );
-        if wave.version != 1
+        if wave.version != (if matches!(plan.version, 4 | 5) { 2 } else { 1 })
             || wave.plan_sha256 != plan_hash
             || wave.reservation_sha256 != reservation_hash
             || wave.spec != *spec
@@ -385,9 +405,23 @@ pub(crate) fn load_verified(root: &Path) -> Result<Loaded, LoadError> {
         {
             return Err("wave lineage mismatch".into());
         }
+        match (&wave.acquisition_clock, plan.version) {
+            (Some(clock), 5) => {
+                if clock.clock_id != plan_hash
+                    || clock.started_offset_us < prior_settlement
+                    || clock.settled_offset_us.checked_sub(clock.started_offset_us)
+                        != Some(crate::acquisition::settlement(wave.attempts.iter())?)
+                {
+                    return Err("invalid capture-monotonic acquisition span".into());
+                }
+                prior_settlement = clock.settled_offset_us;
+            }
+            (None, 1..=4) => (),
+            _ => return Err("missing or undeclared acquisition clock".into()),
+        }
         match (&plan.metrics, &wave.metrics) {
             (Some(config), Some(reference)) => {
-                let summary = crate::metrics::load(
+                let summary = crate::metrics::load_wave(
                     &dir,
                     reference,
                     config,
@@ -399,7 +433,7 @@ pub(crate) fn load_verified(root: &Path) -> Result<Loaded, LoadError> {
                     a.timing
                         .dispatch_offset_us
                         .checked_add(a.timing.settle_us)
-                        .is_none_or(|n| n > summary.receipt.measured_duration_us)
+                        .is_none_or(|n| n > summary.measured_duration_us())
                 }) {
                     return Err("metrics measurement boundary contradicts wave settlement".into());
                 }
@@ -408,12 +442,24 @@ pub(crate) fn load_verified(root: &Path) -> Result<Loaded, LoadError> {
             (None, None) => (),
             _ => return Err("missing or undeclared metrics companion evidence".into()),
         }
-        let settings = crate::sequence::settings(&workload, spec);
+        let tool_step = matches!(workload.version, 5 | 6)
+            && workload
+                .cases
+                .iter()
+                .find(|case| Some(case.id.as_str()) == spec.case.as_deref())
+                .and_then(|case| case.step.as_ref())
+                .is_some_and(|step| matches!(step.expect, crate::sequence::Expected::Tool { .. }));
         for (lane, a) in wave.attempts.iter().enumerate() {
+            let settings = crate::schedule::settings(&workload, spec, lane as u32)?;
             if a.lane as usize != lane
                 || a.response_bytes > workload.limits.response_bytes
                 || a.terminal_offset.is_some_and(|n| n > a.response_bytes)
-                || a.eligibility_errors != eligibility(a, &settings, spec.phase)
+                || a.eligibility_errors
+                    != eligibility(
+                        a,
+                        &settings,
+                        crate::acquisition::eligibility_phase(&workload, spec.phase),
+                    )
             {
                 return Err("invalid attempt facts".into());
             }
@@ -424,6 +470,7 @@ pub(crate) fn load_verified(root: &Path) -> Result<Loaded, LoadError> {
             if body.len() != a.response_bytes || digest(&body) != a.response_sha256 {
                 return Err("response evidence hash mismatch".into());
             }
+            a.timing.validate_tools(tool_step)?;
             if sequence.observe(&plan, spec, a, &body)? != a.sequence {
                 return Err(
                     "sequence check or lineage differs from retained response evidence".into(),
@@ -433,17 +480,19 @@ pub(crate) fn load_verified(root: &Path) -> Result<Loaded, LoadError> {
                 if !a.dispatched || a.http_status != Some(200) {
                     return Err("complete response was not a successful dispatch".into());
                 }
-                crate::wire::verify_complete(
-                    a,
-                    &body,
-                    settings.stream,
-                    plan.version == 3,
-                    settings.profile,
-                )?;
+                if !tool_step {
+                    crate::wire::verify_complete(
+                        a,
+                        &body,
+                        settings.stream,
+                        matches!(plan.version, 3..=5),
+                        settings.profile,
+                    )?;
+                }
             }
             a.timing.validate(settings.stream)?;
-            if plan.version == 3 {
-                if a.status != Status::Complete {
+            if matches!(plan.version, 3..=5) {
+                if a.status != Status::Complete && !tool_step {
                     crate::wire::verify_partial_arrivals(
                         a,
                         &body,
@@ -480,30 +529,26 @@ pub(crate) fn load_verified(root: &Path) -> Result<Loaded, LoadError> {
                 return Err("undispatched attempt contains response facts".into());
             }
         }
-        let first = wave
-            .attempts
-            .iter()
-            .map(|a| a.timing.dispatch_offset_us)
-            .min()
-            .unwrap_or(0);
-        let last_dispatch = wave
-            .attempts
-            .iter()
-            .map(|a| a.timing.dispatch_offset_us)
-            .max()
-            .unwrap_or(0);
-        let mut last = first;
-        for a in &wave.attempts {
-            last = last.max(
-                a.timing
-                    .dispatch_offset_us
-                    .checked_add(a.timing.settle_us)
-                    .ok_or("timing overflow")?,
-            );
+        match (&spec.lanes, &wave.schedule) {
+            (Some(_), Some(observation)) => {
+                crate::schedule::verify(
+                    spec,
+                    &wave.attempts,
+                    observation,
+                    workload.limits.total_ms,
+                )?;
+                fatal_schedule = observation.fatal.is_some();
+            }
+            (None, None) => (),
+            _ => return Err("missing or undeclared schedule observations".into()),
         }
-        if wave.dispatch_spread_us != last_dispatch - first
-            || wave.elapsed_us != last - first
-            || throughput(&wave.attempts, wave.elapsed_us)
+        let (elapsed_us, dispatch_spread_us) = crate::schedule::bounds(
+            wave.attempts.iter(),
+            wave.schedule.as_ref().map(|s| s.settled_offset_us),
+        )?;
+        if wave.dispatch_spread_us != dispatch_spread_us
+            || wave.elapsed_us != elapsed_us
+            || crate::schedule::throughput(&wave.attempts, wave.elapsed_us, wave.schedule.as_ref())
                 != (
                     wave.eligible,
                     wave.completion_tokens,
@@ -512,23 +557,52 @@ pub(crate) fn load_verified(root: &Path) -> Result<Loaded, LoadError> {
         {
             return Err("wave metric derivation mismatch".into());
         }
+        if plan.version == 5 && !wave.eligible {
+            fatal_schedule = true;
+        }
         waves.push(Some(wave));
         states.push("published");
+    }
+    let failure_path = root.join("acquisition-failure.json");
+    if exists(&failure_path)? {
+        if plan.version != 5 {
+            return Err("undeclared acquisition failure".into());
+        }
+        let bytes = read(&failure_path, FILE_CAP)?;
+        let failure: crate::acquisition::AdmissionFailure = decode(&bytes)?;
+        let spec = plan
+            .waves
+            .get(failure.wave.index as usize)
+            .ok_or("unknown failed admission")?;
+        if failure.version != 1
+            || failure.wave != *spec
+            || waves.get(spec.index as usize).is_none_or(Option::is_some)
+            || sequence.request(&body_context, spec, 0).err().as_deref()
+                != Some(failure.detail.as_str())
+        {
+            return Err("acquisition admission failure does not replay".into());
+        }
+        fingerprint.update(digest(&bytes).as_bytes());
+        lineage.update(digest(&bytes).as_bytes());
     }
     let history = crate::lifecycle::history(root, &plan, &plan_hash, &states, &waves)?;
     fingerprint.update(history.evidence_sha256.as_bytes());
     lineage.update(history.lineage_sha256.as_bytes());
+    let resources = crate::serving_resources::replay(root, &plan, &plan_hash, &waves)?;
+    for resource in &resources {
+        if let Some(hash) = &resource.sha256 {
+            fingerprint.update(hash.as_bytes());
+            lineage.update(hash.as_bytes());
+        }
+    }
     Ok(Loaded {
-        metrics: plan.metrics.as_ref().map(|config| crate::metrics::Summary {
-            config: config.clone(),
-            budget: metrics_budget,
-            waves: metrics_waves,
-        }),
+        metrics: crate::metrics::summarize(plan.metrics.as_ref(), metrics_budget, metrics_waves),
         plan,
         waves,
         states,
         history,
         policy,
+        resources,
         plan_sha256: plan_hash,
         evidence_sha256: hex(&fingerprint.finalize()),
         lineage_sha256: hex(&lineage.finalize()),
@@ -565,6 +639,10 @@ pub struct CellSummary {
     pub lane_prefill_tokens_per_second: Vec<Vec<Option<f64>>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sequence_check: Option<crate::sequence::Check>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub performance_measured: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sequence_checks: Option<Vec<Option<crate::sequence::Check>>>,
 }
 fn median(mut values: Vec<f64>) -> Option<f64> {
     if values.is_empty() {
@@ -592,11 +670,19 @@ pub fn summarize(run: &Loaded) -> Vec<CellSummary> {
         .zip(&run.waves)
         .filter(|(spec, _)| spec.phase == Phase::Warmup)
         .all(|(_, wave)| wave.as_ref().is_some_and(|w| w.eligible));
+    let acquisitions_complete = run.plan.workload.acquisition.as_ref().is_none_or(|p| {
+        !p.conversation()
+            || [Phase::Warmup, Phase::Measured].into_iter().all(|phase| {
+                crate::acquisition::whole_samples(&run.plan, &run.waves, phase).is_ok()
+            })
+    });
     run.plan
         .workload
         .cells
         .iter()
         .map(|cell| {
+            let planned_trials = run.plan.workload.acquisition.as_ref().map_or(cell.trials, |p| p.counts(cell).0);
+            let performance_measured = run.plan.workload.acquisition.as_ref().map(|p| p.measured(&cell.case));
             let pairs: Vec<_> = run
                 .plan
                 .waves
@@ -605,6 +691,8 @@ pub fn summarize(run: &Loaded) -> Vec<CellSummary> {
                 .filter(|(spec, _)| spec.phase == Phase::Measured && spec.cell == cell.id)
                 .collect();
             let mut issues = Vec::new();
+            if !acquisitions_complete { issues.push("required_acquisition_incomplete_or_ineligible".into()); }
+            if performance_measured == Some(false) { issues.push("required_control_excluded_from_performance".into()); }
             if run.history.count > 1 {
                 issues.push("continued_execution_sessions: client pool reset and cache/warmup continuity unverified; no uninterrupted timing comparison".into());
             }
@@ -672,8 +760,9 @@ pub fn summarize(run: &Loaded) -> Vec<CellSummary> {
                     None => vec![None; spec.concurrency as usize],
                 })
                 .collect();
-            let complete = warmups_complete && eligible == cell.trials as usize
-                && run.history.count <= 1 && !run.history.open;
+            let complete = warmups_complete && eligible == planned_trials as usize
+                && run.history.count <= 1 && !run.history.open
+                && acquisitions_complete && performance_measured != Some(false);
             let (latency_values, rate_values, decode_values, prefill_values) = if complete {
                 (
                     latencies.iter().flatten().map(|n| *n as f64).collect::<Vec<_>>(),
@@ -690,9 +779,11 @@ pub fn summarize(run: &Loaded) -> Vec<CellSummary> {
                 Vec::new()
             };
             CellSummary {
-                sequence_check: pairs.first().and_then(|(_, wave)| wave.as_ref()).and_then(|wave| wave.attempts.first()).and_then(|a| a.sequence.clone()),
+                sequence_check: (run.plan.workload.version != 6).then(|| pairs.first().and_then(|(_, wave)| wave.as_ref()).and_then(|wave| wave.attempts.first()).and_then(|a| a.sequence.clone())).flatten(),
+                performance_measured,
+                sequence_checks: (run.plan.workload.version == 6 && crate::acquisition::conversation(&run.plan.workload)).then(|| pairs.iter().map(|(_, w)| w.as_ref().and_then(|w| w.attempts.first()).and_then(|a| a.sequence.clone())).collect()),
                 cell: cell.id.clone(),
-                planned_trials: cell.trials,
+                planned_trials,
                 observed_trials: observed,
                 eligible_trials: eligible,
                 wave_latency_us_range: range(&latency_values),
@@ -798,6 +889,10 @@ pub struct Comparison {
     pub candidate_metrics: Option<crate::metrics::Summary>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reference_metrics: Option<crate::metrics::Summary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schedule: Option<crate::schedule::Comparison>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub acquisition: Option<crate::acquisition::Comparison>,
 }
 fn change(a: Option<f64>, b: Option<f64>) -> Option<f64> {
     a.zip(b)
@@ -923,6 +1018,27 @@ pub fn compare(a: &Path, b: &Path, reference: Option<&Path>) -> Result<Compariso
             ));
         }
     }
+    let schedule = (left.plan.workload.version == 4).then(|| crate::schedule::Comparison {
+        scope: "named-lane descriptive schedule observations; complete-schedule throughput is not a mixed-load or fairness verdict; actual overlap and matched solo evidence are required for such claims",
+        complete_eligible: crate::schedule::complete_eligible(&left)
+            && crate::schedule::complete_eligible(&right)
+            && reference.as_ref().is_none_or(crate::schedule::complete_eligible),
+        baseline: crate::schedule::summarize(&left),
+        candidate: crate::schedule::summarize(&right),
+        reference: reference.as_ref().map(crate::schedule::summarize),
+    });
+    let acquisition = match (
+        crate::acquisition::report(&left),
+        crate::acquisition::report(&right),
+    ) {
+        (Some(baseline), Some(candidate)) => Some(crate::acquisition::Comparison {
+            baseline,
+            candidate,
+            reference: reference.as_ref().and_then(crate::acquisition::report),
+        }),
+        (None, None) => None,
+        _ => return Err("incompatible acquisition reports".into()),
+    };
     let baseline = summarize(&left);
     let candidate = summarize(&right);
     let reference_identity = reference
@@ -1157,7 +1273,13 @@ pub fn compare(a: &Path, b: &Path, reference: Option<&Path>) -> Result<Compariso
             .collect()
     });
     Ok(Comparison {
-        version: 3,
+        version: if acquisition.is_some() {
+            5
+        } else if schedule.is_some() {
+            4
+        } else {
+            3
+        },
         claim: "descriptive-deployment-comparison-not-causal-or-steady-state-capacity",
         baseline_model: left.plan.model,
         candidate_model: right.plan.model,
@@ -1174,5 +1296,7 @@ pub fn compare(a: &Path, b: &Path, reference: Option<&Path>) -> Result<Compariso
         reference,
         drift,
         changes,
+        schedule,
+        acquisition,
     })
 }

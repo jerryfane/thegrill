@@ -4,6 +4,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+#[path = "metrics_v2.rs"]
+pub mod v2;
+
 const NAMES: [&str; 4] = [
     "vllm:spec_decode_num_draft_tokens_total",
     "vllm:spec_decode_num_accepted_tokens_total",
@@ -107,6 +110,9 @@ pub struct Budget {
     pub charged_us: u64,
     pub duration_us: u64,
     pub raw_bytes: usize,
+    /// Explicit version-2 acquisition consumption; absent on version 1.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub v2: Option<v2::Consumption>,
 }
 impl Budget {
     fn exhausted(&self, config: &Config) -> bool {
@@ -169,6 +175,102 @@ impl Budget {
             .duration_us
             .checked_add(publication_us)
             .ok_or("metrics duration overflow")?;
+        Ok(())
+    }
+    fn exhausted_v2(&self, config: &v2::Config) -> bool {
+        let consumed = self.v2.unwrap_or_default();
+        self.requests >= config.max_requests
+            || self.charged_us >= config.run_budget_us
+            || config.retained_raw_bytes.saturating_sub(self.raw_bytes) < config.body_bytes
+            || consumed.series >= config.max_series
+            || consumed.overhead_us >= config.max_overhead_us
+    }
+    fn finish_v2(&mut self, config: &v2::Config, snapshot: &mut v2::Snapshot) -> Result<()> {
+        let overhead = self
+            .v2
+            .unwrap_or_default()
+            .overhead_us
+            .checked_add(snapshot.overhead_us)
+            .ok_or("metrics overhead budget overflow")?;
+        if snapshot.status == v2::Status::Complete && overhead > config.max_overhead_us {
+            // Read/parse/publication cannot be preempted at an exact CPU-time
+            // boundary. Retain the actual overrun, but not favorable telemetry.
+            snapshot.status = v2::Status::OverheadLimit;
+            snapshot.error = Some("whole-run telemetry overhead budget exceeded".into());
+            snapshot.series = 0;
+        }
+        self.retain_v2(config, snapshot)
+    }
+
+    fn retain_v2(&mut self, config: &v2::Config, snapshot: &v2::Snapshot) -> Result<()> {
+        let skipped = snapshot.status == v2::Status::SkippedBudget;
+        let overhead_exceeded = self
+            .v2
+            .unwrap_or_default()
+            .overhead_us
+            .checked_add(snapshot.overhead_us)
+            .ok_or("metrics overhead budget overflow")?
+            > config.max_overhead_us;
+        if skipped != self.exhausted_v2(config)
+            || snapshot.charged_us != snapshot.duration_us
+            || snapshot.allowance_us
+                != if skipped {
+                    0
+                } else {
+                    config
+                        .deadline_us
+                        .min(config.run_budget_us.saturating_sub(self.charged_us))
+                }
+            || snapshot.overhead_us != snapshot.duration_us.saturating_sub(snapshot.scrape_us)
+            || (snapshot.status == v2::Status::Deadline
+                && snapshot.scrape_us < snapshot.allowance_us)
+            || snapshot.scrape_us > snapshot.duration_us
+            || snapshot
+                .http_status
+                .is_some_and(|status| !(100..=999).contains(&status))
+            || (!skipped && (snapshot.duration_us == 0 || snapshot.scrape_us == 0))
+            || (snapshot.raw_bytes > 0 && snapshot.http_status.is_none())
+            || (snapshot.status == v2::Status::Unsupported && snapshot.http_status != Some(200))
+            || snapshot.raw_bytes > config.body_bytes
+            || snapshot.series > config.series
+            || (snapshot.status != v2::Status::Complete && snapshot.series != 0)
+            || (skipped
+                && (snapshot.duration_us != 0
+                    || snapshot.scrape_us != 0
+                    || snapshot.overhead_us != 0
+                    || snapshot.raw_bytes != 0
+                    || snapshot.http_status.is_some()))
+            || snapshot.error.as_ref().is_some_and(|text| text.len() > 256)
+            || (snapshot.status == v2::Status::Complete) != snapshot.error.is_none()
+            || (snapshot.status == v2::Status::Complete && overhead_exceeded)
+            || (snapshot.status == v2::Status::OverheadLimit
+                && (!overhead_exceeded || snapshot.http_status != Some(200)))
+        {
+            return Err("invalid metrics snapshot budget or status".into());
+        }
+        self.requests += usize::from(!skipped);
+        self.charged_us = self
+            .charged_us
+            .checked_add(snapshot.charged_us)
+            .ok_or("metrics budget overflow")?;
+        self.duration_us = self
+            .duration_us
+            .checked_add(snapshot.duration_us)
+            .ok_or("metrics duration overflow")?;
+        self.raw_bytes += snapshot.raw_bytes;
+        let consumed = self.v2.get_or_insert_with(v2::Consumption::default);
+        consumed.snapshots += 1;
+        consumed.series = consumed
+            .series
+            .checked_add(snapshot.series)
+            .ok_or("metrics series budget overflow")?;
+        consumed.overhead_us = consumed
+            .overhead_us
+            .checked_add(snapshot.overhead_us)
+            .ok_or("metrics overhead budget overflow")?;
+        if self.requests > config.max_requests || consumed.series > config.max_series {
+            return Err("metrics request or series budget exceeded".into());
+        }
         Ok(())
     }
 }
@@ -302,20 +404,24 @@ fn identifier(text: &str, metric: bool) -> bool {
         .is_some_and(|b| b.is_ascii_alphabetic() || b == b'_' || (metric && b == b':'))
         && bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_' || (metric && b == b':'))
 }
-fn labels<'a>(mut text: &'a str, config: &Config) -> Result<(BTreeMap<String, String>, &'a str)> {
+fn labels(
+    mut text: &str,
+    max_labels: usize,
+    max_bytes: usize,
+) -> Result<(BTreeMap<String, String>, &str)> {
     let original = text.len();
     let mut labels = BTreeMap::new();
     loop {
         text = text.trim_start_matches([' ', '\t']);
         if let Some(rest) = text.strip_prefix('}') {
-            if original - rest.len() + 1 > config.label_bytes_per_series {
+            if original - rest.len() + 1 > max_bytes {
                 return Err("metrics label bytes exceed bound".into());
             }
             return Ok((labels, rest));
         }
         let (name, rest) = text.split_once('=').ok_or("invalid metrics label")?;
         let name = name.trim_end_matches([' ', '\t']);
-        if !identifier(name, false) || labels.len() >= config.labels_per_series {
+        if !identifier(name, false) || labels.len() >= max_labels {
             return Err("invalid or excessive metrics labels".into());
         }
         text = rest
@@ -337,7 +443,7 @@ fn labels<'a>(mut text: &'a str, config: &Config) -> Result<(BTreeMap<String, St
                 c if c.is_control() => return Err("invalid metrics label control".into()),
                 c => value.push(c),
             }
-            if value.len() > config.label_bytes_per_series {
+            if value.len() > max_bytes {
                 return Err("metrics label bytes exceed bound".into());
             }
         };
@@ -376,7 +482,11 @@ pub fn parse(raw: &[u8], config: &Config) -> Result<Vec<Series>> {
             return Err("metrics selected series exceed bound".into());
         }
         let (labels, value) = if let Some(rest) = line[end..].strip_prefix('{') {
-            labels(rest, config)?
+            labels(
+                rest,
+                config.labels_per_series,
+                config.label_bytes_per_series,
+            )?
         } else {
             (BTreeMap::new(), &line[end..])
         };
@@ -416,7 +526,7 @@ pub fn parse(raw: &[u8], config: &Config) -> Result<Vec<Series>> {
     Ok(series)
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub struct CounterDelta {
     #[serde(flatten)]
     pub identity: Identity,
@@ -425,7 +535,7 @@ pub struct CounterDelta {
     pub delta: Option<f64>,
     pub status: &'static str,
 }
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub struct Acceptance {
     pub labels: BTreeMap<String, String>,
     pub draft_delta: Option<f64>,
@@ -433,7 +543,7 @@ pub struct Acceptance {
     pub ratio: Option<f64>,
     pub status: &'static str,
 }
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub struct WaveSummary {
     pub receipt: Receipt,
     pub overhead_us: u64,
@@ -442,11 +552,237 @@ pub struct WaveSummary {
     pub counters: Vec<CounterDelta>,
     pub acceptance: Vec<Acceptance>,
 }
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub struct Summary {
-    pub config: Config,
+    pub config: Protocol,
     pub budget: Budget,
-    pub waves: Vec<WaveSummary>,
+    pub waves: Vec<WaveReport>,
+    /// Acquisition-wide version-2 continuity and accounting; absent on
+    /// version 1, which has no acquisition-wide continuity contract.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub acquisition: Option<v2::Acquisition>,
+}
+
+/// Explicit metrics protocol selection. Version 1 is the frozen legacy
+/// companion; version 2 is the accounting protocol. Both serialize to their
+/// own schema, so legacy plans and receipts keep their exact shape.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum Protocol {
+    V1(Box<Config>),
+    V2(Box<v2::Config>),
+}
+impl Protocol {
+    pub fn new(
+        endpoint: String,
+        waves: usize,
+        version: u32,
+        auth_env: Option<String>,
+        isolation: Option<String>,
+        model_auth_env: Option<&str>,
+    ) -> Result<Self> {
+        match version {
+            1 if auth_env.is_some() => {
+                Err("metrics diagnostics version 1 does not accept a metrics credential".into())
+            }
+            1 if isolation.is_some() => {
+                Err("metrics isolation requires the explicit version-2 protocol".into())
+            }
+            1 => Ok(Self::V1(Box::new(Config::new(endpoint, waves)))),
+            2 => {
+                if let (Some(name), Some(model)) = (auth_env.as_deref(), model_auth_env)
+                    && name == model
+                {
+                    return Err(
+                        "metrics diagnostics must not reuse the model credential variable".into(),
+                    );
+                }
+                if auth_env.is_some() {
+                    // Fail before dispatch; only the name is retained, never the value.
+                    crate::wire::credential(auth_env.as_deref())?;
+                }
+                let mut config = v2::Config::new(endpoint, waves, auth_env);
+                if let Some(isolation) = isolation {
+                    config.isolation = isolation;
+                }
+                Ok(Self::V2(Box::new(config)))
+            }
+            _ => Err("unsupported metrics protocol version".into()),
+        }
+    }
+    pub fn endpoint(&self) -> &str {
+        match self {
+            Self::V1(config) => &config.endpoint,
+            Self::V2(config) => &config.endpoint,
+        }
+    }
+    /// Metrics-only credential variable *name*: never a value, and never the
+    /// model credential variable.
+    pub fn auth_env(&self) -> Option<&str> {
+        match self {
+            Self::V1(_) => None,
+            Self::V2(config) => config.auth_env.as_deref(),
+        }
+    }
+    pub fn validate(
+        &self,
+        waves: usize,
+        local_http: bool,
+        model_auth_env: Option<&str>,
+    ) -> Result<()> {
+        match self {
+            Self::V1(config) => config.validate(waves, local_http),
+            Self::V2(config) => config.validate(waves, local_http, model_auth_env),
+        }
+    }
+}
+
+/// One bounded scrape. The variant must agree with the declared protocol.
+#[derive(Debug)]
+pub enum Scrape {
+    V1(Snapshot),
+    V2(v2::Snapshot),
+}
+impl Scrape {
+    pub fn duration_us(&self) -> u64 {
+        match self {
+            Self::V1(snapshot) => snapshot.duration_us,
+            Self::V2(snapshot) => snapshot.duration_us,
+        }
+    }
+}
+
+/// Per-wave metrics view; the variant determines the retained schema.
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+pub enum WaveReport {
+    V1(WaveSummary),
+    V2(v2::WaveSummary),
+}
+impl WaveReport {
+    pub fn measured_duration_us(&self) -> u64 {
+        match self {
+            Self::V1(summary) => summary.receipt.measured_duration_us,
+            Self::V2(summary) => summary.receipt.measured_duration_us,
+        }
+    }
+}
+
+/// Per-scrape context. Version 1 ignores every field, so legacy behaviour is
+/// unchanged: no metrics credential is ever sent and no offset is retained.
+pub struct CaptureCtx<'a> {
+    /// Local monotonic origin shared by this wave's scrape and measured offsets.
+    pub origin: Instant,
+    /// Metrics-only authorization value; resolved from the declared metrics
+    /// variable name, never from the model credential.
+    pub auth: Option<&'a reqwest::header::HeaderValue>,
+    /// Acquisition cancellation latch, observed between bounded body chunks.
+    pub cancelled: Option<&'a std::sync::atomic::AtomicBool>,
+}
+
+pub struct Measured {
+    /// Measured-lane origin relative to the same local monotonic origin.
+    pub origin_offset_us: u64,
+    /// Wall provenance only; never used for offsets.
+    pub origin_unix_ms: u64,
+    pub duration_us: u64,
+}
+
+pub fn offset_us(origin: Instant, at: Instant) -> Result<u64> {
+    let elapsed = at
+        .checked_duration_since(origin)
+        .ok_or("metrics monotonic offset is out of order")?;
+    Ok(elapsed.as_micros().min(u128::from(u64::MAX)) as u64)
+}
+
+pub async fn capture(
+    client: &reqwest::Client,
+    protocol: &Protocol,
+    budget: &mut Budget,
+    dir: &Path,
+    side: &str,
+    ctx: &CaptureCtx<'_>,
+) -> Result<Scrape> {
+    match protocol {
+        Protocol::V1(config) => Ok(Scrape::V1(scrape(client, config, budget, dir, side).await?)),
+        Protocol::V2(config) => Ok(Scrape::V2(
+            v2::scrape(client, config, budget, dir, side, ctx).await?,
+        )),
+    }
+}
+
+pub fn publish_wave(
+    dir: &Path,
+    protocol: &Protocol,
+    plan_hash: &str,
+    wave: u32,
+    before: Scrape,
+    after: Scrape,
+    measured: Measured,
+) -> Result<Reference> {
+    match (protocol, before, after) {
+        (Protocol::V1(_), Scrape::V1(before), Scrape::V1(after)) => publish(
+            dir,
+            &Receipt {
+                version: 1,
+                plan_sha256: plan_hash.into(),
+                wave,
+                before,
+                after,
+                measured_origin_unix_ms: measured.origin_unix_ms,
+                measured_duration_us: measured.duration_us,
+            },
+        ),
+        (Protocol::V2(_), Scrape::V2(before), Scrape::V2(after)) => v2::publish(
+            dir,
+            &v2::Receipt {
+                version: 2,
+                plan_sha256: plan_hash.into(),
+                wave,
+                before,
+                after,
+                measured_origin_offset_us: measured.origin_offset_us,
+                measured_origin_unix_ms: measured.origin_unix_ms,
+                measured_duration_us: measured.duration_us,
+            },
+        ),
+        _ => Err("metrics protocol and snapshot versions do not match".into()),
+    }
+}
+
+pub fn load_wave(
+    dir: &Path,
+    reference: &Reference,
+    protocol: &Protocol,
+    plan_hash: &str,
+    wave: u32,
+    budget: &mut Budget,
+) -> Result<WaveReport> {
+    match protocol {
+        Protocol::V1(config) => Ok(WaveReport::V1(load(
+            dir, reference, config, plan_hash, wave, budget,
+        )?)),
+        Protocol::V2(config) => Ok(WaveReport::V2(v2::load(
+            dir, reference, config, plan_hash, wave, budget,
+        )?)),
+    }
+}
+
+/// Assemble the retained metrics summary. Version 1 produces the frozen shape
+/// with no acquisition view; version 2 adds acquisition-wide continuity and
+/// accounting.
+pub fn summarize(
+    config: Option<&Protocol>,
+    budget: Budget,
+    waves: Vec<WaveReport>,
+) -> Option<Summary> {
+    let config = config?;
+    Some(Summary {
+        acquisition: v2::acquisition(&waves),
+        config: config.clone(),
+        budget,
+        waves,
+    })
 }
 pub fn publish(dir: &Path, receipt: &Receipt) -> Result<Reference> {
     let bytes = serde_json::to_vec_pretty(receipt).map_err(|e| e.to_string())?;

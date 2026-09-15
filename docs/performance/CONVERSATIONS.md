@@ -53,9 +53,9 @@ collector. A delayed terminal is not the last answer arrival. Tool
 first-output/first-answer latency and decode-only rates remain **unavailable**:
 body or header arrival is not a generated-token observation.
 
-This is the sole supported conversation path. Its `v2` identity is retained to
-keep the selected workload bytes and pins stable; it does not imply a shipped v1
-compatibility path. The earlier all-nonstreaming prototype was development-only,
+The selected `v2` conversation path retains its exact workload bytes and pins.
+The separately versioned streamed-tool path below does not upgrade historical
+receipts. The earlier all-nonstreaming prototype was development-only,
 not a published contract or a separately supported capability. Replay of its
 private development receipts uses the preserved pre-consolidation source and
 binary, not a compatibility branch in the current collector. Text-only published
@@ -135,9 +135,91 @@ model-quality score, C1 confidence interval or production qualification follows.
 The controlled CPU fixtures exercise protocol, linkage, simulated eviction,
 recovery and failure handling—not real-model correctness or cache capacity.
 
-Issue scope remains partial for first-output latency on tool responses,
-guaranteed real-backend eviction/capacity pressure, live backend qualification,
-and causal per-step attribution of provider-wide counters or preemptions.
+The old `v2` profile still has no tool first-output observation. Guaranteed
+real-backend eviction/capacity pressure, live backend qualification and causal
+per-step attribution of provider-wide counters or preemptions remain unqualified.
 Unsupported telemetry stays unknown. Live qualification needs its own finite
 approved window. Raw requests, responses, declarations and endpoints remain
 private; publish only a reviewed sanitized summary.
+
+## Streamed fixed tools: workload 5 / conversation-v3
+
+The explicit `vllm-conversation-v3` profile uses workload version **5** and native
+plan version **4**. It streams the existing fixed `lookup_fact` step as well as
+factual responses. The old workload 2 / conversation-v2 path, selected capture
+bytes and nonstreaming tool semantics are unchanged. This is not a new
+conversation runner, repetition contract or automatic performance decision.
+
+The compact `crates/grill-perf/examples/conversation-tools-v3.json` example is
+selected explicitly through the advanced native workflow:
+
+```sh
+grill-perf run /absolute/path/to/conversation-tools-v3.json \
+  --endpoint "$ENDPOINT" --model "$MODEL" --auth-env MODEL_API_TOKEN \
+  --out "$PRIVATE/tools"
+grill-perf compare "$PRIVATE/tools" "$PRIVATE/tools" --json
+```
+
+Only run against a provider in a separately approved finite window. This example
+declares two requests, each capped at 128 output tokens, 64 KiB response and ten
+seconds, including the required follow-up. It does not require or prove a cache
+hit. No policy, resume, schedule, hidden warmup or repeated trial is admitted by
+workload 5. The existing sixteen-step, 64-message and 128 KiB accumulated
+request/history bounds remain in force.
+
+Two tool observations have deliberately different meanings:
+
+- `first_tool_delta_us`: receipt of the first accepted **nonempty name or
+  argument fragment**. An ID-only, role-only or empty fragment does not qualify.
+- `first_validated_tool_call_us`: receipt of the earliest assembled candidate
+  with the complete valid ID, fixed name and exact JSON arguments, **only if**
+  the final call and terminal state validate. A syntactically valid JSON prefix
+  followed by contradictory fragments never becomes a validated call.
+
+Both are lane-dispatch-relative client monotonic microseconds, not provider
+compute timestamps. They are absent, not zero, when unavailable. Their order is
+headers ≤ first body ≤ first tool delta ≤ validated call ≤ terminal ≤ settlement,
+where each optional observation is checked explicitly. Tool observations never
+populate the generated-text/answer fields or a fabricated text channel. A delayed
+`[DONE]` is a later terminal, not later generated tool output. A canceled or
+otherwise incomplete attempt retains any first delta but exposes no validated
+call.
+
+The streamed schema accepts one call at index zero, a whole bounded ASCII ID
+exactly once, function type exactly once, fragmented `lookup_fact` name and at
+most 4096 decoded argument bytes. The arguments must be exactly one object with
+one `key` string equal to the declared fixture key; duplicate/unknown fields and
+trailing values fail. IDs cannot duplicate an earlier call in the retained
+parent history. Unknown tools, multiple calls and answer text in the tool step
+fail; no arbitrary tool runs.
+
+Successful streamed fixed calls accept `tool_calls` or `stop`, followed by
+`[DONE]`. The pinned [vLLM named-tool implementation](https://github.com/vllm-project/vllm/blob/487ecf187/vllm/entrypoints/openai/chat_completion/serving.py)
+uses `stop` for the explicitly named function selected by this profile.
+This applies to the streamed workload-5 and workload-6 paths only; historical
+nonstreaming tool semantics remain unchanged. `length`, missing finish/terminal
+events, malformed arguments and incomplete calls still fail. Neither successful
+finish spelling bypasses tool identity, history or usage validation.
+
+The follow-up is built by the existing history machinery using the actual
+assembled ID/name/argument bytes and declared local fixture result. Formatting
+inside the encoded arguments is retained. A parent-linked factual follow-up is
+required prospectively and must itself complete its existing correctness checks
+before continuity is successful. A valid call alone is not a conversation pass.
+
+The added fixtures are synthetic protocol coverage, not real-provider
+compatibility or live qualification. Automatic tool-latency comparison gates,
+larger/repeated histories and provider qualification are separate work.
+
+For tool steps only, `Timing.tool_stream_arrivals` retains at most 4096
+`{end_offset, observed_us}` records: the exclusive retained-body offset and
+lane-dispatch-relative arrival time for each nonempty received chunk. The
+prospective per-tool wave-buffer allowance includes an additional 1 MiB for
+this bounded trace, its receipt encoding and fixed-call context. Reaching the
+chunk cap before settlement retains a `response_limit` failure, not an
+unbounded metadata stream. Offsets must strictly advance through exactly the
+retained bytes; clocks must be monotonic and inside the observed response.
+Offline replay feeds those exact byte ranges with their recorded arrival times
+to the same SSE and fixed-call validators and checks the three distinct
+boundaries. Bytes alone do not establish wall timing, and client receipts
+cannot authenticate the clock observations against a dishonest collector.

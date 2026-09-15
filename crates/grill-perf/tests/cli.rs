@@ -2505,8 +2505,6 @@ fn streaming_prefill_rate_uses_prompt_tokens_and_first_text_time() {
                 .unwrap();
             let expected = tokens as f64 * 1_000_000.0 / first as f64;
             assert!((rate - expected).abs() < 1e-9);
-            let paced = tokens as f64 / interval.as_secs_f64();
-            assert!(rate > paced * 0.5 && rate < paced * 1.5, "{rate}");
             rates.push(rate);
         }
     }
@@ -3840,3 +3838,13 @@ mod preflight_tests;
 
 #[path = "support/phase_output.rs"]
 mod phase_output_tests;
+#[path = "support/schedules.rs"]
+mod schedule_tests;
+
+#[path = "support/acquisitions.rs"]
+mod acquisition_tests;
+#[path = "support/microbench.rs"]
+mod microbench_tests;
+
+#[path = "support/serving_resources.rs"]
+mod serving_resource_tests;

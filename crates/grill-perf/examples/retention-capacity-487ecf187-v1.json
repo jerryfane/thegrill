@@ -1,0 +1,54 @@
+{
+  "version": 1,
+  "kind": "capacity-study-v1",
+  "cells": [{
+    "id": "finite-history",
+    "context_token_ceiling": 512,
+    "workload": {
+      "version": 6,
+      "name": "retention-history-v6",
+      "request": {
+        "profile": "vllm-conversation-v3",
+        "stream": true,
+        "output": {"tokens": 32, "mode": "cap"},
+        "cache": "observe"
+      },
+      "limits": {"total_ms": 5000, "idle_ms": 2000, "response_bytes": 65536, "wave_buffer_bytes": 16777216},
+      "cases": [
+        {"id": "prime", "messages": [{"role": "user", "content": "Remember sapphire."}],
+         "step": {"history": "h", "parent": null, "cache": "observe", "expect": {"kind": "json", "value": {"fact": "sapphire"}, "strict": null}}},
+        {"id": "pressure", "messages": [{"role": "user", "content": "Remember amber."}],
+         "step": {"history": "p", "parent": null, "cache": "observe", "expect": {"kind": "json", "value": {"fact": "amber"}, "strict": null}}},
+        {"id": "probe", "messages": [{"role": "user", "content": "Probe the remembered fact."}],
+         "step": {"history": "h", "parent": "prime", "cache": "observe", "expect": {"kind": "json", "value": {"fact": "sapphire"}, "strict": null}}},
+        {"id": "recover", "messages": [{"role": "user", "content": "Repeat the remembered fact."}],
+         "step": {"history": "h", "parent": "prime", "cache": "observe", "expect": {"kind": "json", "value": {"fact": "sapphire"}, "strict": null}}}
+      ],
+      "cells": [
+        {"id": "prime", "case": "prime", "concurrency": 1, "warmup_trials": 0, "trials": 1},
+        {"id": "pressure", "case": "pressure", "concurrency": 1, "warmup_trials": 0, "trials": 1},
+        {"id": "probe", "case": "probe", "concurrency": 1, "warmup_trials": 0, "trials": 1},
+        {"id": "recover", "case": "recover", "concurrency": 1, "warmup_trials": 0, "trials": 1}
+      ],
+      "acquisition": {"kind": "conversation", "repetitions": 1, "warmup_repetitions": 0,
+        "measured_steps": ["probe", "recover"], "input_bytes": 65536, "retained_history_bytes": 1048576}
+    },
+    "success": {"quality": "all_sequence_checks", "require_prompt_usage": true,
+      "resources": {"kind": "not_required_no_resource_claim"}},
+    "retention": {
+      "version": 1, "prime": "prime", "pressure": ["pressure"], "probe": "probe", "recovery": ["recover"],
+      "intended_pressure": "One declared independent root history; no assumption that this exhausts a real pool",
+      "condition": "observe_only",
+      "source": "vllm-487ecf187-block-pool-v1",
+      "producer_sha256": "f8596a9354792cda502947cd9d2c041910f9b1b0b03427cf460642763d47dc85",
+      "metrics_labels": {"model_name": "operator-selected-model", "engine": "0"},
+      "journal_bytes": 8388608, "max_events": 10000, "max_window_us": 300000000
+    }
+  }],
+  "max_requests": 10,
+  "max_output_tokens": 1024,
+  "max_wall_us": 60000000,
+  "retained_bytes": 1073741824,
+  "stop_condition": "first_unsuccessful_cell",
+  "oom_response": "stop_operator_recovery"
+}

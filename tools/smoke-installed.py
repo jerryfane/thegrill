@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import runpy
 import shutil
 import subprocess
 import tarfile
@@ -17,14 +18,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 IMAGE = "ubuntu@sha256:224a1869083a311ef3f13648a154ba79832fbef6364d31493642ca03082da254"
 TARGETS = {"x86_64-unknown-linux-gnu": "x86_64", "aarch64-unknown-linux-gnu": "aarch64"}
 TOKEN = "installed-cpu-fixture-token"
-WORKLOADS = {
-    "baseline-v1.json", "glm-decode-v1.json", "glm-prefill-v1.json",
-    "prefill-ladder-v1.json", "quick.json", "recipe-smoke.json", "recipes-v1.json",
-    "sparkdash-decode-v1.json", "sparkdash-prefill-v1.json",
-    "concurrency-v1.json", "concurrency-selection-v1.json",
-    "concurrency-enable-thinking-v1.json", "concurrency-enable-thinking-selection-v1.json",
-    "conversation-v2.json", "conversation-selection-v2.json",
-}
+# The staging allowlist is the single payload contract; loading it does not build.
+STAGED = runpy.run_path(str(Path(__file__).with_name("stage-release.py")))
+PAYLOAD = set(STAGED["PAYLOAD"]) | {"bin/grill-perf"}
+EXECUTABLES = STAGED["EXECUTABLES"]
 
 
 def require(condition, message):
@@ -47,11 +44,7 @@ def verify_checksum(archive, checksum):
 
 def unpack(archive, destination, root_name, receipt):
     expected = receipt["files_sha256"]
-    required = {"bin/grill-perf", "LICENSE", "NOTICE", "INSTALL.md", "licenses/sparkDash-LICENSE"}
-    required.update("workloads/" + name for name in WORKLOADS)
-    require(required <= set(expected), "archive receipt omits required assets/notices")
-    require(all(name in required or name.startswith("licenses/") for name in expected),
-            "unexpected payload outside the bounded archive layout")
+    require(set(expected) == PAYLOAD, "archive receipt differs from the staging payload allowlist")
     files = set()
     with tarfile.open(archive, "r:gz") as contents:
         members = contents.getmembers()
@@ -65,12 +58,17 @@ def unpack(archive, destination, root_name, receipt):
             if member.isfile():
                 relative = str(Path(*path.parts[1:]))
                 require(relative not in files and relative in expected, "duplicate/unexpected archive member")
+                require(member.mode == (0o755 if relative in EXECUTABLES else 0o644),
+                        "archive executable permissions differ from the declared payload")
                 files.add(relative)
         require(files == set(expected), "archive members differ from the receipt")
         contents.extractall(destination, filter="data")
     root = destination / root_name
     for relative, expected_hash in expected.items():
         require(digest(root / relative) == expected_hash, "installed payload digest mismatch: " + relative)
+        require((root / relative).stat().st_mode & 0o7777 ==
+                (0o755 if relative in EXECUTABLES else 0o644),
+                "installed executable permissions differ from the declared payload")
     return root
 
 

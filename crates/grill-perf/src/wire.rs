@@ -56,12 +56,13 @@ impl<'a> From<&'a Plan> for BodyContext<'a> {
 }
 
 pub fn request_body(context: &BodyContext<'_>, wave: &WaveSpec, lane: u32) -> Result<String> {
-    let r = crate::sequence::settings(context.workload, wave);
+    let r = crate::schedule::settings(context.workload, wave, lane)?;
+    let case_id = crate::schedule::case(wave, lane)?;
     let case = context
         .workload
         .cases
         .iter()
-        .find(|c| c.id == wave.case)
+        .find(|c| c.id == case_id)
         .ok_or("unknown case")?;
     let exact = r.profile == Profile::VllmFixedV1 && r.output.mode == OutputMode::Exact;
     let salt = match r.cache {
@@ -120,9 +121,14 @@ pub fn request_body(context: &BodyContext<'_>, wave: &WaveSpec, lane: u32) -> Re
         max_tokens: r.output.tokens,
         temperature: r.temperature_milli.map(|n| f64::from(n) / 1000.0),
         top_p: r.top_p_milli.map(|n| f64::from(n) / 1000.0),
-        seed: r
-            .seed
-            .map(|seed| seed + i64::from(wave.trial) * 64 + i64::from(lane)),
+        seed: r.seed.map(|seed| {
+            seed + i64::from(wave.trial) * 64
+                + if wave.lanes.is_some() {
+                    0
+                } else {
+                    i64::from(lane)
+                }
+        }),
         chat_template_kwargs: match (r.thinking, r.thinking_control) {
             (Some(thinking), None) => Some(ChatTemplateKwargs::Legacy { thinking }),
             (None, Some(ThinkingControl::VllmEnableThinkingV1 { enabled })) => {
@@ -145,7 +151,7 @@ pub fn request_body(context: &BodyContext<'_>, wave: &WaveSpec, lane: u32) -> Re
         cache_salt: salt,
     })
     .map_err(|e| e.to_string())?;
-    if body.len() > REQUEST_CAP {
+    if body.len() > crate::acquisition::input_cap(context.workload) {
         return Err("encoded request exceeds 2 MiB".into());
     }
     Ok(body)
@@ -398,6 +404,7 @@ fn present(raw: Option<&RawValue>) -> bool {
 #[derive(Default)]
 struct Semantic {
     allow_tools: bool,
+    tool: Option<crate::sequence::ToolStream>,
     id: Option<String>,
     finish: Option<String>,
     usage: Usage,
@@ -414,12 +421,17 @@ impl Semantic {
         timing: &mut Timing,
     ) -> std::result::Result<Flow, (Status, &'static str)> {
         if stream && bytes == b"[DONE]" {
-            return if self.finish.is_some() {
-                timing.terminal_us = Some(observed);
-                Ok(Flow::Stop)
-            } else {
-                Err((Status::Malformed, "DONE before finish"))
-            };
+            if self.finish.is_none() {
+                return Err((Status::Malformed, "DONE before finish"));
+            }
+            if let Some(tool) = &self.tool {
+                timing.first_validated_tool_call_us =
+                    Some(tool.validated_us().map_err(|_| {
+                        (Status::Malformed, "incomplete or invalid fixed tool call")
+                    })?);
+            }
+            timing.terminal_us = Some(observed);
+            return Ok(Flow::Stop);
         }
         if !stream && std::str::from_utf8(bytes).is_err() {
             return Err((Status::Malformed, "nonstreaming body is not UTF-8"));
@@ -469,21 +481,12 @@ impl Semantic {
         };
         if let Some(Object(delta)) = delta {
             let tools = present(delta.tool_calls);
-            if (tools && !self.allow_tools)
+            if (tools && !self.allow_tools && self.tool.is_none())
                 || present(delta.function_call)
                 || present(delta.audio)
                 || present(delta.refusal)
             {
                 return Err((Status::Unsupported, "non-text answer or refusal"));
-            }
-            if tools && self.allow_tools {
-                if stream || self.finish.is_some() {
-                    return Err((
-                        Status::Unsupported,
-                        "tool profile requires one nonstreaming message",
-                    ));
-                }
-                self.generated = true;
             }
             let content = delta.content.as_ref().is_some_and(|s| !s.is_empty());
             let reasoning = delta.reasoning.as_ref().is_some_and(|s| !s.is_empty())
@@ -492,6 +495,26 @@ impl Semantic {
                     .as_ref()
                     .is_some_and(|s| !s.is_empty());
             let generated = content || reasoning;
+            if self.tool.is_some() && generated {
+                return Err((Status::Malformed, "text in fixed tool response"));
+            }
+            if tools && let Some(tool) = self.tool.as_mut() {
+                if !stream || self.finish.is_some() {
+                    return Err((Status::Malformed, "tool fragments outside active stream"));
+                }
+                tool.delta(delta.tool_calls.expect("present tools").get(), observed)
+                    .map_err(|_| (Status::Malformed, "invalid fixed tool fragment"))?;
+                timing.first_tool_delta_us = tool.first_delta_us;
+                self.generated |= tool.first_delta_us.is_some();
+            } else if tools && self.allow_tools {
+                if stream || self.finish.is_some() {
+                    return Err((
+                        Status::Unsupported,
+                        "tool profile requires one nonstreaming message",
+                    ));
+                }
+                self.generated = true;
+            }
             if generated && self.finish.is_some() {
                 return Err((Status::Malformed, "text after finish"));
             }
@@ -523,12 +546,18 @@ impl Semantic {
         }
         if let Some(reason) = choice.finish_reason {
             if !matches!(reason.as_ref(), "stop" | "length")
-                && !(self.allow_tools && !stream && reason == "tool_calls")
+                && !((self.allow_tools && !stream || self.tool.is_some()) && reason == "tool_calls")
             {
                 return Err((Status::Unsupported, "unsupported finish reason"));
             }
             if self.finish.is_some() {
                 return Err((Status::Malformed, "duplicate finish"));
+            }
+            if let Some(tool) = &self.tool
+                && (!matches!(reason.as_ref(), "tool_calls" | "stop")
+                    || tool.validated_us().is_err())
+            {
+                return Err((Status::Malformed, "invalid fixed tool call at finish"));
             }
             self.finish = Some(reason.into_owned());
         }
@@ -682,22 +711,147 @@ pub fn verify_partial_arrivals(
     Ok(())
 }
 
+/// Replay tool semantics using retained client chunk clocks, not timestamps
+/// inferred from response bytes. State supplies the same prospective context.
+pub(crate) fn sequence_tool(
+    attempt: &Attempt,
+    body: &[u8],
+    expected: crate::sequence::ToolExpectation,
+) -> Result<Option<serde_json::Value>> {
+    attempt.timing.validate_tools(true)?;
+    let arrivals = attempt
+        .timing
+        .tool_stream_arrivals
+        .as_ref()
+        .ok_or("missing tool arrival trace")?;
+    if arrivals.len() > TOOL_ARRIVAL_CAP {
+        return Err("tool arrival trace exceeds its finite allowance".into());
+    }
+    let mut previous_offset = 0;
+    let mut previous_us = attempt.timing.headers_us.unwrap_or(0);
+    for arrival in arrivals {
+        if arrival.end_offset <= previous_offset
+            || arrival.end_offset > body.len()
+            || arrival.observed_us < previous_us
+            || arrival.observed_us > attempt.timing.settle_us
+        {
+            return Err("invalid tool chunk offset or monotonic clock".into());
+        }
+        previous_offset = arrival.end_offset;
+        previous_us = arrival.observed_us;
+    }
+    if previous_offset != body.len()
+        || arrivals.first().map(|arrival| arrival.observed_us) != attempt.timing.first_body_us
+    {
+        return Err("tool arrival trace does not cover retained response bytes".into());
+    }
+    // The existing transport receipt distinguishes unsuccessful HTTP and
+    // unsupported media from parsed responses, without inventing response facts.
+    if attempt.http_status != Some(200)
+        || (attempt.status == Status::Unsupported
+            && attempt.timing.first_tool_delta_us.is_none()
+            && attempt.finish_reason.is_none()
+            && attempt.usage == Usage::default())
+    {
+        return if attempt.status != Status::Complete
+            && attempt.timing.first_tool_delta_us.is_none()
+            && attempt.timing.first_validated_tool_call_us.is_none()
+            && attempt.timing.terminal_us.is_none()
+            && attempt.terminal_offset.is_none()
+            && attempt.finish_reason.is_none()
+            && attempt.usage == Usage::default()
+        {
+            Ok(None)
+        } else {
+            Err("unparsed tool response contains semantic observations".into())
+        };
+    }
+    let mut semantic = Semantic {
+        tool: Some(crate::sequence::ToolStream::new(expected)),
+        ..Semantic::default()
+    };
+    let mut timing = Timing::default();
+    let mut parser = Parser::new(SseLimits {
+        line_bytes: FRAME_CAP,
+        event_bytes: FRAME_CAP,
+    })
+    .map_err(|_| "invalid framing limits")?;
+    let mut offset = 0;
+    let mut terminal_offset = None;
+    let mut failed = false;
+    for (index, arrival) in arrivals.iter().enumerate() {
+        let result = parser.feed(&body[offset..arrival.end_offset], |event| {
+            semantic.event(event, true, arrival.observed_us, &mut timing)
+        });
+        match result {
+            Ok(Some(consumed)) => terminal_offset = Some(offset + consumed),
+            Ok(None) => (),
+            Err(_) => failed = true,
+        }
+        if (failed || terminal_offset.is_some()) && index + 1 != arrivals.len() {
+            return Err("tool trace continues after parser settlement".into());
+        }
+        offset = arrival.end_offset;
+    }
+    if attempt.status == Status::Complete {
+        if failed || terminal_offset.is_none() || !semantic.generated {
+            return Err("complete tool receipt lacks a valid complete stream".into());
+        }
+    } else {
+        timing.first_validated_tool_call_us = None;
+    }
+    if timing.first_tool_delta_us != attempt.timing.first_tool_delta_us
+        || timing.first_validated_tool_call_us != attempt.timing.first_validated_tool_call_us
+        || timing.terminal_us != attempt.timing.terminal_us
+        || terminal_offset != attempt.terminal_offset
+        || semantic.finish != attempt.finish_reason
+        || semantic.usage != attempt.usage
+    {
+        return Err(
+            "tool response does not reproduce its retained semantic timing boundaries".into(),
+        );
+    }
+    if attempt.status == Status::Complete {
+        semantic
+            .tool
+            .ok_or("missing fixed tool context")?
+            .message()
+            .map(Some)
+    } else {
+        Ok(None)
+    }
+}
+
 pub struct Collected {
     pub attempt: Attempt,
     pub body: Vec<u8>,
+}
+pub struct CollectContext {
+    pub lane: u32,
+    pub origin: Instant,
+    pub deadline: Option<Instant>,
+    pub cancel: watch::Receiver<bool>,
+    pub first_generated: Option<tokio::sync::mpsc::Sender<crate::schedule::FirstGenerated>>,
+    pub tool_expectation: Option<crate::sequence::ToolExpectation>,
 }
 pub async fn collect(
     client: reqwest::Client,
     request: reqwest::Request,
     limits: Limits,
     settings: RequestSettings,
-    lane: u32,
-    window: (Instant, Option<Instant>),
-    mut cancel: watch::Receiver<bool>,
+    context: CollectContext,
 ) -> Collected {
-    let (origin, deadline) = window;
+    let CollectContext {
+        lane,
+        origin,
+        deadline,
+        mut cancel,
+        first_generated,
+        tool_expectation,
+    } = context;
     let stream = settings.stream;
     let sent = Instant::now();
+    let tool_step = tool_expectation.is_some();
     let mut a = Attempt {
         lane,
         dispatched: false,
@@ -711,6 +865,7 @@ pub async fn collect(
                 .duration_since(origin)
                 .as_micros()
                 .min(u128::from(u64::MAX)) as u64,
+            tool_stream_arrivals: tool_step.then(|| Vec::with_capacity(TOOL_ARRIVAL_CAP)),
             ..Timing::default()
         },
         response_bytes: 0,
@@ -723,6 +878,7 @@ pub async fn collect(
     let mut body = Vec::new();
     let mut semantic = Semantic {
         allow_tools: settings.profile == Profile::VllmConversationV2,
+        tool: tool_expectation.map(crate::sequence::ToolStream::new),
         ..Semantic::default()
     };
     let total =
@@ -837,11 +993,37 @@ pub async fn collect(
                 let previous = body.len();
                 let retained = chunk.len().min(limits.response_bytes - previous);
                 body.extend_from_slice(&chunk[..retained]);
+                if let Some(arrivals) = &mut a.timing.tool_stream_arrivals
+                    && retained != 0
+                {
+                    arrivals.push(ToolArrival {
+                        end_offset: body.len(),
+                        observed_us: observed,
+                    });
+                }
                 let mut done = false;
                 if parse && stream {
                     let mut output_exceeded = false;
+                    let mut notification_failed = false;
                     match parser.feed(&chunk[..retained], |event| {
+                        let had_first = a.timing.first_generated_text_us.is_some();
                         let result = semantic.event(event, true, observed, &mut a.timing);
+                        if !had_first
+                            && let Some(first) = a.timing.first_generated_text_us
+                            && let Some(sender) = &first_generated
+                        {
+                            notification_failed =
+                                a.timing.dispatch_offset_us.checked_add(first).is_none_or(
+                                    |offset| {
+                                        sender
+                                            .try_send(crate::schedule::FirstGenerated {
+                                                lane,
+                                                offset_us: offset,
+                                            })
+                                            .is_err()
+                                    },
+                                );
+                        }
                         output_exceeded |= semantic
                             .usage
                             .completion_tokens
@@ -867,6 +1049,13 @@ pub async fn collect(
                             done = true;
                         }
                     }
+                    // Keep replayable semantic facts from this retained chunk.
+                    // A local channel failure must not impersonate a wire parse error.
+                    if notification_failed {
+                        a.status = Status::Unsupported;
+                        a.detail = "schedule first-generated notification failed".into();
+                        done = true;
+                    }
                     if output_exceeded {
                         a.status = Status::Unsupported;
                         a.detail = "reported output exceeds declared cap".into();
@@ -879,6 +1068,15 @@ pub async fn collect(
                     a.detail = "total deadline during completion parsing".into();
                 }
                 if done {
+                    break;
+                }
+                if a.timing
+                    .tool_stream_arrivals
+                    .as_ref()
+                    .is_some_and(|arrivals| arrivals.len() == TOOL_ARRIVAL_CAP)
+                {
+                    a.status = Status::ResponseLimit;
+                    a.detail = "tool arrival trace reached 4096 chunks".into();
                     break;
                 }
                 if retained < chunk.len() {
@@ -937,7 +1135,14 @@ pub async fn collect(
         a.status = Status::Interrupted;
         a.detail = "whole-capture deadline".into();
     }
+    if a.status != Status::Complete {
+        a.timing.first_validated_tool_call_us = None;
+    }
     a.response_bytes = body.len();
+    if !a.dispatched && first_generated.is_some() {
+        // Scheduling cancellation before the future's first poll is not dispatch.
+        a.timing = Timing::default();
+    }
     Collected { attempt: a, body }
 }
 
@@ -948,3 +1153,7 @@ mod measurement_fixtures;
 #[cfg(test)]
 #[path = "../tests/support/measurement_wire.rs"]
 mod measurement_tests;
+
+#[cfg(test)]
+#[path = "../tests/support/tool_stream_wire.rs"]
+mod tool_stream_tests;

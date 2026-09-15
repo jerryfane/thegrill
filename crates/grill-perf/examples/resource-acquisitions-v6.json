@@ -1,0 +1,79 @@
+{
+  "version": 6,
+  "name": "resource-review-v6",
+  "request": {
+    "profile": "portable-chat-v1",
+    "stream": true,
+    "output": {
+      "tokens": 32,
+      "mode": "cap"
+    },
+    "cache": "observe"
+  },
+  "limits": {
+    "total_ms": 5000,
+    "idle_ms": 2000,
+    "response_bytes": 65536,
+    "wave_buffer_bytes": 16777216
+  },
+  "cases": [
+    {
+      "id": "one",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Return the word sapphire."
+        }
+      ]
+    }
+  ],
+  "cells": [
+    {
+      "id": "c1",
+      "case": "one",
+      "concurrency": 1,
+      "warmup_trials": 1,
+      "trials": 1
+    }
+  ],
+  "acquisition": {
+    "kind": "flat",
+    "input_bytes": 65536
+  },
+  "resources": {
+    "version": 1,
+    "mode": "review_only",
+    "retained_bytes": 134217728,
+    "observer": {
+      "version": 1,
+      "sources": [
+        {
+          "id": "selected-process",
+          "target": {
+            "kind": "process",
+            "pid": 12345
+          },
+          "ownership": {
+            "kind": "process_address_space"
+          }
+        }
+      ],
+      "cadence_us": 10000,
+      "max_gap_us": 1000000,
+      "max_read_us": 100000,
+      "max_samples": 1000,
+      "deadline_us": 10000000,
+      "per_sample_bytes": 16384,
+      "raw_total_bytes": 1048576
+    },
+    "summaries": [
+      {
+        "source": "selected-process",
+        "metric": "resident_memory",
+        "statistic": "sampled_maximum",
+        "max_regression_bps": 0,
+        "max_reference_spread_bps": 0
+      }
+    ]
+  }
+}

@@ -7,6 +7,10 @@ workloads preserve the sparkDash attribution documented in
 https://github.com/plotarmordev/thegrill/blob/737440d46c2b607465f8a3ce6fdd7b0253b432d9/docs/performance/SHARED-RECIPES.md
 The glm-decode-v1.json and glm-prefill-v1.json variants retain those
 workload contents except for their declared names and thinking controls.
+The glm- and deepseek-labelled routine-decode-v3, routine-prefill-v3 and
+mixed-prefill-decode-v4 workloads also reuse those attributed prompts.
+Their selected cases, request budgets, cache controls and schedules differ;
+they are not byte-equivalent replacements for the original workloads.
 Upstream project: https://github.com/MiaAI-Lab/sparkDash
 Upstream MIT license: licenses/sparkDash-LICENSE, copied from
 https://raw.githubusercontent.com/MiaAI-Lab/sparkDash/f25b542038e76e542b3892e2209893b9eb27a0d8/LICENSE

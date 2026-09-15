@@ -36,7 +36,8 @@ for baseline, candidate and repeat. It changes neither generation requests nor
 ordinary measurement eligibility. Offline `decide` verifies the saved evidence
 and policy bindings; it never applies a new policy to unbound historical runs.
 
-The decision envelope is version 1, separate from comparison JSON version 3.
+Policy1 emits decision envelope version 1; explicit policy2 emits version 2.
+These are separate from comparison JSON version 3.
 PASS means complete observed evidence satisfies every required policy gate;
 REGRESSION means a qualified observed adverse bound exceeds the declared
 tolerance. INCONCLUSIVE preserves missing or insufficient evidence and excessive
@@ -47,6 +48,36 @@ An eligible comparison or successful process exit alone is not a decision.
 The [policy guide](README.md#captured-observed-envelope-policy) defines the closed
 schema, exact checked rational arithmetic, complete-coverage requirements,
 reference-spread gate, outcome precedence and command-specific exits.
+
+Policy2 (`observed-envelope-v2`) admits homogeneous flat workloads 1 and 3,
+and explicit named-lane gates on workload4 schedules. It adds first-generated
+text, first-answer text and client-settlement latencies, plus one fairness sample per
+repetition. All are lower-better and use lane-relative service clocks. Fairness
+requires every admitted lane complete and positive, with at least two lanes;
+missing/zero peers never disappear from its population. Per-lane observations
+do not enlarge the independent repeated-wave count. The
+[policy2 definitions and limits](README.md#policy2-first-output-and-finite-fairness-gates)
+specify exact rational units and coverage. Shared `envelope.rs` rejects zero
+denominators, reversed bounds and checked-product overflow; floating diagnostics
+do not select outcomes. Policy1 results, reason precedence and exits are
+unchanged. Schedule gates additionally require complete matched solo controls
+and actual required decode/prefill overlap; unlike-lane rates are not pooled.
+
+Policy3 (`observed-envelope-v3`) is exclusive to workload6. It adds measured
+step/tool gates, complete whole-conversation wall time and explicitly declared
+empirical p95/p99 point gates. Required controls and warmups remain qualifying
+evidence; missing acquisitions are not filtered into a favorable percentile.
+The [acquisition contract](README.md#workload6-acquisitions-and-policy3) specifies
+the independent population, clocks, finite history/input limits and minimum
+200/1,000 complete acquisitions for p95/p99.
+
+Prospective policy2/3 `required_telemetry` uses explicit metrics2 evidence.
+Selector-bearing series retain their exact source/position identity, but
+accounting consistency is checked on the corresponding engine/model identity,
+without those selectors. Contradictory accounting withholds that identity's
+required claims and does not contaminate a different engine/model. Missing or
+incomplete sources are unavailable, never zero. Counter attribution still needs
+the declared isolation contract; declaration is not authentication.
 
 ## Workload admission
 

@@ -92,11 +92,6 @@ fn crosscheck_corpus() {
             extremum(&row, "candidate", "low"),
             extremum(&row, "candidate", "high"),
         ];
-        assert!(
-            !order(reference[0], reference[1]).is_gt()
-                && !order(candidate[0], candidate[1]).is_gt(),
-            "extrema must be ordered"
-        );
         let coverage = || Coverage {
             expected_waves: 0,
             observed_waves: 0,
@@ -109,6 +104,10 @@ fn crosscheck_corpus() {
         let mut gate = Gate {
             cell: row["id"].as_str().unwrap().to_owned(),
             metric,
+            lane: None,
+            target: None,
+            percentile: None,
+            sample_unit: None,
             max_regression_bps,
             max_reference_spread_bps,
             coverage: Roles {

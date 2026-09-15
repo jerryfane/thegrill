@@ -1,12 +1,21 @@
+mod acquisition;
 mod bundle;
+mod capacity;
+mod envelope;
 mod evidence;
 mod lifecycle;
 mod metrics;
+mod microbench;
 mod model;
 mod policy;
+mod resources;
+mod retention;
 mod run;
+mod schedule;
 mod selection;
 mod sequence;
+mod serving_resources;
+mod startup;
 mod study;
 mod wire;
 
@@ -26,6 +35,21 @@ struct Cli {
 }
 #[derive(Subcommand)]
 enum Command {
+    /// Finite prospective context/load and retention studies; operator recovery only.
+    Capacity {
+        #[command(subcommand)]
+        command: capacity::Command,
+    },
+    /// Explicit bounded host resource observation and offline domain evidence.
+    Resource {
+        #[command(subcommand)]
+        command: resources::Command,
+    },
+    /// Explicit bounded startup/restart-cache evidence; operator owns all lifecycle actions.
+    Startup {
+        #[command(subcommand)]
+        command: startup::Command,
+    },
     /// Record the default or explicitly selected bounded workload with native evidence.
     Baseline(study::BaselineOptions),
     /// Compare a declared serving change using the verified baseline settings.
@@ -65,6 +89,22 @@ enum Command {
         #[command(subcommand)]
         command: BundleCommand,
     },
+    /// Capture, import, inspect and compare kernel or collective evidence.
+    Microbench {
+        #[command(subcommand)]
+        command: MicrobenchCommand,
+    },
+}
+#[derive(Subcommand)]
+enum MicrobenchCommand {
+    /// Run the in-process CPU reference, or one explicitly declared program.
+    Capture(microbench::CaptureOptions),
+    /// Validate retained artifact bytes and record them with imported provenance.
+    Import(microbench::ImportOptions),
+    /// Validate and print artifact identity, samples and retained failures.
+    Inspect(microbench::InspectOptions),
+    /// Compare compatible A/B/A2 acquisitions with exact envelope arithmetic.
+    Compare(microbench::CompareOptions),
 }
 #[derive(Subcommand)]
 enum BundleCommand {
@@ -94,6 +134,9 @@ fn print_json(value: &impl serde::Serialize) -> model::Result<()> {
 }
 fn execute(cli: Cli) -> model::Result<u8> {
     match cli.command {
+        Command::Resource { command } => resources::execute(command),
+        Command::Startup { command } => startup::execute(command),
+        Command::Capacity { command } => capacity::execute(command),
         Command::Baseline(options) => {
             let report = study::baseline(&options)?;
             show_study(&report, options.json)
@@ -147,6 +190,50 @@ fn execute(cli: Cli) -> model::Result<u8> {
         }
         Command::Resume { run, json } => show_summary(run::resume(&run, json)?, json)
             .map(|complete| if complete { 0 } else { 2 }),
+        Command::Microbench {
+            command: MicrobenchCommand::Capture(options),
+        } => {
+            let report = microbench::capture(&options)?;
+            if options.json {
+                print_json(&report)?;
+            } else {
+                print!("{}", microbench::human_capture(&report));
+            }
+            Ok(report.exit())
+        }
+        Command::Microbench {
+            command: MicrobenchCommand::Import(options),
+        } => {
+            let report = microbench::import(&options)?;
+            if options.json {
+                print_json(&report)?;
+            } else {
+                print!("{}", microbench::human_capture(&report));
+            }
+            Ok(report.exit())
+        }
+        Command::Microbench {
+            command: MicrobenchCommand::Inspect(options),
+        } => {
+            let inspection = microbench::inspect(&options)?;
+            if options.json {
+                print_json(&inspection)?;
+            } else {
+                print!("{}", microbench::human_inspection(&inspection));
+            }
+            Ok(inspection.exit())
+        }
+        Command::Microbench {
+            command: MicrobenchCommand::Compare(options),
+        } => {
+            let decision = microbench::compare(&options);
+            if options.json {
+                print_json(&decision)?;
+            } else {
+                print!("{}", microbench::human_decision(&decision));
+            }
+            Ok(decision.exit())
+        }
         Command::Decide {
             baseline,
             candidate,
@@ -185,6 +272,35 @@ fn execute(cli: Cli) -> model::Result<u8> {
                 return show_study(&report, json);
             }
             let comparison = evidence::compare(&baseline, &candidate, reference.as_deref())?;
+            if let Some(schedule) = &comparison.schedule {
+                if !json {
+                    println!(
+                        "Named-lane schedule observations; descriptive only, not a mixed-load or fairness verdict."
+                    );
+                }
+                print_json(&comparison)?;
+                return Ok(if schedule.complete_eligible { 0 } else { 2 });
+            }
+            if let Some(acquisition) = &comparison.acquisition {
+                if !json {
+                    println!(
+                        "Declared acquisition observations; descriptive only, use decide for prospective gates."
+                    );
+                }
+                print_json(&comparison)?;
+                let complete = [&acquisition.baseline, &acquisition.candidate]
+                    .into_iter()
+                    .chain(acquisition.reference.iter())
+                    .all(|report| {
+                        !report.records.is_empty()
+                            && report.records.iter().all(|r| r.complete_eligible)
+                    });
+                return Ok(if complete && acquisition.baseline.resources.is_none() {
+                    0
+                } else {
+                    2
+                });
+            }
             if json {
                 print_json(&comparison)?;
             } else {

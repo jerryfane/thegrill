@@ -1,0 +1,154 @@
+{
+  "version": 4,
+  "name": "glm-mixed-prefill-decode-v4",
+  "request": {
+    "profile": "vllm-fixed-v1",
+    "stream": true,
+    "output": {
+      "tokens": 400,
+      "mode": "cap"
+    },
+    "cache": "observe",
+    "temperature_milli": 0,
+    "top_p_milli": 1000,
+    "seed": null,
+    "thinking_control": {
+      "kind": "vllm-enable-thinking-v1",
+      "enabled": false
+    },
+    "warmup_output": {
+      "tokens": 32,
+      "mode": "cap"
+    }
+  },
+  "limits": {
+    "total_ms": 360000,
+    "idle_ms": 60000,
+    "response_bytes": 1048576,
+    "wave_buffer_bytes": 67108864
+  },
+  "cases": [
+    {
+      "id": "structured",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Count from 1 to 200. Output only the numbers, separated by spaces. No other text."
+        }
+      ]
+    },
+    {
+      "id": "prefill-4k",
+      "messages": [
+        {
+          "role": "user",
+          "content": "[prefill-bench {salt}]\nIgnore the filler below. Reply with the single word OK.\n{fill}\nReply OK."
+        }
+      ],
+      "fill": {
+        "unit": " the",
+        "repeat": 4070
+      }
+    }
+  ],
+  "cells": [],
+  "schedule": [
+    {
+      "id": "solo-decode",
+      "kind": "solo",
+      "warmup_trials": 1,
+      "trials": 3,
+      "lanes": [
+        {
+          "id": "decode",
+          "case": "structured",
+          "arrival": {
+            "kind": "fixed_offset",
+            "offset_us": 0
+          }
+        }
+      ]
+    },
+    {
+      "id": "solo-prefill",
+      "kind": "solo",
+      "warmup_trials": 1,
+      "trials": 3,
+      "lanes": [
+        {
+          "id": "prefill",
+          "case": "prefill-4k",
+          "request": {
+            "profile": "vllm-fixed-v1",
+            "stream": true,
+            "output": {
+              "tokens": 8,
+              "mode": "cap"
+            },
+            "cache": "reported-prefix-zero",
+            "temperature_milli": 0,
+            "top_p_milli": 1000,
+            "seed": null,
+            "thinking_control": {
+              "kind": "vllm-enable-thinking-v1",
+              "enabled": false
+            }
+          },
+          "arrival": {
+            "kind": "fixed_offset",
+            "offset_us": 0
+          }
+        }
+      ]
+    },
+    {
+      "id": "mixed",
+      "kind": "overlap",
+      "warmup_trials": 1,
+      "trials": 3,
+      "lanes": [
+        {
+          "id": "decode",
+          "case": "structured",
+          "arrival": {
+            "kind": "fixed_offset",
+            "offset_us": 0
+          },
+          "control": {
+            "scenario": "solo-decode",
+            "lane": "decode"
+          }
+        },
+        {
+          "id": "prefill",
+          "case": "prefill-4k",
+          "request": {
+            "profile": "vllm-fixed-v1",
+            "stream": true,
+            "output": {
+              "tokens": 8,
+              "mode": "cap"
+            },
+            "cache": "reported-prefix-zero",
+            "temperature_milli": 0,
+            "top_p_milli": 1000,
+            "seed": null,
+            "thinking_control": {
+              "kind": "vllm-enable-thinking-v1",
+              "enabled": false
+            }
+          },
+          "arrival": {
+            "kind": "after_first_generated",
+            "lane": "decode",
+            "offset_us": 0
+          },
+          "control": {
+            "scenario": "solo-prefill",
+            "lane": "prefill"
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -26,6 +26,7 @@ pub enum Profile {
     PortableChatV1,
     VllmFixedV1,
     VllmConversationV2,
+    VllmConversationV3,
 }
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
@@ -81,6 +82,39 @@ impl RequestSettings {
             Phase::Measured => &self.output,
         }
     }
+
+    pub(crate) fn validate(&self) -> Result<()> {
+        let r = self;
+        if std::iter::once(&r.output)
+            .chain(r.warmup_output.as_ref())
+            .any(|output| !(1..=32_768).contains(&output.tokens))
+            || r.temperature_milli.is_some_and(|n| n > 2000)
+            || r.top_p_milli.is_some_and(|n| n == 0 || n > 1000)
+        {
+            return Err("invalid output budget or sampling controls".into());
+        }
+        if r.thinking.is_some() && r.thinking_control.is_some() {
+            return Err(
+                "request.thinking and request.thinking_control are mutually exclusive".into(),
+            );
+        }
+        if r.profile == Profile::PortableChatV1
+            && (r.output.mode == OutputMode::Exact
+                || r.warmup_output
+                    .as_ref()
+                    .is_some_and(|output| output.mode == OutputMode::Exact)
+                || r.cache != Cache::Observe
+                || r.thinking_control.is_some()
+                || r.thinking.is_some())
+        {
+            return Err("exact output, required prefix evidence, and thinking controls need the explicit vllm-fixed-v1 request profile".into());
+        }
+        if let Some(seed) = r.seed {
+            seed.checked_add(100 * 64 + 63)
+                .ok_or("seed range overflows i64")?;
+        }
+        Ok(())
+    }
 }
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(tag = "kind", deny_unknown_fields)]
@@ -130,6 +164,24 @@ pub struct Workload {
     pub limits: Limits,
     pub cases: Vec<Case>,
     pub cells: Vec<Cell>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present"
+    )]
+    pub schedule: Option<Vec<crate::schedule::Scenario>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present"
+    )]
+    pub acquisition: Option<crate::acquisition::Protocol>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present"
+    )]
+    pub resources: Option<crate::serving_resources::Config>,
 }
 pub(crate) fn identifier(s: &str) -> bool {
     !s.is_empty()
@@ -137,22 +189,65 @@ pub(crate) fn identifier(s: &str) -> bool {
         && s.bytes()
             .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
 }
+
+pub(crate) fn present<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
+    deserializer: D,
+) -> Result<Option<T>, D::Error> {
+    T::deserialize(deserializer).map(Some)
+}
 impl Workload {
     pub fn salted(&self) -> bool {
-        self.version == 2 || self.cases.iter().any(|case| case.fill.is_some())
+        crate::acquisition::conversation(self) || self.cases.iter().any(|case| case.fill.is_some())
+    }
+    pub fn cache_namespace_required(&self) -> bool {
+        self.request.cache != Cache::Observe
+            || self.salted()
+            || self
+                .schedule
+                .iter()
+                .flatten()
+                .flat_map(|s| &s.lanes)
+                .any(|l| {
+                    l.request
+                        .as_ref()
+                        .is_some_and(|r| r.cache != Cache::Observe)
+                })
+    }
+    pub fn cache_mechanism_required(&self) -> bool {
+        self.request.profile != Profile::PortableChatV1
+            || self
+                .schedule
+                .iter()
+                .flatten()
+                .flat_map(|s| &s.lanes)
+                .any(|l| {
+                    l.request
+                        .as_ref()
+                        .is_some_and(|r| r.profile != Profile::PortableChatV1)
+                })
     }
     pub fn validate(&self) -> Result<()> {
-        if !matches!(self.version, 1..=3) || !identifier(&self.name) {
-            return Err("expected workload version 1, 2 or 3 and a short ASCII name".into());
+        if !matches!(self.version, 1..=6) || !identifier(&self.name) {
+            return Err("expected workload version 1 through 6 and a short ASCII name".into());
         }
         if self.version < 3 && self.request.warmup_output.is_some() {
             return Err("request.warmup_output requires workload version 3".into());
         }
+        if self.version == 5 && self.request.warmup_output.is_some() {
+            return Err("conversation workload 5 has no warmup output override".into());
+        }
+        if self.version != 4 && self.schedule.is_some() {
+            return Err("schedule requires workload version 4".into());
+        }
+        crate::acquisition::validate(self)?;
+        if self.version != 6 && self.resources.is_some() {
+            return Err("resources require workload6".into());
+        }
         crate::sequence::validate(self)?;
         if self.cases.is_empty()
             || self.cases.len() > 128
-            || self.cells.is_empty()
-            || self.cells.len() > 64
+            || (self.version != 4 && self.cells.is_empty())
+            || self.cells.len() > if self.version == 6 { 128 } else { 64 }
         {
             return Err("workload requires 1..128 cases and 1..64 cells".into());
         }
@@ -163,7 +258,11 @@ impl Workload {
             }
             if case.messages.is_empty()
                 || case.messages.len() > 64
-                || case.messages.iter().map(|m| m.content.len()).sum::<usize>() > 128 * 1024
+                || case.messages.iter().map(|m| m.content.len()).sum::<usize>()
+                    > self
+                        .acquisition
+                        .as_ref()
+                        .map_or(128 * 1024, crate::acquisition::Protocol::input_bytes)
             {
                 return Err(format!("case {} exceeds message bounds", case.id));
             }
@@ -201,29 +300,12 @@ impl Workload {
             }
         }
         let r = &self.request;
-        if std::iter::once(&r.output)
-            .chain(r.warmup_output.as_ref())
-            .any(|output| !(1..=32_768).contains(&output.tokens))
-            || r.temperature_milli.is_some_and(|n| n > 2000)
-            || r.top_p_milli.is_some_and(|n| n == 0 || n > 1000)
-        {
-            return Err("invalid output budget or sampling controls".into());
-        }
-        if r.thinking.is_some() && r.thinking_control.is_some() {
-            return Err(
-                "request.thinking and request.thinking_control are mutually exclusive".into(),
-            );
-        }
-        if r.profile == Profile::PortableChatV1
-            && (r.output.mode == OutputMode::Exact
-                || r.warmup_output
-                    .as_ref()
-                    .is_some_and(|output| output.mode == OutputMode::Exact)
-                || r.cache != Cache::Observe
-                || r.thinking_control.is_some()
-                || r.thinking.is_some())
-        {
-            return Err("exact output, required prefix evidence, and thinking controls need the explicit vllm-fixed-v1 request profile".into());
+        if self.version == 6 {
+            let mut controls = r.clone();
+            controls.seed = None;
+            controls.validate()?;
+        } else {
+            r.validate()?;
         }
         let l = &self.limits;
         if l.total_ms == 0 || l.total_ms > 3_600_000 {
@@ -253,6 +335,9 @@ impl Workload {
                 l.wave_buffer_bytes
             ));
         }
+        if self.version == 4 {
+            return crate::schedule::validate(self);
+        }
         let mut names = std::collections::HashSet::new();
         let mut attempts = 0u64;
         let mut waves = 0u64;
@@ -265,7 +350,7 @@ impl Workload {
             }
             if !(1..=64).contains(&cell.concurrency)
                 || cell.trials == 0
-                || cell.trials > 100
+                || cell.trials > if self.version == 6 { 1000 } else { 100 }
                 || cell.warmup_trials > 20
             {
                 return Err(format!("cell {} exceeds concurrency/trial bounds", cell.id));
@@ -282,28 +367,71 @@ impl Workload {
                 2 * l.response_bytes + 6 * FRAME_CAP + 512 * 1024
             } else {
                 6 * l.response_bytes + 512 * 1024
-            } + fill_bytes;
-            let required = per_request * cell.concurrency as usize;
+            } + fill_bytes
+                + if matches!(self.version, 5 | 6)
+                    && case.step.as_ref().is_some_and(|step| {
+                        matches!(step.expect, crate::sequence::Expected::Tool { .. })
+                    })
+                {
+                    TOOL_TRACE_ALLOWANCE
+                } else {
+                    0
+                };
+            let required = if let Some(protocol) = &self.acquisition {
+                per_request
+                    .checked_add(protocol.input_bytes())
+                    .and_then(|n| n.checked_mul(cell.concurrency as usize))
+                    .and_then(|n| n.checked_add(protocol.history_bytes()))
+                    .ok_or("acquisition buffer budget overflow")?
+            } else {
+                per_request * cell.concurrency as usize
+            };
             if required > l.wave_buffer_bytes {
                 return Err(format!(
                     "cell {} requires limits.wave_buffer_bytes >= {required}, supplied {}; concurrency={}, stream={}, response_bytes={}, fill_bytes={fill_bytes}",
                     cell.id, l.wave_buffer_bytes, cell.concurrency, r.stream, l.response_bytes
                 ));
             }
-            let n = u64::from(cell.trials) + u64::from(cell.warmup_trials);
-            waves += n;
-            attempts += n * u64::from(cell.concurrency);
+            let (trials, warmups) = self
+                .acquisition
+                .as_ref()
+                .map_or((cell.trials, cell.warmup_trials), |p| p.counts(cell));
+            if self.version == 6
+                && let Some(seed) = r.seed
+            {
+                let max_trial = trials.max(warmups).saturating_sub(1);
+                seed.checked_add(i64::from(max_trial) * 64 + i64::from(cell.concurrency - 1))
+                    .ok_or("acquisition seed range overflows i64")?;
+            }
+            let n = u64::from(trials) + u64::from(warmups);
+            waves = waves.checked_add(n).ok_or("wave budget overflow")?;
+            attempts = n
+                .checked_mul(u64::from(cell.concurrency))
+                .and_then(|n| attempts.checked_add(n))
+                .ok_or("attempt budget overflow")?;
         }
-        if attempts > MAX_ATTEMPTS || waves > 1024 {
-            return Err("workload exceeds 10,000 attempts or 1,024 waves".into());
+        if attempts > MAX_ATTEMPTS
+            || waves
+                > if self.version == 6 {
+                    crate::acquisition::WAVE_CAP as u64
+                } else {
+                    1024
+                }
+        {
+            return Err("workload exceeds attempt or versioned wave limit".into());
         }
-        if let Some(seed) = r.seed {
-            seed.checked_add(100 * 64 + 63)
-                .ok_or("seed range overflows i64")?;
+        if let Some(resources) = &self.resources {
+            resources.validate(self)?;
         }
         Ok(())
     }
     pub fn waves(&self) -> Vec<WaveSpec> {
+        if self.version == 6 {
+            return crate::acquisition::waves(self);
+        }
+        if self.version == 4 {
+            return crate::schedule::waves(self);
+        }
         let mut waves = Vec::new();
         for phase in [Phase::Warmup, Phase::Measured] {
             for cell in &self.cells {
@@ -317,9 +445,11 @@ impl Workload {
                         index: waves.len() as u32,
                         phase,
                         cell: cell.id.clone(),
-                        case: cell.case.clone(),
+                        case: Some(cell.case.clone()),
                         trial,
                         concurrency: cell.concurrency,
+                        lanes: None,
+                        acquisition: None,
                     });
                 }
             }
@@ -339,9 +469,26 @@ pub struct WaveSpec {
     pub index: u32,
     pub phase: Phase,
     pub cell: String,
-    pub case: String,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present"
+    )]
+    pub case: Option<String>,
     pub trial: u32,
     pub concurrency: u32,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present"
+    )]
+    pub lanes: Option<Vec<crate::schedule::ResolvedLane>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present"
+    )]
+    pub acquisition: Option<crate::acquisition::AcquisitionIdentity>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -397,7 +544,7 @@ pub struct Plan {
     pub cache_namespace: Option<String>,
     pub waves: Vec<WaveSpec>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub metrics: Option<crate::metrics::Config>,
+    pub metrics: Option<crate::metrics::Protocol>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub policy_sha256: Option<String>,
 }
@@ -417,6 +564,52 @@ pub enum TextChannel {
     Reasoning,
     MixedEvent,
 }
+
+pub const TOOL_ARRIVAL_CAP: usize = 4096;
+// Covers the in-memory arrivals, bounded call context and pretty JSON trace.
+pub const TOOL_TRACE_ALLOWANCE: usize = 1024 * 1024;
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ToolArrival {
+    pub end_offset: usize,
+    pub observed_us: u64,
+}
+
+fn present_option<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
+    deserializer: D,
+) -> Result<Option<T>, D::Error> {
+    T::deserialize(deserializer).map(Some)
+}
+
+fn tool_arrivals<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Vec<ToolArrival>>, D::Error> {
+    struct Visitor;
+    impl<'de> serde::de::Visitor<'de> for Visitor {
+        type Value = Vec<ToolArrival>;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("at most 4096 tool response chunk arrivals")
+        }
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(
+            self,
+            mut seq: A,
+        ) -> Result<Self::Value, A::Error> {
+            let mut values = Vec::new();
+            while let Some(value) = seq.next_element()? {
+                if values.len() == TOOL_ARRIVAL_CAP {
+                    return Err(serde::de::Error::custom(
+                        "tool arrival trace exceeds 4096 chunks",
+                    ));
+                }
+                values.push(value);
+            }
+            Ok(values)
+        }
+    }
+    deserializer.deserialize_seq(Visitor).map(Some)
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Timing {
@@ -430,10 +623,70 @@ pub struct Timing {
     pub last_generated_text_us: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub terminal_us: Option<u64>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_option"
+    )]
+    pub first_tool_delta_us: Option<u64>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_option"
+    )]
+    pub first_validated_tool_call_us: Option<u64>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "tool_arrivals"
+    )]
+    pub tool_stream_arrivals: Option<Vec<ToolArrival>>,
     pub settle_us: u64,
     pub capture_parse_us: u64,
 }
 impl Timing {
+    pub fn validate_tools(&self, tool_step: bool) -> Result<()> {
+        if !tool_step {
+            return if self.first_tool_delta_us.is_none()
+                && self.first_validated_tool_call_us.is_none()
+                && self.tool_stream_arrivals.is_none()
+            {
+                Ok(())
+            } else {
+                Err("tool observations require workload5/plan4 conversation-v3 tool step".into())
+            };
+        }
+        if self.tool_stream_arrivals.is_none()
+            || (self.first_tool_delta_us.is_some() && self.first_body_us.is_none())
+            || (self.first_validated_tool_call_us.is_some()
+                && (self.first_tool_delta_us.is_none() || self.terminal_us.is_none()))
+            || self.first_generated_text_us.is_some()
+            || self.first_answer_text_us.is_some()
+            || self.last_generated_text_us.is_some()
+            || self.first_generated_channel.is_some()
+        {
+            return Err("inconsistent fixed tool timing presence".into());
+        }
+        let mut previous = 0;
+        for value in [
+            self.headers_us,
+            self.first_body_us,
+            self.first_tool_delta_us,
+            self.first_validated_tool_call_us,
+            self.terminal_us,
+            Some(self.settle_us),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if value < previous {
+                return Err("fixed tool timing observations are out of order".into());
+            }
+            previous = value;
+        }
+        Ok(())
+    }
+
     pub fn validate(&self, stream: bool) -> Result<()> {
         if !stream
             && (self.first_generated_text_us.is_some()
@@ -541,6 +794,18 @@ pub struct Wave {
     pub eligible: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metrics: Option<crate::metrics::Reference>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present"
+    )]
+    pub schedule: Option<crate::schedule::Observation>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present"
+    )]
+    pub acquisition_clock: Option<crate::acquisition::StepClock>,
 }
 pub fn eligibility(a: &Attempt, r: &RequestSettings, phase: Phase) -> Vec<String> {
     let mut errors = Vec::new();

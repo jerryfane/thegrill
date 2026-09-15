@@ -29,18 +29,63 @@ WORKLOADS = (
     "concurrency-v1.json",
     "conversation-selection-v2.json",
     "conversation-v2.json",
+    "deepseek-mixed-prefill-decode-v4.json",
+    "deepseek-routine-decode-v3.json",
+    "deepseek-routine-prefill-v3.json",
     "glm-decode-v1.json",
+    "glm-mixed-prefill-decode-v4.json",
     "glm-prefill-v1.json",
+    "glm-routine-decode-v3.json",
+    "glm-routine-prefill-v3.json",
     "prefill-ladder-v1.json",
     "quick.json",
     "recipe-smoke.json",
     "recipes-v1.json",
     "sparkdash-decode-v1.json",
     "sparkdash-prefill-v1.json",
+    "capacity-v1.json",
+    "conversation-acquisitions-v6.json",
+    "conversation-tools-v3.json",
+    "deepseek-history-branches-v6.json",
+    "deepseek-long-context-v6.json",
+    "deepseek-p95-stress-v6.json",
+    "deepseek-tools-v6.json",
+    "flat-acquisitions-v6.json",
+    "glm-history-branches-v6.json",
+    "glm-long-context-v6.json",
+    "glm-p95-stress-v6.json",
+    "glm-tools-v6.json",
+    "microbench-cpu-sum-u64.json",
+    "microbench-exl3-e3-grouped.json",
+    "microbench-nccl-allreduce-sum.json",
+    "microbench-study-cpu.json",
+    "resource-acquisitions-v6.json",
+    "resources-nvml-v1.json",
+    "retention-capacity-v1.json",
+    "retention-capacity-487ecf187-v1.json",
 )
+PERFORMANCE_DOCS = (
+    "README.md", "INSTALL.md", "RELEASE-NOTES.md", "CONTRACT.md",
+    "SHARED-RECIPES.md", "SHARED-REPORT-TEMPLATE.md", "RECIPES.md",
+    "CONVERSATIONS.md", "PROVIDER-ACCOUNTING.md", "RESOURCES.md",
+    "CAPACITY.md", "STARTUP.md", "KERNEL-FABRIC.md", "CALIBRATION.md",
+    "calibration-policy-v1.json", "calibration-c1-v1.json",
+    "2026-09-09-recipe-smoke.md", "2026-09-09-recipe-smoke.json",
+)
+PRODUCERS = (
+    "tools/startup-runtime.py",
+    "tools/retention-journal.py",
+    "tools/microbench/exl3_e3_grouped.py",
+    "tools/microbench/nccl_allreduce_sum.py",
+)
+EXECUTABLES = {
+    "bin/grill-perf", "tools/startup-runtime.py",
+    "tools/microbench/exl3_e3_grouped.py", "tools/microbench/nccl_allreduce_sum.py",
+}
 PAYLOAD = {
     "LICENSE": "LICENSE",
     "NOTICE": "NOTICE",
+    "RELEASE-NOTES.md": "docs/performance/RELEASE-NOTES.md",
     "licenses/sparkDash-LICENSE": "licenses/sparkDash-LICENSE",
     "INSTALL.md": "docs/performance/INSTALL.md",
     "licenses/NOTICE-INPUTS.json": "licenses/NOTICE-INPUTS.json",
@@ -50,6 +95,8 @@ PAYLOAD = {
        f"licenses/rust-standard-library/licenses/{name}.txt"
        for name in ("MIT", "Apache-2.0", "Unicode-3.0", "BSD-2-Clause")},
     **{f"workloads/{name}": f"crates/grill-perf/examples/{name}" for name in WORKLOADS},
+    **{f"docs/performance/{name}": f"docs/performance/{name}" for name in PERFORMANCE_DOCS},
+    **{name: name for name in PRODUCERS},
 }
 
 
@@ -210,7 +257,7 @@ def main():
                     for name, path in sorted(files.items()):
                         info = tarfile.TarInfo(f"{stem}/{name}")
                         info.size = path.stat().st_size
-                        info.mode = 0o755 if name == "bin/grill-perf" else 0o644
+                        info.mode = 0o755 if name in EXECUTABLES else 0o644
                         info.mtime = epoch
                         with path.open("rb") as content:
                             tar.addfile(info, content)
