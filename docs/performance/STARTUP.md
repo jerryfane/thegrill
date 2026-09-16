@@ -82,12 +82,14 @@ must be source-observed; an operator attestation cannot replace them.
 ## Opt-in serving-runtime bridge
 
 `tools/startup-runtime.py` implements the closed public source variants
-`runtime_vllm_v1`, `runtime_vllm_487ecf187_v1`, and
-`runtime_vllm_487ecf187_bootstrap_v1`. It is an explicit
+`runtime_vllm_v1`, `runtime_vllm_487ecf187_v1`,
+`runtime_vllm_487ecf187_bootstrap_v1`, and
+`runtime_vllm_752a3a504_bootstrap_v1`. It is an explicit
 **operator-invoked, in-process entrypoint**, not a command that Grill launches.
 It calls the existing single-worker `api_server.run_server` with ASGI lifespan
-enabled; there is no subprocess, restart, service manager or arbitrary-module
-hook. The neutral producer above remains a separate CPU fixture.
+enabled. The bridge adds no wrapper subprocess, restart, service manager or
+arbitrary-module hook; vLLM itself may launch engine-core processes. The neutral
+producer above remains a separate CPU fixture.
 
 Supported public source is byte-pinned, not selected by model name or image tag:
 The plan selects **one whole set**; there is no per-file fallback or automatic
@@ -130,9 +132,30 @@ emit bootstrap events. Persisted evidence is never upgraded or reinterpreted.
 The new bootstrap modules' imported locations are checked against the pinned
 distribution paths before installing the bootstrap hook.
 
-The API source is shared, but the other three files must all belong to the
-selected set. A mixed old/new installation, a complete set under the other
-adapter, missing/extra source members, or any changed bytes are rejected.
+Additional bootstrap set: `adapter:"runtime_vllm_752a3a504_bootstrap_v1"`,
+event contract `vllm-752a3a504-uvicorn-0.51.0-sha256-bootstrap-v1`.
+This is a separate **closed seven-file set**, not an alias for either 487 set.
+Its public revisions are vLLM `752a3a504485790a2e8491cacbb35c137339ad34`
+and Uvicorn `e4d0b05eb8c6459b7ba27ad13a2c2f4f8d4ece50` (0.51.0).
+
+| Source | Required SHA-256 |
+|---|---|
+| [vLLM api_server.py](https://github.com/vllm-project/vllm/blob/752a3a504485790a2e8491cacbb35c137339ad34/vllm/entrypoints/openai/api_server.py) | `29f8a544a1b780c327b40fee0ab639921f69ce5bb6084ef22132ae6777ab995d` |
+| [vLLM launcher.py](https://github.com/vllm-project/vllm/blob/752a3a504485790a2e8491cacbb35c137339ad34/vllm/entrypoints/launcher.py) | `f2340520aa886ff8d2e4b53d6cd06614deaeb0afb91e0b258e3eb0fa0cb0a1a7` |
+| [vLLM async_llm.py](https://github.com/vllm-project/vllm/blob/752a3a504485790a2e8491cacbb35c137339ad34/vllm/v1/engine/async_llm.py) | `69ea05aea497134204f1c6fd5f53994f4f7bbc35d24f90a768553dd8d6ba0b1a` |
+| [vLLM core_client.py](https://github.com/vllm-project/vllm/blob/752a3a504485790a2e8491cacbb35c137339ad34/vllm/v1/engine/core_client.py) | `2d83952580e23abca33c3bb5f93edc349ea0e10da358bcb41b385f8d066e2a0b` |
+| [vLLM core.py](https://github.com/vllm-project/vllm/blob/752a3a504485790a2e8491cacbb35c137339ad34/vllm/v1/engine/core.py) | `27b23827a86fd488f1f7cc9a2722fe76d284087ca7cfefef5a30c5e74f21bc71` |
+| [vLLM utils.py](https://github.com/vllm-project/vllm/blob/752a3a504485790a2e8491cacbb35c137339ad34/vllm/v1/engine/utils.py) | `bc3fbc0fa6d8feb776b43ef008919ae4f28d732ce69bcd3b93649cd38795fc26` |
+| [Uvicorn server.py](https://github.com/encode/uvicorn/blob/e4d0b05eb8c6459b7ba27ad13a2c2f4f8d4ece50/uvicorn/server.py) | `6a8fe07e699543f225cbc7d0c0027ffd26fec95797d5c6a10446d38c7929ed57` |
+
+This runtime contract does **not** enable the v1 `--kv-events` option, which
+remains restricted to the separately supported 487 contracts. The explicit
+`--kv-v2-events` option below selects a different registered-state/L1 protocol;
+runtime source compatibility alone does not establish cache transfer support.
+
+The original and 487 API sources are shared; the 752 API source differs. Every
+file must belong to the selected set. A mixed installation, a complete set under
+the other adapter, missing/extra source members, or changed bytes are rejected.
 Rechecking uses the same prospective selection; it never switches contracts.
 The ordinary CPU ASGI fixture has separate `runtime_asgi_fixture_v1` and
 `runtime_asgi_fixture_bootstrap_v1` contracts; neither can select a public runtime
@@ -147,7 +170,7 @@ that every dependency is unmodified. Different upstream/recipe-patched bytes
 are unsupported; do not replace a pin with the local hash to make it pass.
 Review a source-contract revision instead. No deployment-local source is copied.
 
-The additional set was reviewed at its concrete hook boundaries:
+The 487 set was reviewed at its concrete hook boundaries:
 
 - `launcher.serve_http` creates `NoSignalServer`, a subclass that overrides
   only `capture_signals`; it inherits the hooked `uvicorn.Server.startup`.
@@ -165,6 +188,28 @@ The additional set was reviewed at its concrete hook boundaries:
   backend-worker coverage. Successful inference still requires collected wire
   evidence. Streaming input, multi-choice expansion and direct engine-core
   traffic do not acquire new qualification from this source revision.
+
+The 752 set has separately reviewed compatible boundaries, not inferred ones:
+
+- `api_server.run_server` still enters `run_server_worker` in the same frontend;
+  that constructs the async engine client before `build_and_serve` initializes
+  app state and awaits `serve_http`. ASGI lifespan is imported from
+  `serve.utils.server_utils`, rather than defined in the API module.
+- `launcher.serve_http` creates `uvicorn.Server` directly, not `NoSignalServer`.
+  The same `Server.startup` hook applies. Its existing watchdog, signal and
+  shutdown behavior is not replaced by the bridge.
+- Uvicorn 0.51.0 has `startup(self, sockets=None)`, reads the loaded ASGI app
+  through its lifespan configuration, awaits startup before creating listeners,
+  and sets `started` only after listener creation. Failed lifespan exits with
+  `SystemExit(STARTUP_FAILURE)`; it cannot emit successful listening evidence.
+- `AsyncLLM.add_request` remains an awaited coroutine with the existing request,
+  reasoning and data-parallel arguments, but no 487 `session_id` parameter.
+  The unchanged forwarding wrapper neither adds nor removes arguments. This
+  observes frontend request entry only, not downstream completion or KV copying.
+
+The imported lifespan helper and other transitive dependencies are not additional
+members of the seven-file set. These reviewed boundaries do not authenticate every
+dependency or substitute for an actual serving observation.
 
 ### Launch, readiness and inference
 
@@ -193,7 +238,7 @@ not total startup or bootstrap time relabelled as communication.
 
 ### Frontend-observed engine bootstrap
 
-Only the new 487-bootstrap contract hooks the synchronous static method
+The 487-bootstrap and 752-bootstrap contracts hook the synchronous static method
 `EngineCoreClient.make_async_mp_client`: `bootstrap_start` immediately before
 the call, `bootstrap_end` only after successful return. It forwards the original
 arguments and result without adding a worker launcher or changing engine behavior.
@@ -213,6 +258,16 @@ the older 0.27 review:
   engines are managed externally or through the Ray branch.
 - `core.py::EngineCoreProc` calls the base engine constructor (including KV
   initialization) before starting the input thread that emits ready responses.
+
+The public 752 source preserves this constructor boundary: `AsyncLLM` calls the
+same static factory; its three concrete client variants synchronously reach
+`MPClient.__init__`, whose managed-engine identity loop waits for and applies
+every ready response before returning. Managed process launch also waits for
+startup; the Ray and externally managed paths still pass through the client
+ready loop. `EngineCoreProc` initializes its base engine before starting the
+input thread that sends these responses. The factory's tracing decorator is
+retained because the bridge wraps the original callable rather than replacing
+its body. Failure still produces no successful bootstrap end.
 
 This is frontend-observed synchronous engine-client construction through
 readiness, including setup, IPC wait and constructor work. It is **not** a pure
@@ -290,9 +345,9 @@ inferred transfer. Store/reload remain callable and honestly nonqualifying for
 these missing predicates.
 
 For a separately authorized launch, prepare the normal complete startup plan and
-select one of the three public adapters above. Select
-`adapter:"runtime_vllm_487ecf187_bootstrap_v1"` and a `bootstrap` gate for the new
-frontend span. Pin `adapter_sha256` to the exact bridge file and `collector_sha256`
+select one of the four public adapters above. Select the exact 487-bootstrap or
+752-bootstrap adapter and a `bootstrap` gate for the frontend span.
+Pin `adapter_sha256` to the exact bridge file and `collector_sha256`
 to the exact binary, and prospectively set the complete runtime
 window/deadline/request allowances. Invocation is identical for every public plan;
 no extra source-version flag or package-version string can override selection.
@@ -480,6 +535,369 @@ exercised or qualified by this source delivery. Production source support for
 those unavailable facts requires separately reviewed instrumentation and an
 explicit disruptive observation window; do not translate the neutral fixture's
 result into model-KV persistence or communication speedup.
+
+## Pinned model-KV source observations
+
+`tools/kv-journal.py` and `startup verify-kv` add the separate observation identity
+`vllm-487ecf187-lmcache-3e11b8ed-kv-copy-v1`. They do **not** rewrite, upgrade or
+remove the unavailable semantics of any previous startup capture.
+
+The supported source scope is
+`lmcache-driven-full-attention-l1-engine-restart`: vLLM revision
+`487ecf187d3dfe74d2cf6119a92881dba403c219`, LMCache revision
+`3e11b8ed191631e6f098b8038235823f1a410b24`, native object-group transfers,
+complete chunks with no token skip, all selected ranks and object groups.
+Actual worker metadata must report `ParallelStrategy.mla_only = false` and
+`n_servers = 1`, with vLLM world/rank equal to the KV world/ordinal. MLA and
+multi-server rank remapping are rejected even if their operation counts fit.
+An explicit multi-producer journal union does not qualify remapped ordinal
+domains.
+The whole Python source sets and their SHA-256 values are explicit constants
+in the hook and Rust consumer. These pins identify source, not a running
+deployment or a qualified native binary.
+
+### Operator installation and observation windows
+
+Importing the hook uses only Python's standard library. Installation is a
+separate, explicitly authorized backend action, not performed by Grill:
+
+- In each cache-server process, before a transfer module or native callback
+  dispatcher exists, construct `Journal(NEW_PATH, role="cache", ...)` and invoke
+  `install_lmcache(journal)`. Keep **that same journal and cache process** alive
+  across the store and reload. Seal it only after the finite selected reload
+  window using `journal.seal(timeout=SECONDS)`, with `0 <= SECONDS <= 60`.
+- In each spawned engine-worker process, use vLLM's existing
+  `parallel_config.worker_extension_cls = "kv-journal.WorkerExtension"` path.
+  Make the selected tools directory importable in **every worker environment**,
+  and explicitly provide `THEGRILL_KV_WORKER_DIR` (an existing private directory)
+  and `THEGRILL_KV_WINDOW_US` (1,000–3,600,000,000). The extension verifies the pinned
+  `WorkerWrapperBase` source and installs before the worker initializer can
+  construct `LMCacheMPWorkerAdapter`; it does not rely on inheriting a frontend
+  monkeypatch through `fork`. Files are exclusive
+  `worker-{boot_id}-{pid}-{start_ticks}.jsonl` journals. Retain all selected ranks'
+  separate pre/post-restart files. No environment propagation or remote
+  installation is performed automatically.
+- For the pinned 487ecf187 startup runtime, supply
+  `--kv-events NEW_FRONTEND_JOURNAL --kv-producer-sha256 SHA256_OF_KV_JOURNAL`
+  before `--`. The bridge installs the actual `_add_request` observer. At its
+  existing finite admission-coverage boundary it invokes the existing engine
+  `collective_rpc("grill_kv_seal", ...)`, requires all returned worker seals to
+  complete within the remaining deadline, then seals its frontend journal.
+  Both `add_request` and the final engine-submission boundary remain observed;
+  a client/header ID or an OpenAI response ID is not assumed to be a session ID.
+
+The low-level `install_vllm_worker(journal)` API remains available to an
+operator-owned bootstrap that installs before adapter construction and seals
+before worker shutdown. The concrete extension uses that same API. Existing
+custom worker extensions or allocation paths that bypass this extension's
+`__new__` are not silently composed or assumed covered: missing installation,
+RPC failure or missing worker journals is nonqualifying.
+
+These APIs do not supply a backend entrypoint, patch a deployment or launch a
+service. Operators must establish the exact loaded source and selected transfer
+mode and place cache installation before construction. Duplicate/late
+installation is rejected; there is no post-warmup re-arm or journal rotation.
+The complete frontend journal must contain exactly one measured non-child
+admission. Additional frontend warmups or other admissions inside that window
+disqualify it; do not trim records or reinterpret them as absent. A zero-frontend-
+warmup plan does not prove internal warmup suppression or admission eligibility.
+
+Observation closure does not stop inference or cache operations. New source
+work or unbound native callbacks during the pending drain makes the journal
+fail closed while preserving the original operation/handler. Work after a
+completed observation fence is outside that finite window. Keep producers and
+their existing native dispatcher alive until all tracked callbacks drain and
+the journal seals; stopping the dispatcher first can lose terminal delivery.
+No GPU-wide synchronization is added. Shutdown, restart and native
+qualification require their own authorization.
+
+The producer directly observes the selected ObjectKeys and expected token/byte
+extents, successful nonempty native-plan calls, returned operation outcome,
+existing stream-ordered callback delivery and successful per-key finalization.
+`device_complete` is observed callback completion, not a separately sampled
+device fence: copy completion follows by the pinned same-stream host-callback
+ordering (the cache context's external stream wraps its transfer stream).
+That transitive source claim still requires native qualification. Store-side
+per-key write finalization is independently observed. Retrieve-side per-key
+read-lock-release status is outside this copy scope; an already completed H2D
+copy is not a claim that all read locks were successfully released.
+Observed callbacks use two fixed kinds in the **existing** dispatcher, carrying
+the operation ID and exact typed key list. Each still invokes the original
+backend handler once. Unobserved work keeps its original callback kind.
+Missing native delivery remains pending even if the aggregate event bus has
+contiguous sequence numbers. Empty success, tensorless cleanup, partial or
+failed copy, unsupported mode, wrong key/rank/salt/group, observation exception,
+exhaustion and incomplete drain cannot establish copy support.
+
+### Offline consumer and retained eligibility
+
+Create a prospective expectation file, pinning the exact hook source:
+
+```json
+{
+  "version": 1,
+  "source": "vllm-487ecf187-lmcache-3e11b8ed-kv-copy-v1",
+  "scope": "lmcache-driven-full-attention-l1-engine-restart",
+  "producer_sha256": "SHA256_OF_KV_JOURNAL",
+  "model": "ACTUAL_MODEL_NAME",
+  "salt": "ACTUAL_CACHE_SALT",
+  "world_size": 2,
+  "groups": 1,
+  "chunk_size": 256,
+  "start": 0,
+  "end": 256,
+  "store_request": "store",
+  "reload_request": "DECLARED_FIRST_RELOAD_REQUEST"
+}
+```
+
+The illustrative uppercase strings are operator inputs, not valid evidence.
+Worker ordinals are exactly `0..world_size`, groups exactly `0..groups`; no
+inference from which ranks happen to report is allowed. A retained ObjectKey's
+`kv_rank` is a **different**, packed topology field: the pinned converter calls
+`ComputeKVRank(world_size, worker_id, world_size, worker_id)`, encoding
+`(world_size << 24) | (worker_id << 16) | (world_size << 8) | worker_id`.
+Even the single-worker ordinal 0 has `kv_rank = 16777472`, not zero.
+This source scope supports one full-range store and one reload per rank, and
+one non-child frontend admission per selected request. Multiple/incremental
+operations, child sampling, MLA, sliding windows, skipped prefixes,
+fallback/GDS transfers, SHM/engine-driven transfer, L2/server restart, disk
+durability and crash persistence are explicitly unsupported, not silently
+counted as the broader retention goal.
+
+```text
+grill-perf startup verify-kv EXPECTATION.json \
+  --cache-events CACHE_PRODUCER_0.jsonl --cache-events CACHE_PRODUCER_1.jsonl \
+  --store-frontend STORE_FRONTEND.jsonl --reload-frontend RELOAD_FRONTEND.jsonl \
+  --store-worker STORE_WORKER_0.jsonl --store-worker STORE_WORKER_1.jsonl \
+  --reload-worker RELOAD_WORKER_0.jsonl --reload-worker RELOAD_WORKER_1.jsonl \
+  --producer-source tools/kv-journal.py --reload-capture RELOAD_DIRECTORY
+```
+
+The explicit source-file union is bounded to 64 ranks, 64 groups, 1,024 chunks,
+10,000 records per journal, 65,536 bytes per record and 16 MiB total retained
+journal input. There is no receiver, automatic discovery or network aggregation.
+Every rank's store and reload must occur in the same cache-process journal;
+duplicate cache processes, missing ranks, changed cache incarnation, or any old
+worker process reappearing in the reload cohort are nonqualifying. Old and new
+worker-process sets must be disjoint, even when ranks are permuted.
+`{boot_id,start_ticks,pid}` and the
+independent journal incarnation are retained; PID or adapter UUID alone is
+insufficient.
+
+The result separately exposes `source_copy_supported`,
+`admission_warmup_eligible`, and both historical startup inspections. Missing
+`--reload-capture` still allows source replay, but cannot qualify admission.
+An existing single-cache-PID capture cannot qualify a distributed admission
+scope. Runtime evidence still cannot establish hidden warmup suppression or
+the cache-server hash-seed contract; successful KV observations do not invent
+those facts. `PASS` requires both source support and independently eligible
+retained startup evidence. Even then it is a source observation, not a
+cryptographic attestation or live-backend qualification. Unknown is never
+converted to recomputation or a zero-work assertion.
+
+### CPU source-boundary verification
+
+`tools/kv-source-smoke.py` executes the installed hooks around unchanged pinned
+source bodies with controlled CPU buffers, allocator, IPC and native-kernel/
+completion-queue boundaries. It executes the actual ObjectKey/IPC schemas and
+key converter, actual ParallelStrategy properties, and the
+`WorkerWrapperBase.init_worker` construction plus `AsyncLLM.collective_rpc`
+sealing boundaries in spawned children. It does not import vLLM, LMCache, torch or a
+device backend. The optional `--binary` path executes the real Rust consumer
+on source-generated frontend/worker/cache journals from separate CPU processes.
+Cases cover multi-rank/multi-producer/multi-group copies, underflow, genuine
+partial copies, same-key arrivals during drain, frontend context/multiplicity,
+and malformed or cross-process journal joins. Consumer mutation cases are
+deliberately untrusted fixture evidence, not claims of native execution.
+Source files remain external:
+
+```text
+python3 -I -S tools/kv-source-smoke.py \
+  --verified-sources VERIFIED_SOURCE_DIRECTORY \
+  --additional-sources SUPPLEMENTAL_PINNED_SOURCE_DIRECTORY \
+  --binary target/debug/grill-perf --out NEW_PRIVATE_DIRECTORY
+```
+
+The supplemental directory contains the pinned
+`vllm/v1/engine/async_llm.py`, `vllm/v1/worker/worker_base.py` and
+`lmcache/v1/gpu_connector/gpu_ops.py`; their bytes are hash-checked before
+compilation. The corrected verified source set supplies the remaining files,
+including `distributed/api.py` and `multiprocess/custom_types.py`. Native
+transport/codec dependencies are controlled leaves in the standard-library
+smoke; this is not native CUDA or transport qualification. CPU success does
+not establish deployment mode, native installation, actual model KV,
+admission/warmup, first-reload performance, or the required A/B/A2 acquisitions.
+
+## Candidate registered-state/L1 source observations v3
+
+The existing `tools/kv-journal-v2.py` entrypoint and `startup verify-kv-v2`
+command now select journal/expectation/report version **3**, identity
+`vllm-752a3a504-lmcache-ddc5fa34-kv-copy-v3`, scope
+`registered-state-l1-engine-restart-v3`. Filenames and launch flags are retained;
+the source identity and wire version are not aliases for the previous protocol.
+V1 bytes and frozen examples are unchanged. V2 captures are not upgraded or
+reinterpreted: use their matching historical artifact. Candidate source identity
+is neither independent review nor native admission.
+
+Freeze a prospective expectation **before** the qualifying journals. Its required
+fields are `version: 3`, `source`, `scope`, `producer_sha256` (the exact
+`kv-journal-v2.py` bytes), `registered_state_v2`, `salt`, `store_request`,
+`reload_request`, `start` and `end`. The selected range contains 1–1024 whole
+LMCache chunks, with zero prefix skip. Source hashes for adjacent observer
+components are additionally bound to the verifier's compiled artifact.
+
+`registered_state_v2` is a closed object containing `schema:
+"thegrill.kv.registered-state.v2"`, `physical_template`, `model_flags`,
+`worker_template` and `cache_template`. Physical topology supplies
+`vllm_world_size`, `tp_size`, `pp_size`, `dp_size`, and `n_servers`; flags supply
+`mla_enabled`, `is_hybrid`, and `mla_only`. Worker identity includes exact model,
+engine type, required nullable layout hint, ordered final registered layers and
+wire engine groups. Cache identity includes those wire groups, tensor/exclusion
+inventory, server policy, chunk size, all resolved kernel shapes/dtypes/formats,
+allocation components, ordered object groups and their window policy.
+The typed records in `startup_kv_registration.rs` define the exact closed shapes.
+Only observed `shape.nb` is omitted from the prospective cache shape; block stride
+and every other layout field remain identity. Never fill any field from a model
+name, quantization label or guessed default. An initial collection run may inform
+a separately reviewed template, but cannot validate itself: freeze the template
+and collect fresh worker processes and engine instances.
+
+The closed v2 geometry projection is retained unchanged within the new source
+protocol. The required `observation_policy` in every start row binds DCP size 1,
+ordinary attention groups only, absent request-scoped configuration, the default
+CUDA event backend, and a single registration generation. Auxiliary and recurrent
+groups, partial-prefix copies, DCP sharding, non-ZMQ/engine-driven contexts,
+experimental dispatchers and lazy offload are explicitly unsupported. Their
+runtime behavior is not silently projected into attention-only geometry.
+Worker submissions and cache operations additionally carry `num_kv_readers`;
+the consumer checks it against the physical MLA/non-MLA reader projection.
+
+The event backend is checked before instrumentation, including the cached
+selection: isolated/timeline IPC and unknown backends fail closed. Only the
+source-verified default CUDA event query is used; the observer never creates an
+event, copies device data or synchronizes a stream. A successful transfer result,
+the exact source transfer generation, a unique recorded event and the existing
+callback/lifetime checks are all necessary for completion. False results, missing
+handles, reused events, worker exceptions, load errors, dropped requests,
+unhealthy drains and context invalidation cannot produce a complete fence.
+
+Cache fencing additionally requires the exact source-owned completion dispatcher
+to have stopped and drained: a still-live thread, failed periodic run, swallowed
+native drain error, unknown callback kind, or decode/handler exception invalidates
+the observation. An explicit cache seal before the owning stop cannot qualify.
+The observer reads lifecycle state only; it adds no joins or device synchronization.
+The defining periodic-thread, tracing-decorator and NVTX Python sources are pinned.
+L1 synchronization, tracing and NVTX decorator shells retain their original
+behavior and must match their source bodies and delegate closures; `__wrapped__`
+metadata alone is not accepted. Allocation readers and finalization callbacks
+must retain both their class and instance bindings throughout the observation.
+
+Run the supplemental CPU source-path regressions with
+`python3 tools/kv-observer-regression.py --source-root SELECTED_LMCACHE_ROOT`.
+It executes pinned adapter completion/submission bodies and the pinned default
+event query with inert transport/device inputs. It is not an installer test,
+native copy proof, serving qualification or admission decision; full source
+installer and consumer validation remain separate obligations.
+
+Operator-owned installation is explicit:
+
+- Keep all six adjacent v2 files together: `kv-journal-v2.py`,
+  `kv-transfer-v2.py`, `kv-lifetime-v2.py`, `kv-registration.py`,
+  `kv-registration-hooks.py`, and `kv-v2-pins.json`.
+- Configure the existing vLLM worker extension as
+  `kv-journal-v2.WorkerExtension`, with the tools directory importable in each
+  worker and explicit `THEGRILL_KV_V2_WORKER_DIR` and
+  `THEGRILL_KV_V2_WINDOW_US`. Directory creation, serving configuration and
+  process lifecycle remain operator actions.
+- For the runtime752 bootstrap only, use
+  `--kv-v2-events NEW_FRONTEND.jsonl --kv-v2-producer-sha256 SHA256`
+  before the existing `--` serving arguments. Mixing v1 and v2 options fails.
+  After the runtime admission window closes and active requests drain, the existing
+  collective RPC invokes `grill_kv_v2_seal`; all worker seals must succeed before
+  the frontend journal seals. Early runtime closure records failure instead.
+  No endpoint is added.
+- In each persistent cache process, before transfer/dispatcher construction,
+  explicitly import the module, create `Journal(path, role="cache")`, and call
+  `install_lmcache(journal)`. After both store and reload phases, the pinned
+  transfer module's existing `close()` seals with no wait after its source-owned
+  `dispatcher.stop()` returns and before cache contexts are released. A manual
+  seal before that owning stop fails closed. Successful termination, final drain,
+  callback delivery and event readiness are all required at this boundary;
+  shutdown is not an excuse to invent completion. The observer neither initiates
+  shutdown nor changes its ordering. The operator must retain the same enumerated
+  cache processes across restart; closing a cache between phases cannot qualify.
+- Every participating interpreter must actually observe `PYTHONHASHSEED=0`;
+  frontend-only environment inheritance is not evidence of worker/cache state.
+
+```text
+grill-perf startup verify-kv-v2 --expectation EXPECTATION.json \
+  --cache SLOT_0_CACHE.jsonl --cache SLOT_1_CACHE.jsonl \
+  --store-frontend STORE_FRONTEND.jsonl --reload-frontend RELOAD_FRONTEND.jsonl \
+  --old-worker OLD_RANK_0.jsonl --old-worker OLD_RANK_1.jsonl \
+  --reload-worker NEW_RANK_0.jsonl --reload-worker NEW_RANK_1.jsonl
+```
+
+`--cache` order is prospective server-slot order, exactly `0..N-1`; a consistently
+swapped observed mapping fails. Supply every physical worker in each phase,
+including MLA nonwriters; stores are required only from strategy-derived writers,
+reloads from all physical readers. Worker argument order is immaterial because
+physical rank is observed. Cache-local ranks and keys may repeat on different
+slots without merging their residency evidence.
+
+The producer captures raw CPU block IDs before source mutation, records paged
+keys/blocks/exclusions/callbacks, observes actual nonempty native or per-kernel
+execution and both fallback staging legs, and binds weak L1 allocation generations.
+The consumer checks exact window suffixes and per-kernel nonnull stored
+counterparts. Reservation failure or a missing object is never an all-null witness.
+Callback delivery, write finalization and device completion are distinct: the
+existing source event is queried nonblocking from the existing dispatcher drain
+or before the next operation, before weak objects are dereferenced. No event,
+device synchronization, polling thread, tensor retention or allocator lease is
+introduced. Free/invalidate/resize/replacement before required completion fails;
+retirement after the final required completion need not invalidate past evidence.
+Recovery/re-registration disqualifies this bounded fresh-registration scope.
+The optional native object-group callable is pinned at installation only when
+the pinned source selects that path, then checked by identity after execution
+and at sealing. A missing optional native symbol preserves the verified
+per-kernel torch fallback; a selected Python replacement is rejected at install.
+This callable-origin check is not a native-binary qualification.
+
+`observe` callbacks run synchronously under the journal condition lock and retain
+no arguments afterward. They must not block waiting for the dispatcher, MQ loop
+or any thread that may need that lock; event queries must remain nonblocking and
+lifetime locks reentrant/leaf-only. The pinned dispatcher releases its registry
+lock before calling handlers, so no reverse registry-lock/condition wait is added.
+
+Rows are capped at 65,536 bytes, journals at 10,000 rows, and all supplied evidence
+at 16 MiB. Large operation lists use fixed 64-item pages with exact offsets and
+totals. The row cap applies to every row, including registration: an oversized
+row fails the journal closed and is never truncated or emitted as valid evidence.
+Oversized expectation metadata also fails its bounded input check.
+Object records must be JSON objects, including nested layouts, topology, process
+identity, keys and elements of record arrays; positional arrays are not alternate
+record encodings. Missing/duplicate/unknown fields, wrong roles, floating-point
+integers, source mismatch, incomplete pages, unbound scheduling and incomplete
+fences fail closed.
+Scheduled-step observation is deliberately bounded to at most 64 request IDs;
+it is not an arbitrary busy-production-load recorder. More IDs fail the journal,
+and scheduling unrelated to the one prospectively selected request is
+nonqualifying even below that cap. Do not enlarge, trim or drop scheduler records
+to make a busy run qualify.
+
+The pinned source ordering is load-bearing: `group_view.py` expands IDs in wire
+group order, and `kv_layer_groups.py` checks the corresponding ordered layer
+inventory when constructing kernel groups. Its `slots_per_block == shape.bs`
+and validated chunk divisibility make the observed per-chunk block count exactly
+`chunk / tokens_per_block`. The source records an event before callback submission,
+and the existing final dispatcher drain runs before cache-context release.
+These are public-source facts, not observations of a deployed native backend.
+
+A complete v3 copy join sets `source_copy_supported`, **not** native or admission
+eligibility. Its overall outcome remains `INCONCLUSIVE` (exit 2), with
+`admission_warmup_eligible: false`: existing single-cache-PID admission evidence
+does not qualify distributed G7, and metadata/CPU fixtures do not prove real
+model contents, deployment-global absence of unlisted caches, or native execution.
 
 ## Offline decision and limitations
 

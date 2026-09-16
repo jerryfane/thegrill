@@ -275,6 +275,35 @@ impl<'de, T: Deserialize<'de>> Deserialize<'de> for Object<T> {
     }
 }
 
+pub(crate) fn object<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
+    d: D,
+) -> std::result::Result<T, D::Error> {
+    Object::<T>::deserialize(d).map(|object| object.0)
+}
+
+pub(crate) fn objects<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
+    d: D,
+) -> std::result::Result<Vec<T>, D::Error> {
+    struct Visitor<T>(std::marker::PhantomData<T>);
+    impl<'de, T: Deserialize<'de>> serde::de::Visitor<'de> for Visitor<T> {
+        type Value = Vec<T>;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("an array of JSON objects")
+        }
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(
+            self,
+            mut seq: A,
+        ) -> std::result::Result<Self::Value, A::Error> {
+            let mut values = Vec::with_capacity(seq.size_hint().unwrap_or(0));
+            while let Some(Object(value)) = seq.next_element::<Object<T>>()? {
+                values.push(value);
+            }
+            Ok(values)
+        }
+    }
+    d.deserialize_seq(Visitor(std::marker::PhantomData))
+}
+
 fn bounded_depth(bytes: &[u8]) -> bool {
     let (mut depth, mut quoted, mut escaped) = (0u32, false, false);
     for byte in bytes {

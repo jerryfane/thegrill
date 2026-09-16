@@ -11,6 +11,13 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+#[path = "startup_kv.rs"]
+mod kv;
+#[path = "startup_kv_registration.rs"]
+mod kv_registration;
+#[path = "startup_kv_v2.rs"]
+mod kv_v2;
+
 const CAP: usize = 4 * 1024 * 1024;
 const MAX_REQUESTS: usize = 16;
 const POLL_MS: u64 = 10;
@@ -38,6 +45,10 @@ pub enum Command {
     Inspect { capture: PathBuf },
     /// Compare every prospective A/B/A2 acquisition; manifest is an ordered path array.
     Compare { plan: PathBuf, manifest: PathBuf },
+    /// Join new source-copy journals without relabeling historical startup evidence.
+    VerifyKv(kv::VerifyArgs),
+    /// Verify separately versioned registered-state/L1 evidence; never native qualification.
+    VerifyKvV2(kv_v2::VerifyArgs),
 }
 #[derive(Args)]
 pub struct CaptureArgs {
@@ -74,6 +85,8 @@ pub enum Adapter {
     RuntimeVllm487V1,
     #[serde(rename = "runtime_vllm_487ecf187_bootstrap_v1")]
     RuntimeVllm487BootstrapV1,
+    #[serde(rename = "runtime_vllm_752a3a504_bootstrap_v1")]
+    RuntimeVllm752BootstrapV1,
     RuntimeAsgiFixtureV1,
     RuntimeAsgiFixtureBootstrapV1,
     UninstrumentedRecipeLogs,
@@ -85,6 +98,7 @@ impl Adapter {
             Self::RuntimeVllmV1
                 | Self::RuntimeVllm487V1
                 | Self::RuntimeVllm487BootstrapV1
+                | Self::RuntimeVllm752BootstrapV1
                 | Self::RuntimeAsgiFixtureV1
                 | Self::RuntimeAsgiFixtureBootstrapV1
         )
@@ -92,7 +106,9 @@ impl Adapter {
     fn bootstrap(self) -> bool {
         matches!(
             self,
-            Self::RuntimeVllm487BootstrapV1 | Self::RuntimeAsgiFixtureBootstrapV1
+            Self::RuntimeVllm487BootstrapV1
+                | Self::RuntimeVllm752BootstrapV1
+                | Self::RuntimeAsgiFixtureBootstrapV1
         )
     }
     fn ready_contract(self) -> &'static str {
@@ -107,6 +123,7 @@ impl Adapter {
             Self::RuntimeVllmV1 => "vllm-0.27.0-uvicorn-0.34.0-sha256-v1",
             Self::RuntimeVllm487V1 => "vllm-487ecf187-uvicorn-0.52.4-sha256-v1",
             Self::RuntimeVllm487BootstrapV1 => "vllm-487ecf187-uvicorn-0.52.4-sha256-bootstrap-v1",
+            Self::RuntimeVllm752BootstrapV1 => "vllm-752a3a504-uvicorn-0.51.0-sha256-bootstrap-v1",
             Self::RuntimeAsgiFixtureBootstrapV1 => "ordinary-asgi-fixture-bootstrap-v1",
             _ => "ordinary-asgi-fixture-v1",
         }
@@ -1457,6 +1474,7 @@ fn analyze(root: &Path, plan: &Plan, c: &Capture, raw: &[u8]) -> Result<Inspecti
                         Adapter::RuntimeVllmV1
                             | Adapter::RuntimeVllm487V1
                             | Adapter::RuntimeVllm487BootstrapV1
+                            | Adapter::RuntimeVllm752BootstrapV1
                     ) && !engine_hook)
                     || starts.len() != finishes.len()
                     || listening.is_none()
@@ -2301,6 +2319,16 @@ pub fn execute(command: Command) -> Result<u8> {
         }
         Command::Compare { plan, manifest } => {
             let report = compare(&plan, &manifest)?;
+            crate::print_json(&report)?;
+            Ok(report.outcome.exit())
+        }
+        Command::VerifyKv(args) => {
+            let report = kv::verify(&args)?;
+            crate::print_json(&report)?;
+            Ok(report.outcome.exit())
+        }
+        Command::VerifyKvV2(args) => {
+            let report = kv_v2::verify(&args)?;
             crate::print_json(&report)?;
             Ok(report.outcome.exit())
         }

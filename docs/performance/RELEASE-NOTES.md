@@ -1,5 +1,72 @@
 # Performance release notes
 
+## Unreleased candidate observation v3
+
+- Select LMCache `ddc5fa34e23fe09bb9b3a5b48f67a3e7a801e130` with the
+  existing vLLM 752 source set. The `verify-kv-v2` command and file names remain,
+  but the journal, expectation and report contract is v3; historical captures
+  are not upgraded.
+- Observe actual worker results, supported topology, exact successful store
+  finalization and source-owned cache dispatcher termination. Missing completion,
+  swallowed drain errors, dropped callbacks and shutdown timeouts fail closed.
+- Pin defining lifecycle and decorator sources; preserve verified decorator
+  behavior and reject replaced allocation readers or callback bindings.
+- This is a source-compatibility candidate, not native admission. Strict GLM
+  workload correctness and journaled TP2 store/restart/reload qualification remain
+  separate gates. Shared-tool prefix consistency does not establish either.
+
+## Unreleased runtime source compatibility
+
+- Add `runtime_vllm_752a3a504_bootstrap_v1` for the explicitly selected,
+  seven-file vLLM 752a3a504/Uvicorn 0.51.0 source set. It observes frontend
+  startup, listening, request admission and engine-client bootstrap boundaries;
+  it does not establish all-worker readiness or isolated device timings.
+- Preserve older source contracts and historical replay. The v1 KV option stays
+  restricted to its original 487 contract; the separate v2 option below does not
+  make runtime-version compatibility into persistence or native qualification.
+
+## Unreleased registered-state/L1 observation v2
+
+- Add the explicit `startup verify-kv-v2` command and runtime752
+  `--kv-v2-events` integration, preserving v1 producer/consumer bytes.
+- Require prospective typed registered layout, complete physical old/new worker
+  cohorts and a persistent cache journal for each ordered server slot. Preserve
+  MLA nonwriters and repeated cache-local ranks across different servers.
+- Join paged raw block/key/exclusion evidence, actual native or per-kernel copy
+  legs, exact write finalization, independently queried existing source events,
+  and weak L1 allocation generations. Callback delivery is not device completion.
+- Pin selected native callable identity at installation, retain fallback-only
+  support, and seal unsealed cache journals after the existing shutdown drain
+  before context release. Frontend sealing follows successful worker seals.
+- Require object-shaped records through the existing map-only wire decoder,
+  including nested records and record-array elements. Preserve the hard
+  65,536-byte row cap and declared 64-request scheduler-observation limit.
+- Reuse validated layout identity and borrow decoded metadata instead of cloning
+  it. Check store publication only when that operation's completion state changes.
+  Share source-code inspection and compilation between registration and transfer
+  hooks, keeping their distinct rollback and observation-order guarantees.
+- Keep source-copy support separate from native and distributed admission
+  eligibility. The new verifier reports `INCONCLUSIVE`, not G7 qualification.
+  No native/backend execution or published artifact is implied by this source change.
+
+## Unreleased source-copy observation
+
+- Add an opt-in, source-pinned LMCache KV journal and `startup verify-kv`.
+  Direct copy boundaries, typed operation-ID callbacks, per-key finalization,
+  actual frontend/worker request bindings and finite terminal fences replace
+  aggregate-event inference for this new observation identity only.
+- Accept an explicit bounded cache-producer file set covering every selected
+  rank/group. Each cache process must persist while the corresponding observed
+  worker process changes; an adapter UUID change alone is not a restart.
+- Keep copy support separate from independently retained admission/warmup
+  eligibility. Historical captures and unavailable results are not upgraded.
+  Full-attention native-object-group LMCache-driven L1 is the declared scope;
+  sliding-window/skip, GDS/fallback, engine-driven/SHM, L2/disk/crash durability
+  and native backend qualification remain outside this implementation.
+- Package the stdlib-importable hook beside the runtime bridge. Installation
+  remains an explicit operator action; no serving process, dependency, device
+  synchronization, receiver or lifecycle manager is installed or started.
+
 ## Version 0.2.0 — experimental claim-coverage expansion
 
 - Add explicit policy2 first-generated, first-answer and client-completion

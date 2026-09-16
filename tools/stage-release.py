@@ -75,11 +75,19 @@ PERFORMANCE_DOCS = (
 PRODUCERS = (
     "tools/startup-runtime.py",
     "tools/retention-journal.py",
+    "tools/kv-journal.py",
+    "tools/kv-journal-v2.py",
+    "tools/kv-transfer-v2.py",
+    "tools/kv-lifetime-v2.py",
+    "tools/kv-registration.py",
+    "tools/kv-registration-hooks.py",
+    "tools/kv-v2-pins.json",
     "tools/microbench/exl3_e3_grouped.py",
     "tools/microbench/nccl_allreduce_sum.py",
 )
 EXECUTABLES = {
     "bin/grill-perf", "tools/startup-runtime.py",
+    "tools/kv-journal.py",
     "tools/microbench/exl3_e3_grouped.py", "tools/microbench/nccl_allreduce_sum.py",
 }
 PAYLOAD = {
