@@ -569,6 +569,25 @@ fn shared_tool_declaration_keeps_leading_prefix_and_tool_step_hits() {
 
 #[test]
 fn shared_tool_declarations_require_uniform_history_and_bounded_versions() {
+    let assert_admitted = |source: &Path| {
+        let output = command()
+            .arg("preflight")
+            .arg(source)
+            .args([
+                "--endpoint",
+                "http://127.0.0.1:1/v1/chat/completions",
+                "--model",
+                "fixture",
+                "--local-http",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
     // Mixed shared flags inside one history are rejected before dispatch.
     let temp = Temp::new();
     let server = shared_fixture();
@@ -584,7 +603,8 @@ fn shared_tool_declarations_require_uniform_history_and_bounded_versions() {
             "step": {"history": "h", "parent": "lookup-again", "cache": "reported-prefix-hit",
                 "expect": {"kind": "json", "value": {"fact": "sapphire"}, "strict": null}}}),
     );
-    mixed["cells"].as_array_mut().unwrap().push(
+    mixed["cells"].as_array_mut().unwrap().insert(
+        2,
         json!({"id": "lookup-again", "case": "lookup-again", "concurrency": 1, "warmup_trials": 0, "trials": 1}),
     );
     mixed["cells"].as_array_mut().unwrap().push(
@@ -594,6 +614,11 @@ fn shared_tool_declarations_require_uniform_history_and_bounded_versions() {
     write_json(&source, &mixed);
     assert!(!run(&temp, &server, &source).status.success());
     assert_eq!(server.count.load(Ordering::SeqCst), 0);
+    // The identical ordering/limits are valid once flags agree; an unrelated
+    // validation failure must not make the negative regression pass.
+    mixed["cases"][2]["step"]["expect"]["shared"] = json!(true);
+    write_json(&source, &mixed);
+    assert_admitted(&source);
 
     // Workload v2 has no bounded tool trace allowance for shared declarations.
     let temp = Temp::new();
@@ -606,4 +631,7 @@ fn shared_tool_declarations_require_uniform_history_and_bounded_versions() {
     write_json(&source, &legacy);
     assert!(!run(&temp, &server, &source).status.success());
     assert_eq!(server.count.load(Ordering::SeqCst), 0);
+    legacy["cases"][1]["step"]["expect"]["shared"] = json!(false);
+    write_json(&source, &legacy);
+    assert_admitted(&source);
 }

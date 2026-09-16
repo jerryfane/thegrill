@@ -100,11 +100,11 @@ call/arguments/ID and the declared fixture result. Invalid or duplicate argument
 are rejected, never repaired. Every tool step requires a parent-linked factual
 follow-up, so a tool call alone cannot claim continuity.
 
-A tool step that also requires a reported prefix hit needs the declaration to
-be part of the shared leading prompt. On chat templates that render `tools`
-before the first message (the GLM template does), a step-scoped declaration
-changes the leading prompt, so the tool step shares no cached blocks with the
-tool-free requests that precede it and a required hit cannot be observed.
+A first tool step requiring a reported prefix hit needs a prefix already
+cached by earlier requests. In the captured GLM workload, adding `tools` at
+that turn changed the rendered prompt before the first reusable cache block,
+so the earlier tool-free requests could not satisfy the hit gate. Other
+templates or previously cached tool-bearing requests can behave differently.
 `expect: {"kind":"tool", ..., "shared": true}` declares the same fixed
 `lookup_fact` array on every step of that history instead: factual steps send
 `tool_choice: "none"` and must still answer factually, while the tool step

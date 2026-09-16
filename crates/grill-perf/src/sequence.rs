@@ -33,14 +33,12 @@ pub enum Expected {
         key: String,
         result: String,
         /// Declare the fixed tool fixture on every step of this history, not
-        /// only the calling step. Tool declarations render at the head of the
-        /// prompt on tool-head chat templates, so a step-scoped declaration
-        /// changes the leading prefix and cannot share cached blocks with the
-        /// tool-free requests that precede it. Sharing the declaration keeps
-        /// the leading prompt identical across the history, which is the only
-        /// shape under which a required reported prefix hit on a tool step is
-        /// achievable. Omitted on historical workloads; their bytes and
-        /// outcomes are unchanged.
+        /// only the calling step. On tool-head templates, adding declarations
+        /// at the first tool turn can invalidate the prefix warmed by earlier
+        /// tool-free requests. Sharing avoids that change when the backend
+        /// retains declarations for tool_choice none; actual cache reuse still
+        /// requires native qualification. Omitted on historical workloads;
+        /// their bytes and request behavior are unchanged.
         #[serde(default, skip_serializing_if = "is_false")]
         shared: bool,
     },

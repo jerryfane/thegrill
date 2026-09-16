@@ -126,8 +126,8 @@ on every step of the tool-bearing history (`expect.shared: true`). This removes
 the tools-head prefix mismatch only when the backend retains those declarations
 for `tool_choice: "none"`; verify that serving behavior in the authorized native
 retest. The original `history-branches-v6` files
-are unchanged and retain their pinned hashes and prior outcomes; on such a
-template their tool step cannot share the tool-free leading prefix.
+are unchanged and retain their pinned hashes and prior outcomes, including the
+observed GLM first-tool-turn cache miss.
 
 Tools have a 1 MiB encoded-input allowance and 1 MiB retained-history allowance;
 history branches have 1 MiB and 16 MiB respectively. Their wave-buffer allowances
