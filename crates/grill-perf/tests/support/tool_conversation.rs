@@ -365,3 +365,259 @@ fn tool_acquisition6_repeats_actual_calls_and_per_acquisition_id_namespace() {
         assert!(wave["attempts"][0]["timing"]["first_validated_tool_call_us"].is_u64());
     }
 }
+
+/// Three-step history: factual prime, fixed tool call, factual follow-up.
+/// `shared` toggles whether the tool declaration is sent on every step.
+fn shared_workload(shared: bool) -> Value {
+    let mut tool_expect = json!({"kind":"tool","key":"harbor","result":"sapphire"});
+    if shared {
+        tool_expect["shared"] = json!(true);
+    }
+    json!({
+        "version": 6,
+        "name": "shared-tools-fixture",
+        "request": {
+            "profile": "vllm-conversation-v3",
+            "stream": true,
+            "output": {"tokens": 128, "mode": "cap"},
+            "cache": "observe",
+            "temperature_milli": 0,
+            "top_p_milli": 1000,
+            "seed": 0,
+            "thinking_control": {"kind": "vllm-enable-thinking-v1", "enabled": false}
+        },
+        "limits": {"total_ms": 60000, "idle_ms": 10000, "response_bytes": 65536, "wave_buffer_bytes": 16777216},
+        "cases": [
+            {"id": "prime", "messages": [{"role": "user", "content": "Remember sapphire."}],
+             "step": {"history": "h", "parent": null, "cache": "reported-prefix-zero",
+                      "expect": {"kind": "json", "value": {"fact": "sapphire"}, "strict": null}}},
+            {"id": "lookup", "messages": [{"role": "user", "content": "Call lookup_fact with key harbor."}],
+             "step": {"history": "h", "parent": "prime", "cache": "reported-prefix-hit",
+                      "expect": tool_expect}},
+            {"id": "followup", "messages": [{"role": "user", "content": "Return the local tool fixture value as the fact."}],
+             "step": {"history": "h", "parent": "lookup", "cache": "reported-prefix-hit",
+                      "expect": {"kind": "json", "value": {"fact": "sapphire"}, "strict": null}}}
+        ],
+        "cells": [
+            {"id": "prime", "case": "prime", "concurrency": 1, "warmup_trials": 0, "trials": 1},
+            {"id": "lookup", "case": "lookup", "concurrency": 1, "warmup_trials": 0, "trials": 1},
+            {"id": "followup", "case": "followup", "concurrency": 1, "warmup_trials": 0, "trials": 1}
+        ],
+        "acquisition": {"kind": "conversation", "repetitions": 1, "warmup_repetitions": 0,
+            "measured_steps": ["lookup", "followup"], "input_bytes": 1048576, "retained_history_bytes": 1048576}
+    })
+}
+
+/// Fixture modeling a tool-head chat template: the rendered prefix starts with
+/// the serialized tool declarations, so a request that adds `tools` shares no
+/// leading blocks with tool-free requests under the same salt. `tool_choice`
+/// is a decoding control and does not enter the prompt prefix.
+fn shared_fixture() -> Server {
+    let prefixes = std::cell::RefCell::new(Vec::<(String, Vec<u8>)>::new());
+    Server::new(move |mut stream, index, request| {
+        let salt = request["cache_salt"].as_str().unwrap().to_owned();
+        let tool_call = request["tool_choice"].is_object();
+        if tool_call {
+            assert_eq!(request["tool_choice"]["function"]["name"], "lookup_fact");
+        }
+        // Tool-head templates render declarations before messages; the head
+        // bytes keep that order so a step-scoped declaration diverges at the
+        // first block exactly like the serving stack.
+        let mut head = b"{\"tools\":".to_vec();
+        head.extend(
+            serde_json::to_vec(&request.get("tools").cloned().unwrap_or(Value::Null))
+                .unwrap(),
+        );
+        head.extend(b",\"messages\":");
+        head.extend(serde_json::to_vec(&request["messages"]).unwrap());
+        head.push(b'}');
+        let mut prefixes = prefixes.borrow_mut();
+        let cached = prefixes
+            .iter()
+            .filter(|(old, _)| old == &salt)
+            .map(|(_, bytes)| {
+                bytes
+                    .iter()
+                    .zip(&head)
+                    .take_while(|(a, b)| a == b)
+                    .count()
+                    / 64
+                    * 16
+            })
+            .max()
+            .unwrap_or(0);
+        if let Some(position) = prefixes.iter().position(|(old, _)| old == &salt) {
+            prefixes.remove(position);
+        }
+        prefixes.push((salt, head));
+        drop(prefixes);
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n"
+        )
+        .unwrap();
+        if tool_call {
+            assert!(delta(
+                &mut stream,
+                json!({"tool_calls":[{"index":0,"id":format!("call_{index}"),"type":"function",
+                    "function":{"name":"lookup_fact","arguments":"{\"key\": \"harbor\"}"}}]}),
+                Some("tool_calls")
+            ));
+        } else {
+            assert!(delta(
+                &mut stream,
+                json!({"content":"{\"fact\":\"sapphire\"}"}),
+                Some("stop")
+            ));
+        }
+        if write!(
+            stream,
+            "data: {}\n\n",
+            json!({"choices":[],"usage":{"prompt_tokens":4096,"completion_tokens":8,
+                "prompt_tokens_details":{"cached_tokens":cached}}})
+        )
+        .is_err()
+        {
+            return;
+        }
+        let _ = stream.flush();
+        let _ = write!(stream, "data: [DONE]\n\n");
+    })
+}
+
+#[test]
+fn step_scoped_tool_declaration_diverges_leading_prefix_and_stops() {
+    let temp = Temp::new();
+    let server = shared_fixture();
+    let source = temp.path("workload.json");
+    write_json(&source, &shared_workload(false));
+    let report = decoded(&run(&temp, &server, &source));
+    assert_ne!(report["status"], "completed", "{report}");
+    assert_eq!(server.count.load(Ordering::SeqCst), 2);
+    assert!(!temp.path("run/wave-000002").exists());
+    let wave = read_json(&temp.path("run/wave-000001/wave.json"));
+    let attempt = &wave["attempts"][0];
+    assert_eq!(attempt["usage"]["cached_prompt_tokens"], 0);
+    assert_eq!(
+        attempt["eligibility_errors"],
+        json!(["provider_reported_prefix_cache_miss"])
+    );
+    // The tool call itself was correct; only the impossible cache gate failed.
+    assert_eq!(attempt["sequence"]["correct"], true);
+    assert_eq!(wave["eligible"], false);
+    let request: Value = serde_json::from_str(
+        read_json(&temp.path("run/wave-000001/reservation.json"))["requests"][0]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(request["tools"].is_array());
+    assert!(request["tool_choice"].is_object());
+    let prime: Value = serde_json::from_str(
+        read_json(&temp.path("run/wave-000000/reservation.json"))["requests"][0]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(prime.get("tools").is_none());
+    assert!(prime.get("tool_choice").is_none());
+}
+
+#[test]
+fn shared_tool_declaration_keeps_leading_prefix_and_tool_step_hits() {
+    let temp = Temp::new();
+    let server = shared_fixture();
+    let source = temp.path("workload.json");
+    write_json(&source, &shared_workload(true));
+    let report = decoded(&run(&temp, &server, &source));
+    if report["status"] != "completed" {
+        for index in 0..3 {
+            let path = temp.path(&format!("run/wave-{index:06}/wave.json"));
+            if path.exists() {
+                eprintln!("wave {index}: {}", read_json(&path)["attempts"][0]);
+            }
+        }
+    }
+    assert_eq!(report["status"], "completed", "{report}");
+    assert_eq!(server.count.load(Ordering::SeqCst), 3);
+    for (index, tool_call) in [(0, false), (1, true), (2, false)] {
+        let request: Value = serde_json::from_str(
+            read_json(&temp.path(&format!("run/wave-{index:06}/reservation.json")))
+                ["requests"][0]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(request["tools"][0]["function"]["name"], "lookup_fact");
+        if tool_call {
+            assert_eq!(request["tool_choice"]["function"]["name"], "lookup_fact");
+        } else {
+            assert_eq!(request["tool_choice"], "none");
+        }
+    }
+    for index in [1, 2] {
+        let wave = read_json(&temp.path(&format!("run/wave-{index:06}/wave.json")));
+        let attempt = &wave["attempts"][0];
+        assert!(
+            attempt["usage"]["cached_prompt_tokens"].as_u64().unwrap() > 0,
+            "wave {index}: {attempt}"
+        );
+        assert_eq!(attempt["sequence"]["correct"], true);
+        assert_eq!(wave["eligible"], true);
+    }
+    let followup = read_json(&temp.path("run/wave-000002/reservation.json"));
+    let request: Value =
+        serde_json::from_str(followup["requests"][0].as_str().unwrap()).unwrap();
+    let messages = request["messages"].as_array().unwrap();
+    let calls = messages
+        .iter()
+        .find_map(|m| m.get("tool_calls"))
+        .unwrap();
+    assert_eq!(calls[0]["function"]["name"], "lookup_fact");
+    assert_eq!(messages.iter().filter(|m| m["role"] == "tool").count(), 1);
+    let offline = decoded(&replay(&temp));
+    let record = &offline["acquisition"]["baseline"]["records"][0];
+    assert_eq!(record["complete_eligible"], true, "{offline}");
+    assert_eq!(record["ineligible_steps"], json!([]));
+}
+
+#[test]
+fn shared_tool_declarations_require_uniform_history_and_bounded_versions() {
+    // Mixed shared flags inside one history are rejected before dispatch.
+    let temp = Temp::new();
+    let server = shared_fixture();
+    let mut mixed = shared_workload(true);
+    mixed["cases"].as_array_mut().unwrap().insert(
+        2,
+        json!({"id": "lookup-again", "messages": [{"role": "user", "content": "Call lookup_fact with key harbor."}],
+            "step": {"history": "h", "parent": "lookup", "cache": "reported-prefix-hit",
+                "expect": {"kind": "tool", "key": "harbor", "result": "sapphire"}}}),
+    );
+    mixed["cases"].as_array_mut().unwrap().push(
+        json!({"id": "followup-again", "messages": [{"role": "user", "content": "Return the local tool fixture value as the fact."}],
+            "step": {"history": "h", "parent": "lookup-again", "cache": "reported-prefix-hit",
+                "expect": {"kind": "json", "value": {"fact": "sapphire"}, "strict": null}}}),
+    );
+    mixed["cells"].as_array_mut().unwrap().push(
+        json!({"id": "lookup-again", "case": "lookup-again", "concurrency": 1, "warmup_trials": 0, "trials": 1}),
+    );
+    mixed["cells"].as_array_mut().unwrap().push(
+        json!({"id": "followup-again", "case": "followup-again", "concurrency": 1, "warmup_trials": 0, "trials": 1}),
+    );
+    let source = temp.path("mixed.json");
+    write_json(&source, &mixed);
+    assert!(!run(&temp, &server, &source).status.success());
+    assert_eq!(server.count.load(Ordering::SeqCst), 0);
+
+    // Workload v2 has no bounded tool trace allowance for shared declarations.
+    let temp = Temp::new();
+    let server = shared_fixture();
+    let mut legacy = shared_workload(true);
+    legacy["version"] = json!(2);
+    legacy["request"]["profile"] = json!("vllm-conversation-v2");
+    legacy.as_object_mut().unwrap().remove("acquisition");
+    let source = temp.path("legacy.json");
+    write_json(&source, &legacy);
+    assert!(!run(&temp, &server, &source).status.success());
+    assert_eq!(server.count.load(Ordering::SeqCst), 0);
+}

@@ -100,6 +100,21 @@ call/arguments/ID and the declared fixture result. Invalid or duplicate argument
 are rejected, never repaired. Every tool step requires a parent-linked factual
 follow-up, so a tool call alone cannot claim continuity.
 
+A tool step that also requires a reported prefix hit needs the declaration to
+be part of the shared leading prompt. On chat templates that render `tools`
+before the first message (the GLM template does), a step-scoped declaration
+changes the leading prompt, so the tool step shares no cached blocks with the
+tool-free requests that precede it and a required hit cannot be observed.
+`expect: {"kind":"tool", ..., "shared": true}` declares the same fixed
+`lookup_fact` array on every step of that history instead: factual steps send
+`tool_choice: "none"` and must still answer factually, while the tool step
+keeps its forced call. All tool steps in one history must agree on `shared`,
+and the declaration requires workload version 5 or 6 where the bounded tool
+trace allowance exists. `tool_choice` is a decoding control and does not
+enter the prompt prefix. Historical workloads without `shared` keep their
+exact request bytes, hashes and outcomes; the flag is opt-in and never
+retroactively applied.
+
 ## Reading the evidence
 
 `Attempt.sequence.correct` records factual/structural correctness.

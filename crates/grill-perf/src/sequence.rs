@@ -26,7 +26,40 @@ pub struct Fact {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Expected {
     Json { value: Fact, strict: Option<String> },
-    Tool { key: String, result: String },
+    Tool {
+        key: String,
+        result: String,
+        /// Declare the fixed tool fixture on every step of this history, not
+        /// only the calling step. Tool declarations render at the head of the
+        /// prompt on tool-head chat templates, so a step-scoped declaration
+        /// changes the leading prefix and cannot share cached blocks with the
+        /// tool-free requests that precede it. Sharing the declaration keeps
+        /// the leading prompt identical across the history, which is the only
+        /// shape under which a required reported prefix hit on a tool step is
+        /// achievable. Omitted on historical workloads; their bytes and
+        /// outcomes are unchanged.
+        #[serde(default, skip_serializing_if = "is_false")]
+        shared: bool,
+    },
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+/// Whether every step of `history` carries the shared tool declaration.
+/// Validation requires all tool steps in one history to agree.
+pub(crate) fn shared_tools(workload: &Workload, history: &str) -> bool {
+    workload.cases.iter().any(|case| {
+        matches!(
+            &case.step,
+            Some(Step {
+                history: h,
+                expect: Expected::Tool { shared: true, .. },
+                ..
+            }) if h == history
+        )
+    })
 }
 
 /// Prospective fixed-call semantics, derived from the admitted step and its
@@ -229,6 +262,25 @@ pub fn validate(workload: &Workload) -> Result<()> {
     {
         return Err("conversation workload requires its exact versioned profile, streaming, capped output, per-step cache declarations and at most 16 ordered C1 steps".into());
     }
+    {
+        let mut shared = std::collections::HashMap::new();
+        for case in &workload.cases {
+            let Some(step) = &case.step else { continue };
+            let Expected::Tool { shared: flag, .. } = &step.expect else {
+                continue;
+            };
+            if *flag && !matches!(workload.version, 5 | 6) {
+                return Err(
+                    "shared tool declarations require the bounded tool trace allowance of workload version 5 or 6".into(),
+                );
+            }
+            if let Some(previous) = shared.insert(step.history.as_str(), *flag)
+                && previous != *flag
+            {
+                return Err("tool steps in one history must agree on shared declarations".into());
+            }
+        }
+    }
     for (index, (case, cell)) in workload.cases.iter().zip(&workload.cells).enumerate() {
         let step = case
             .step
@@ -284,7 +336,7 @@ pub fn validate(workload: &Workload) -> Result<()> {
                     return Err("strict expected text must encode the declared JSON object".into());
                 }
             }
-            Expected::Tool { key, result } => {
+            Expected::Tool { key, result, .. } => {
                 if !identifier(key) || result.len() > 4096 {
                     return Err("fixed lookup_fact fixture exceeds key/result bounds".into());
                 }
@@ -362,7 +414,7 @@ impl State {
             .find(|case| Some(case.id.as_str()) == spec.case.as_deref())
             .ok_or("unknown sequence case")?;
         let Some(Step {
-            expect: Expected::Tool { key, result },
+            expect: Expected::Tool { key, result, .. },
             ..
         }) = &case.step
         else {
@@ -464,9 +516,15 @@ impl State {
             .map(|id| crate::acquisition::namespace(namespace, id));
         let namespace = acquired_namespace.as_deref().unwrap_or(namespace);
         body["cache_salt"] = Value::String(format!("{namespace}-{}", step.history));
-        if let Expected::Tool { .. } = step.expect {
+        let tool_step = matches!(step.expect, Expected::Tool { .. });
+        if tool_step || shared_tools(context.workload, &step.history) {
             body["tools"] = json!([{"type":"function","function":{"name":"lookup_fact","description":"Return the declared local fixture value for one key.","parameters":{"type":"object","properties":{"key":{"type":"string"}},"required":["key"],"additionalProperties":false}}}]);
-            body["tool_choice"] = json!({"type":"function","function":{"name":"lookup_fact"}});
+            body["tool_choice"] = if tool_step {
+                json!({"type":"function","function":{"name":"lookup_fact"}})
+            } else {
+                // The declaration is context only; factual steps must not call it.
+                json!("none")
+            };
         }
         let encoded = serde_json::to_string(&HistoryRequest {
             body,
@@ -572,7 +630,7 @@ impl State {
                     }
                     messages.push(Rc::new(json!({"role":"assistant","content":content})));
                 }
-                Expected::Tool { key, result } => {
+                Expected::Tool { key, result, .. } => {
                     if attempt.finish_reason.as_deref() != Some("tool_calls")
                         && !(streamed_tool_response
                             && attempt.finish_reason.as_deref() == Some("stop"))
