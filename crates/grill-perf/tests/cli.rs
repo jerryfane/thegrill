@@ -2973,9 +2973,13 @@ fn comparison_latency_change_survives_overlapping_throughput() {
 #[test]
 fn comparison_reference_pools_baseline_range_and_withholds_changes_inside_it() {
     let temp = Temp::new();
-    let server = spread_server(&[(100, 100, 8), (150, 150, 8), (350, 350, 8)]);
+    let server = Server::new(|mut stream, _, _| {
+        header(&mut stream, "text/event-stream");
+        frame(&mut stream, json!({"choices":[{"delta":{"content":"x"}}]}));
+        finish(&mut stream, Some(8), Some(0));
+    });
     let work = workload(1, 0, 1);
-    for name in ["a", "b", "a2"] {
+    for (name, first) in [("a", 100_000u64), ("b", 150_000), ("a2", 350_000)] {
         successful(&run_declared(
             &temp,
             &server,
@@ -2984,6 +2988,25 @@ fn comparison_reference_pools_baseline_range_and_withholds_changes_inside_it() {
             "fixture-model",
             &deployment(),
         ));
+        // Synthetic observations keep B inside the pooled reference range,
+        // independent of scheduler load; the CLI still validates each receipt.
+        let path = temp.path(name).join("wave-000000/wave.json");
+        let mut receipt = value(&path);
+        let elapsed = first * 2;
+        let timing = &mut receipt["attempts"][0]["timing"];
+        timing["dispatch_offset_us"] = json!(0);
+        timing["headers_us"] = json!(1);
+        timing["first_body_us"] = json!(first);
+        timing["first_generated_text_us"] = json!(first);
+        timing["first_answer_text_us"] = json!(first);
+        timing["last_generated_text_us"] = json!(first);
+        timing["terminal_us"] = json!(elapsed);
+        timing["settle_us"] = json!(elapsed);
+        timing["capture_parse_us"] = json!(0);
+        receipt["elapsed_us"] = json!(elapsed);
+        receipt["dispatch_spread_us"] = json!(0);
+        receipt["achieved_completion_tokens_per_second"] = json!(8_000_000.0 / elapsed as f64);
+        fs::write(path, serde_json::to_vec(&receipt).unwrap()).unwrap();
     }
     let ordinary = cli()
         .arg("compare")

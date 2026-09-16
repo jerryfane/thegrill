@@ -213,7 +213,11 @@ fn schedule4_deadline_retains_wait_and_active_peer_without_replacement() {
     assert_eq!(receipt["schedule"]["fatal"], "deadline");
     assert!(receipt["elapsed_us"].as_u64().unwrap() >= 150000);
     assert_eq!(receipt["attempts"][1]["dispatched"], false);
-    assert_eq!(server.count.load(Ordering::SeqCst), 1);
+    // The deadline can expire before the first connection under CPU contention.
+    // It must never admit the waiting peer or replace the expired attempt.
+    // The dispatched flag is collector-side, so it is deterministic under the accept race.
+    assert_eq!(receipt["attempts"][0]["dispatched"], true);
+    assert!(server.count.load(Ordering::SeqCst) <= 1);
     assert!(!temp.path("run/wave-000001").exists());
     assert_eq!(replay(&temp, "run").status.code(), Some(2));
 }
