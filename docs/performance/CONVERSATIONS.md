@@ -110,8 +110,11 @@ tool-free requests that precede it and a required hit cannot be observed.
 `tool_choice: "none"` and must still answer factually, while the tool step
 keeps its forced call. All tool steps in one history must agree on `shared`,
 and the declaration requires workload version 5 or 6 where the bounded tool
-trace allowance exists. `tool_choice` is a decoding control and does not
-enter the prompt prefix. Historical workloads without `shared` keep their
+trace allowance exists. `tool_choice` is a decoding control, but a backend may
+omit tools from template inputs when its value is `"none"`. Shared-prefix
+qualification therefore requires confirming that the serving configuration
+retains the declarations; acceptance of the request alone is insufficient.
+Historical workloads without `shared` keep their
 exact request bytes, hashes and outcomes; the flag is opt-in and never
 retroactively applied.
 

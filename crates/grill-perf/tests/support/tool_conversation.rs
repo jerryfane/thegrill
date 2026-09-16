@@ -425,8 +425,7 @@ fn shared_fixture() -> Server {
         // first block exactly like the serving stack.
         let mut head = b"{\"tools\":".to_vec();
         head.extend(
-            serde_json::to_vec(&request.get("tools").cloned().unwrap_or(Value::Null))
-                .unwrap(),
+            serde_json::to_vec(&request.get("tools").cloned().unwrap_or(Value::Null)).unwrap(),
         );
         head.extend(b",\"messages\":");
         head.extend(serde_json::to_vec(&request["messages"]).unwrap());
@@ -435,15 +434,7 @@ fn shared_fixture() -> Server {
         let cached = prefixes
             .iter()
             .filter(|(old, _)| old == &salt)
-            .map(|(_, bytes)| {
-                bytes
-                    .iter()
-                    .zip(&head)
-                    .take_while(|(a, b)| a == b)
-                    .count()
-                    / 64
-                    * 16
-            })
+            .map(|(_, bytes)| bytes.iter().zip(&head).take_while(|(a, b)| a == b).count() / 64 * 16)
             .max()
             .unwrap_or(0);
         if let Some(position) = prefixes.iter().position(|(old, _)| old == &salt) {
@@ -542,8 +533,7 @@ fn shared_tool_declaration_keeps_leading_prefix_and_tool_step_hits() {
     assert_eq!(server.count.load(Ordering::SeqCst), 3);
     for (index, tool_call) in [(0, false), (1, true), (2, false)] {
         let request: Value = serde_json::from_str(
-            read_json(&temp.path(&format!("run/wave-{index:06}/reservation.json")))
-                ["requests"][0]
+            read_json(&temp.path(&format!("run/wave-{index:06}/reservation.json")))["requests"][0]
                 .as_str()
                 .unwrap(),
         )
@@ -566,13 +556,9 @@ fn shared_tool_declaration_keeps_leading_prefix_and_tool_step_hits() {
         assert_eq!(wave["eligible"], true);
     }
     let followup = read_json(&temp.path("run/wave-000002/reservation.json"));
-    let request: Value =
-        serde_json::from_str(followup["requests"][0].as_str().unwrap()).unwrap();
+    let request: Value = serde_json::from_str(followup["requests"][0].as_str().unwrap()).unwrap();
     let messages = request["messages"].as_array().unwrap();
-    let calls = messages
-        .iter()
-        .find_map(|m| m.get("tool_calls"))
-        .unwrap();
+    let calls = messages.iter().find_map(|m| m.get("tool_calls")).unwrap();
     assert_eq!(calls[0]["function"]["name"], "lookup_fact");
     assert_eq!(messages.iter().filter(|m| m["role"] == "tool").count(), 1);
     let offline = decoded(&replay(&temp));

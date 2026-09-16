@@ -121,10 +121,11 @@ the eleven long-prefix branch cases from `conversation-v2.json`; the separate
 selected history cases remain required. The tool-only profile observes cache
 state without claiming reuse.
 
-The `history-branches-shared-tools-v6` variant declares the fixed tool fixture
-on every step of the tool-bearing history (`expect.shared: true`), so the tool
-step's required reported prefix hit is achievable on chat templates that render
-`tools` ahead of the first message. The original `history-branches-v6` files
+The GLM `history-branches-shared-tools-v6` variant declares the fixed tool fixture
+on every step of the tool-bearing history (`expect.shared: true`). This removes
+the tools-head prefix mismatch only when the backend retains those declarations
+for `tool_choice: "none"`; verify that serving behavior in the authorized native
+retest. The original `history-branches-v6` files
 are unchanged and retain their pinned hashes and prior outcomes; on such a
 template their tool step cannot share the tool-free leading prefix.
 
@@ -162,7 +163,6 @@ First-output and fairness means remain distinct from completion-tail statistics.
 | `glm-p95-stress-v6.json` | `b18bccca830672d5dba62c50e252d9730d50d436d7bb362b3c18c8862ed41315` |
 | `deepseek-tools-v6.json` | `609e8d45f9b42b6f990172a2426e2bdc9399803945e38efcc71253f0e453a126` |
 | `deepseek-history-branches-v6.json` | `4849036ee09ecf2cee85745e12be3b6a79da8d64ba8afb77013982dd9d8d9d40` |
-| `deepseek-history-branches-shared-tools-v6.json` | `e8414c034a586bbc13eaed10d6b41464d90e4042bb463c5f1b0bc45e17d8a89e` |
 | `deepseek-long-context-v6.json` | `75a15591dadd2a672d6fe37f98c9d12035e36a8efaf48a5c0b14d222620eb844` |
 | `deepseek-p95-stress-v6.json` | `7705bfb554fe39f40e50ea0f7cbbb555f37aa90222e57400a29393de352c946b` |
 

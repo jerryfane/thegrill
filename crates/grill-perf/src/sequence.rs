@@ -25,7 +25,10 @@ pub struct Fact {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Expected {
-    Json { value: Fact, strict: Option<String> },
+    Json {
+        value: Fact,
+        strict: Option<String>,
+    },
     Tool {
         key: String,
         result: String,
