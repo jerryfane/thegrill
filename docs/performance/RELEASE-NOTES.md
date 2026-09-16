@@ -15,6 +15,13 @@
   workload correctness and journaled TP2 store/restart/reload qualification remain
   separate gates. Shared-tool prefix consistency does not establish either.
 
+## Post-publication documentation
+
+- Point the current [installation guide](INSTALL.md) at published v0.2.0 and
+  its exact source revision instead of requiring an unreleased local stage.
+  Published archives, their bundled documentation snapshots and historical
+  collector/workload pins remain unchanged.
+
 ## Unreleased runtime source compatibility
 
 - Add `runtime_vllm_752a3a504_bootstrap_v1` for the explicitly selected,
