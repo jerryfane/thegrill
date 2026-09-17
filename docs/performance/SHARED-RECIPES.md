@@ -124,10 +124,12 @@ state without claiming reuse.
 The GLM `history-branches-shared-tools-v6` variant declares the fixed tool fixture
 on every step of the tool-bearing history (`expect.shared: true`). This removes
 the tools-head prefix mismatch only when the backend retains those declarations
-for `tool_choice: "none"`; verify that serving behavior in the authorized native
-retest. The original `history-branches-v6` files
-are unchanged and retain their pinned hashes and prior outcomes, including the
-observed GLM first-tool-turn cache miss.
+for `tool_choice: "none"`; the authorized native retest confirmed that retention
+(168 prompt tokens with the declaration versus 17 without on the same probe),
+while the strict workload itself still stopped on its first factual response,
+so a passing GLM campaign is not claimed. The original `history-branches-v6`
+files are unchanged and retain their pinned hashes and prior outcomes, including
+the observed GLM first-tool-turn cache miss.
 
 Tools have a 1 MiB encoded-input allowance and 1 MiB retained-history allowance;
 history branches have 1 MiB and 16 MiB respectively. Their wave-buffer allowances
