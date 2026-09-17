@@ -51,7 +51,7 @@ WORKLOADS = (
     "deepseek-p95-stress-v6.json",
     "deepseek-tools-v6.json",
     "flat-acquisitions-v6.json",
-    "glm-history-branches-v6.json",
+    "glm-history-branches-shared-tools-v6.json",
     "glm-long-context-v6.json",
     "glm-p95-stress-v6.json",
     "glm-tools-v6.json",
