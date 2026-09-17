@@ -1,5 +1,6 @@
 # Performance release notes
 
+
 ## Unreleased candidate observation v3
 
 - Select LMCache `ddc5fa34e23fe09bb9b3a5b48f67a3e7a801e130` with the
@@ -73,6 +74,31 @@
 - Package the stdlib-importable hook beside the runtime bridge. Installation
   remains an explicit operator action; no serving process, dependency, device
   synchronization, receiver or lifecycle manager is installed or started.
+
+
+## Unreleased — shared tool declaration prefix consistency
+
+The `issue55-shared-tool-declarations` repair lets workload versions 5 and 6
+explicitly share one tool declaration across a history. Factual steps keep
+`tool_choice: "none"`; tool steps still select the declared function. This
+avoids introducing the schema only at the tool step when the backend retains
+declarations under `none`. Historical workloads and correctness gates are
+unchanged. Prefix consistency is not proof of actual cache reuse.
+
+A native GLM retest confirmed declaration retention in the rendered prompt.
+The strict workload then stopped on its first factual response: HTTP 200,
+completion usage and a stop boundary, but no answer text. No measured waves
+completed. A retained capture with the same prompt fingerprint and usage now
+shows the mechanism directly: under `tool_choice: "none"` the model emitted a
+complete tool call followed by the observation boundary token, terminated stop
+without answer text. The collector's gates rejected that response fail-closed;
+the raw failed capture remains evidence, not a passing factual answer.
+
+Review and publication of this prefix repair are separate from live
+qualification. It does not claim a passing GLM campaign, LMCache observer
+compatibility, end-to-end cache persistence or model-output correctness.
+The strict GLM workload and journaled store/restart/reload qualification remain
+open; neither is replaced by successful CUDA transfer checks or a server restart.
 
 ## Version 0.2.0 — experimental claim-coverage expansion
 

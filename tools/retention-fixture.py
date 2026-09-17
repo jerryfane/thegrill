@@ -162,8 +162,13 @@ def main():
                     return
             messages = body["messages"]
             salt = body.get("cache_salt", "flat-" + str(totals["requests"]))
+            # Tool declarations lead the rendered prompt on tool-head chat
+            # templates, so they belong in the cache identity, not just the
+            # first message. A step-scoped declaration cannot share blocks
+            # with the tool-free requests that precede it.
+            tools = json.dumps(body.get("tools"), sort_keys=True, separators=(",", ":"))
             root = messages[0]["content"]
-            key = hashlib.sha256((salt + "\0" + root).encode()).digest()
+            key = hashlib.sha256((salt + "\0" + tools + "\0" + root).encode()).digest()
             skip = args.miss_on_probe and "Probe" in messages[-1]["content"]
             request = SimpleNamespace(cache_salt=salt, key=key, skip_read=skip)
             _, cached, _ = manager.get_computed_blocks(request)
