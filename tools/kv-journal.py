@@ -28,7 +28,8 @@ PINS = {
     STORAGE: "a2cdf1277fbc4bf49aaf687d057d44e617ef78457e9a4e83e8ea866ab7825384",
     COMPLETION: "58c69916f74b72afb5a755cadf4a87164f34597858a6489509fcbe11e9b866d0",
     "lmcache/v1/gpu_connector/gpu_ops.py": "de0bdd322b8eb8a4078c9a83d8ef8d6bf5e62e67092ab3a07a07f04c69d9fb90",
-    "lmcache/v1/distributed/api.py": "cfa411afbebb06c29d21a45c40a7f964748d749d3d1c928215dfaefcf0ef4609",
+    "lmcache/v1/distributed/api.py":
+        "cfa411afbebb06c29d21a45c40a7f964748d749d3d1c928215dfaefcf0ef4609",
     "lmcache/v1/multiprocess/custom_types.py": "6e9e19fea6682cdf0c8837c1ac00d77c06413e2a4b740b34c93698d958e05dd7",
 }
 ASYNC = "vllm/v1/engine/async_llm.py"

@@ -43,7 +43,8 @@ SOURCE_PINS_487_BOOTSTRAP = {
 }
 SOURCE_CONTRACT_752_BOOTSTRAP = "vllm-752a3a504-uvicorn-0.51.0-sha256-bootstrap-v1"
 SOURCE_PINS_752_BOOTSTRAP = {
-    "vllm/entrypoints/openai/api_server.py": "29f8a544a1b780c327b40fee0ab639921f69ce5bb6084ef22132ae6777ab995d",
+    "vllm/entrypoints/openai/api_server.py":
+        "29f8a544a1b780c327b40fee0ab639921f69ce5bb6084ef22132ae6777ab995d",
     "vllm/entrypoints/launcher.py": "f2340520aa886ff8d2e4b53d6cd06614deaeb0afb91e0b258e3eb0fa0cb0a1a7",
     "vllm/v1/engine/async_llm.py": "69ea05aea497134204f1c6fd5f53994f4f7bbc35d24f90a768553dd8d6ba0b1a",
     "vllm/v1/engine/core_client.py": "2d83952580e23abca33c3bb5f93edc349ea0e10da358bcb41b385f8d066e2a0b",
