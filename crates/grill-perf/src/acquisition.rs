@@ -415,7 +415,9 @@ pub fn preflight(context: &crate::wire::BodyContext<'_>) -> Result<()> {
                 // Unknown actual parent outputs consume the prospective cap at
                 // runtime; reaching it is a retained admission failure, not a
                 // shortened prompt or a substituted expected response.
-                if matches!(step.expect, crate::sequence::Expected::Tool { .. }) {
+                if matches!(step.expect, crate::sequence::Expected::Tool { .. })
+                    || crate::sequence::shared_tools(workload, &step.history)
+                {
                     bound = bound.checked_add(2048).ok_or("input bound overflow")?;
                 }
                 history_bounds.push((case.id.clone(), bound));

@@ -10,6 +10,7 @@ import asyncio
 import contextvars
 import hashlib
 import importlib.metadata
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -39,6 +40,17 @@ SOURCE_PINS_487_BOOTSTRAP = {
     "vllm/v1/engine/core_client.py": "afb2b627cf9ef861f05b411494156cc6ad5076ea770c6f2a4c8a941ca82103ec",
     "vllm/v1/engine/core.py": "86b8f3b3826504549ef8bea2e7fbf7553728339803abcb3e7d051d146963ff9c",
     "vllm/v1/engine/utils.py": "6ce83b0552b6207505c9bd7ac1fd67d2771628eac01572738765923aa91c1c0f",
+}
+SOURCE_CONTRACT_752_BOOTSTRAP = "vllm-752a3a504-uvicorn-0.51.0-sha256-bootstrap-v1"
+SOURCE_PINS_752_BOOTSTRAP = {
+    "vllm/entrypoints/openai/api_server.py":
+        "29f8a544a1b780c327b40fee0ab639921f69ce5bb6084ef22132ae6777ab995d",
+    "vllm/entrypoints/launcher.py": "f2340520aa886ff8d2e4b53d6cd06614deaeb0afb91e0b258e3eb0fa0cb0a1a7",
+    "vllm/v1/engine/async_llm.py": "69ea05aea497134204f1c6fd5f53994f4f7bbc35d24f90a768553dd8d6ba0b1a",
+    "vllm/v1/engine/core_client.py": "2d83952580e23abca33c3bb5f93edc349ea0e10da358bcb41b385f8d066e2a0b",
+    "vllm/v1/engine/core.py": "27b23827a86fd488f1f7cc9a2722fe76d284087ca7cfefef5a30c5e74f21bc71",
+    "vllm/v1/engine/utils.py": "bc3fbc0fa6d8feb776b43ef008919ae4f28d732ce69bcd3b93649cd38795fc26",
+    "uvicorn/server.py": "6a8fe07e699543f225cbc7d0c0027ffd26fec95797d5c6a10446d38c7929ed57",
 }
 CAP = 4 * 1024 * 1024
 BODY_CAP = 2 * 1024 * 1024
@@ -80,6 +92,8 @@ def source_contract(adapter):
         return SOURCE_CONTRACT_487, SOURCE_PINS_487
     if adapter == "runtime_vllm_487ecf187_bootstrap_v1":
         return SOURCE_CONTRACT_487_BOOTSTRAP, SOURCE_PINS_487_BOOTSTRAP
+    if adapter == "runtime_vllm_752a3a504_bootstrap_v1":
+        return SOURCE_CONTRACT_752_BOOTSTRAP, SOURCE_PINS_752_BOOTSTRAP
     raise ValueError("unsupported real runtime source contract")
 
 
@@ -122,6 +136,9 @@ class Journal:
         self.closed = self.sealed = self.ready_seen = self.listening_seen = False
         self.engine_hook = False
         self.source_check = source_check
+        self.kv = None
+        self.kv_engine = None
+        self.kv_seal_method = "grill_kv_seal"
         self.timer = None
         self.emit("runtime_start", producer_sha256=self.producer_hash, source_contract=source_contract,
                   pid_namespace=os.readlink("/proc/self/ns/pid"),
@@ -197,6 +214,25 @@ class Journal:
             await asyncio.sleep(0.01)
         try:
             self.source_check()
+            if self.kv is not None:
+                remaining = (self.plan["deadline_us"] - (time.monotonic_ns() - self.origin) // 1000) / 1000000
+                if remaining <= 0 or self.kv_engine is None:
+                    self.emit("failure", detail="KV worker seal has no remaining deadline or observed engine")
+                    return
+                # The existing vLLM RPC invokes only the installed journal-seal
+                # extension. No process action or device synchronization.
+                worker_fences = await asyncio.wait_for(
+                    self.kv_engine.collective_rpc(self.kv_seal_method, timeout=remaining,
+                                                  kwargs={"timeout": min(5.0, remaining)}),
+                    timeout=remaining)
+                if (not isinstance(worker_fences, list) or not 1 <= len(worker_fences) <= 64
+                        or any(not isinstance(row, dict) or row.get("complete") is not True
+                               for row in worker_fences)):
+                    self.emit("failure", detail="KV worker observation fences incomplete")
+                    return
+                if not self.kv.seal(timeout=0):
+                    self.emit("failure", detail="KV frontend observation fence incomplete")
+                    return
             if not self.listening_seen:
                 self.emit("failure", detail="coverage ended without a listening socket")
                 return
@@ -211,6 +247,9 @@ class Journal:
     def close(self):
         if self.timer is not None:
             self.timer.cancel()
+        if self.kv is not None and not self.kv.sealed:
+            self.kv.emit("failure", reason="runtime_closed_before_frontend_fence")
+            self.kv.seal(timeout=0)
         os.close(self.fd)
 
 
@@ -355,6 +394,10 @@ def install(journal, server_class, engine_class):
         journal.listening(server)
 
     async def observed_add_request(engine, *args, **kwargs):
+        if journal.kv is not None:
+            if journal.kv_engine is not None and journal.kv_engine is not engine:
+                journal.emit("failure", detail="multiple frontend engine objects in KV window")
+            journal.kv_engine = engine
         journal.engine_request()
         return await add_request(engine, *args, **kwargs)
 
@@ -382,6 +425,10 @@ def main():
     parser.add_argument("--plan", required=True)
     parser.add_argument("--events", required=True)
     parser.add_argument("--stage", choices=["startup", "store", "reload"], required=True)
+    parser.add_argument("--kv-events", help="New independently pinned frontend KV binding journal")
+    parser.add_argument("--kv-producer-sha256", help="Prospective SHA-256 of adjacent kv-journal.py")
+    parser.add_argument("--kv-v2-events", help="Separate registered-state/L1 frontend journal (candidate wire v3)")
+    parser.add_argument("--kv-v2-producer-sha256", help="Prospective SHA-256 of adjacent kv-journal-v2.py")
     parser.add_argument("serving_args", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     serving_args = args.serving_args
@@ -394,6 +441,14 @@ def main():
     paths = {name: importlib.metadata.distribution(name.split("/")[0]).locate_file(name)
              for name in pins}
     contract = verify_sources(paths, adapter)
+    if bool(args.kv_events) != bool(args.kv_producer_sha256):
+        parser.error("--kv-events and --kv-producer-sha256 must be supplied together")
+    if args.kv_events and adapter not in ("runtime_vllm_487ecf187_v1", "runtime_vllm_487ecf187_bootstrap_v1"):
+        parser.error("KV binding requires the exact pinned 487ecf187 runtime")
+    if bool(args.kv_v2_events) != bool(args.kv_v2_producer_sha256):
+        parser.error("--kv-v2-events and --kv-v2-producer-sha256 must be supplied together")
+    if args.kv_v2_events and (args.kv_events or adapter != "runtime_vllm_752a3a504_bootstrap_v1"):
+        parser.error("Registered-state KV wire v3 requires the explicit runtime752 bootstrap and cannot mix with v1")
     journal = Journal(args.plan, args.events, args.stage, contract, lambda: verify_sources(paths, adapter))
     try:
         if journal.plan_hash != digest(plan_raw):
@@ -405,8 +460,31 @@ def main():
                              ("vllm/v1/engine/async_llm.py", vllm.v1.engine.async_llm)]:
             if Path(module.__file__).resolve() != Path(paths[name]).resolve():
                 raise ValueError("imported runtime source differs from verified distribution")
+        if args.kv_events:
+            kv_path = Path(__file__).with_name("kv-journal.py")
+            if digest(bounded_read(kv_path)) != args.kv_producer_sha256:
+                raise ValueError("KV producer source pin mismatch")
+            spec = importlib.util.spec_from_file_location("grill_kv_journal", kv_path)
+            kv = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(kv)
+            journal.kv = kv.Journal(args.kv_events, role="frontend",
+                                    max_window_us=journal.plan["deadline_us"])
+            kv.install_frontend(journal.kv, vllm.v1.engine.async_llm.AsyncLLM,
+                                REQUEST, bounded_read(paths[kv.ASYNC]))
+        if args.kv_v2_events:
+            kv_path = Path(__file__).with_name("kv-journal-v2.py")
+            if digest(bounded_read(kv_path)) != args.kv_v2_producer_sha256:
+                raise ValueError("KV v2 producer source pin mismatch")
+            spec = importlib.util.spec_from_file_location("grill_kv_journal_v2", kv_path)
+            kv = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(kv)
+            journal.kv = kv.Journal(args.kv_v2_events, role="frontend",
+                                    max_window_us=journal.plan["deadline_us"])
+            journal.kv_seal_method = "grill_kv_v2_seal"
+            kv.install_frontend(journal.kv, vllm.v1.engine.async_llm.AsyncLLM,
+                                REQUEST, bounded_read(paths[kv.ASYNC]))
         install(journal, uvicorn.server.Server, vllm.v1.engine.async_llm.AsyncLLM)
-        if adapter == "runtime_vllm_487ecf187_bootstrap_v1":
+        if adapter in ("runtime_vllm_487ecf187_bootstrap_v1", "runtime_vllm_752a3a504_bootstrap_v1"):
             import vllm.v1.engine.core_client
             import vllm.v1.engine.core
             import vllm.v1.engine.utils

@@ -107,6 +107,7 @@ Do not automatically add stress rows to routine PR traffic.
 |---|---|---:|---:|---:|
 | `tools-v6` | Actual streamed tool call, locally supplied result and actual follow-up; capped128 | 2 / 6 | 1,024 | 24 / 3,072 |
 | `history-branches-v6` | Prime/reuse, alternate histories, edit/restore and tool follow-up; capped128 | 11 / 33 | 5,632 | 132 / 16,896 |
+| `history-branches-shared-tools-v6` | Same history branches with the tool declaration shared across the tool history; capped128 | 11 / 33 | 5,632 | 132 / 16,896 |
 | `long-context-v6` — stress | Four strict-cold C1 sizes, including a 520,000-byte filler; capped1 | 4 / 12 | 16 | 48 / 48 |
 | `p95-stress-v6` — stress | C2, 200 measured waves, exact8 per lane; completion tail and first-output/fairness means | 2 / 400 | 3,216 | 1,206 / 9,648 |
 
@@ -119,6 +120,16 @@ the eleven long-prefix branch cases from `conversation-v2.json`; the separate
 **not qualified by this profile**. Required reported-zero/hit checks on the
 selected history cases remain required. The tool-only profile observes cache
 state without claiming reuse.
+
+The GLM `history-branches-shared-tools-v6` variant declares the fixed tool fixture
+on every step of the tool-bearing history (`expect.shared: true`). This removes
+the tools-head prefix mismatch only when the backend retains those declarations
+for `tool_choice: "none"`; the authorized native retest confirmed that retention
+(168 prompt tokens with the declaration versus 17 without on the same probe),
+while the strict workload itself still stopped on its first factual response,
+so a passing GLM campaign is not claimed. The original `history-branches-v6`
+files are unchanged and retain their pinned hashes and prior outcomes, including
+the observed GLM first-tool-turn cache miss.
 
 Tools have a 1 MiB encoded-input allowance and 1 MiB retained-history allowance;
 history branches have 1 MiB and 16 MiB respectively. Their wave-buffer allowances
@@ -149,6 +160,7 @@ First-output and fairness means remain distinct from completion-tail statistics.
 |---|---|
 | `glm-tools-v6.json` | `a2cbebeb24f0ef6cc74dada8ab17c662d6dd54d0f064456be327d1ed6a7d55ce` |
 | `glm-history-branches-v6.json` | `dd461c1c89c0fca5b003d40b205abab35576f83f02547ff924bf142c6e11134c` |
+| `glm-history-branches-shared-tools-v6.json` | `066c5f6c15ff92af600b21594b23ac2a62357cbd4fe20b2e798c728895a2e55f` |
 | `glm-long-context-v6.json` | `ef0a6f381ad5158f73b7756f6e637789cd8c948a81827cdddf4c57176a33402b` |
 | `glm-p95-stress-v6.json` | `b18bccca830672d5dba62c50e252d9730d50d436d7bb362b3c18c8862ed41315` |
 | `deepseek-tools-v6.json` | `609e8d45f9b42b6f990172a2426e2bdc9399803945e38efcc71253f0e453a126` |

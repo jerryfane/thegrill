@@ -239,6 +239,11 @@ tools and refusals are retained as unsupported results, not silently ignored.
 Only explicit conversation profiles permit the bounded full nonstreaming
 tool-call object described in their contract. No streamed tool-delta
 assembly or arbitrary tool execution is supported.
+Within conversation workloads, a tool expectation may declare `shared: true`
+to send the fixed tool array on every step of its history with
+`tool_choice: "none"` on factual steps; the forced call is unchanged. The flag
+is opt-in, requires workload version 5 or 6, and all tool steps in one history
+must agree. Workloads without it keep their exact request bytes.
 
 A streaming response needs a supported `stop`/`length` finish followed by a framed
 `[DONE]`. EOF does not finish an unclosed event. Usage-only events after finish are

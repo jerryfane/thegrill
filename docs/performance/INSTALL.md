@@ -4,16 +4,14 @@
 settings, downloads weights or uploads evidence. The quality CLI `grill` remains
 WIP and is not in these archives.
 
-## Expanded-coverage staging
+## Expanded-coverage release
 
-The download commands below intentionally select the published **v0.1.0**
-baseline. New mixed/accounting/acquisition/resource/lifecycle/kernel claim
-coverage belongs to **0.2.0, currently unreleased**. Use a separately reviewed
-local staged archive, checksum and build receipt for that exact version/target;
-do not invent a v0.2.0 download URL or substitute a moving branch.
-Apply the same checksum, receipt and extraction checks below to those supplied
-files. The source fallback must likewise use its separately reviewed exact
-source, not the historical v0.1.0 source pin.
+The download commands below select the published **v0.2.0** experimental release
+with mixed/accounting/acquisition/resource/lifecycle/kernel claim coverage.
+Use its exact version/target, checksum and build receipt; never substitute a
+moving branch or the earlier local staging hashes. Retain the published v0.1.0
+baseline and its original pins for historical studies. Installing v0.2.0 does
+not reinterpret old receipts or qualify new backend claims.
 
 A 0.2.0 package additionally carries the claim map and report template under
 `docs/performance/`, public domain examples under `workloads/`, and the explicit
@@ -30,10 +28,10 @@ verification and real-backend qualification remain separate reported statuses.
 
 ## Obtain, verify, unpack
 
-The published prerelease is [**v0.1.0**](https://github.com/plotarmordev/thegrill/releases/tag/v0.1.0),
-from reviewed source `4ff02a780680a8475e83db25d187173a21d51f33`.
-Use the [published archive hashes](RELEASE-NOTES.md#published-artifact-verification)
-and the receipt for your native target. Never use a moving `latest` pin.
+The published prerelease is [**v0.2.0**](https://github.com/plotarmordev/thegrill/releases/tag/v0.2.0),
+from reviewed source `4166e9f0c4467ce516c8d35ae363a80abe7b6494`.
+Use the checksum sidecar and build receipt attached to that release for your
+native target. Never use a moving `latest` pin.
 The archive's bundled guide is the reviewed pre-publication snapshot; this page
 records the published download location without changing those released bytes.
 
@@ -53,12 +51,12 @@ For this release, set the exact version and trusted HTTPS artifact directory,
 then set `TARGET` to your native triple. Use a fresh download directory:
 
 ```sh
-VERSION=0.1.0
-ARTIFACT_BASE_URL=https://github.com/plotarmordev/thegrill/releases/download/v0.1.0
+VERSION=0.2.0
+ARTIFACT_BASE_URL=https://github.com/plotarmordev/thegrill/releases/download/v0.2.0
 ```
 
 ```sh
-: "${VERSION:?exact approved or staged version}"
+: "${VERSION:?exact published or reviewed version}"
 : "${TARGET:?native Linux target triple}"
 : "${ARTIFACT_BASE_URL:?actual trusted HTTPS artifact directory}"
 STEM="grill-perf-${VERSION}-${TARGET}"
@@ -210,7 +208,7 @@ immutable `source_commit` in the receipt, not a moving documentation revision.
 
 Install an explicitly selected version into a separate directory, retaining old
 binaries/workloads/receipts. Do not migrate incompatible evidence in place.
-Until publication is approved, a clean reviewed source checkout remains usable:
+A clean reviewed source checkout remains an alternative to a published archive:
 
 ```sh
 : "${SOURCE:?absolute reviewed checkout path}"

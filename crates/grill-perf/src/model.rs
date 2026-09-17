@@ -371,6 +371,7 @@ impl Workload {
                 + if matches!(self.version, 5 | 6)
                     && case.step.as_ref().is_some_and(|step| {
                         matches!(step.expect, crate::sequence::Expected::Tool { .. })
+                            || crate::sequence::shared_tools(self, &step.history)
                     })
                 {
                     TOOL_TRACE_ALLOWANCE

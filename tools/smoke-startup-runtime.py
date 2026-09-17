@@ -258,13 +258,16 @@ def source_sets(root):
     bootstrap_names = tuple(bridge.SOURCE_PINS_487_BOOTSTRAP)
     shared = "vllm/entrypoints/openai/api_server.py"
     sources, pins = [], []
-    for revision in ["old", "new", "bootstrap"]:
+    for revision in ["old", "new", "bootstrap", "752"]:
         directory = root / revision
         directory.mkdir()
         paths, expected = {}, {}
-        for index, name in enumerate(bootstrap_names if revision == "bootstrap" else names):
+        selected = (tuple(bridge.SOURCE_PINS_752_BOOTSTRAP) if revision == "752"
+                    else bootstrap_names if revision == "bootstrap" else names)
+        for index, name in enumerate(selected):
             source_revision = "new" if revision == "bootstrap" else revision
-            raw = ("shared-api\n" if name == shared else f"{source_revision}-{name}\n").encode()
+            raw = ("shared-api\n" if name == shared and revision != "752"
+                   else f"{source_revision}-{name}\n").encode()
             path = directory / f"source-{index}.py"
             path.write_bytes(raw)
             paths[name] = path
@@ -272,10 +275,12 @@ def source_sets(root):
         sources.append(paths)
         pins.append(expected)
 
-    adapters = ["runtime_vllm_v1", "runtime_vllm_487ecf187_v1", "runtime_vllm_487ecf187_bootstrap_v1"]
+    adapters = ["runtime_vllm_v1", "runtime_vllm_487ecf187_v1",
+                "runtime_vllm_487ecf187_bootstrap_v1", "runtime_vllm_752a3a504_bootstrap_v1"]
     contracts = ["vllm-0.27.0-uvicorn-0.34.0-sha256-v1",
                  "vllm-487ecf187-uvicorn-0.52.4-sha256-v1",
-                 "vllm-487ecf187-uvicorn-0.52.4-sha256-bootstrap-v1"]
+                 "vllm-487ecf187-uvicorn-0.52.4-sha256-bootstrap-v1",
+                 "vllm-752a3a504-uvicorn-0.51.0-sha256-bootstrap-v1"]
 
     def rejected(paths, adapter):
         try:
@@ -286,7 +291,8 @@ def source_sets(root):
 
     with (patch.object(bridge, "SOURCE_PINS", pins[0]),
           patch.object(bridge, "SOURCE_PINS_487", pins[1]),
-          patch.object(bridge, "SOURCE_PINS_487_BOOTSTRAP", pins[2])):
+          patch.object(bridge, "SOURCE_PINS_487_BOOTSTRAP", pins[2]),
+          patch.object(bridge, "SOURCE_PINS_752_BOOTSTRAP", pins[3])):
         for index, adapter in enumerate(adapters):
             assert bridge.verify_sources(sources[index], adapter) == contracts[index]
             for other in range(len(adapters)):
