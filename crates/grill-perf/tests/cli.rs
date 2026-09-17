@@ -2649,6 +2649,8 @@ fn faster_first_text_has_positive_matched_prefill_rate_change() {
         thread::sleep(Duration::from_millis(if i == 0 { 180 } else { 30 }));
         frame(&mut s, json!({"choices":[{"delta":{"content":"x"}}]}));
         thread::sleep(Duration::from_millis(30));
+        frame(&mut s, json!({"choices":[{"delta":{"content":"y"}}]}));
+        thread::sleep(Duration::from_millis(30));
         finish(&mut s, Some(8), None);
     });
     let work = workload(1, 0, 1);
