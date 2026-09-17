@@ -1,104 +1,73 @@
 # Performance release notes
 
-
-## Unreleased candidate observation v3
-
-- Select LMCache `ddc5fa34e23fe09bb9b3a5b48f67a3e7a801e130` with the
-  existing vLLM 752 source set. The `verify-kv-v2` command and file names remain,
-  but the journal, expectation and report contract is v3; historical captures
-  are not upgraded.
-- Observe actual worker results, supported topology, exact successful store
-  finalization and source-owned cache dispatcher termination. Missing completion,
-  swallowed drain errors, dropped callbacks and shutdown timeouts fail closed.
-- Pin defining lifecycle and decorator sources; preserve verified decorator
-  behavior and reject replaced allocation readers or callback bindings.
-- This is a source-compatibility candidate, not native admission. Strict GLM
-  workload correctness and journaled TP2 store/restart/reload qualification remain
-  separate gates. Shared-tool prefix consistency does not establish either.
-
-## Post-publication documentation
-
-- Point the current [installation guide](INSTALL.md) at published v0.2.0 and
-  its exact source revision instead of requiring an unreleased local stage.
-  Published archives, their bundled documentation snapshots and historical
-  collector/workload pins remain unchanged.
-
-## Unreleased runtime source compatibility
-
-- Add `runtime_vllm_752a3a504_bootstrap_v1` for the explicitly selected,
-  seven-file vLLM 752a3a504/Uvicorn 0.51.0 source set. It observes frontend
-  startup, listening, request admission and engine-client bootstrap boundaries;
-  it does not establish all-worker readiness or isolated device timings.
-- Preserve older source contracts and historical replay. The v1 KV option stays
-  restricted to its original 487 contract; the separate v2 option below does not
-  make runtime-version compatibility into persistence or native qualification.
-
-## Unreleased registered-state/L1 observation v2
-
-- Add the explicit `startup verify-kv-v2` command and runtime752
-  `--kv-v2-events` integration, preserving v1 producer/consumer bytes.
-- Require prospective typed registered layout, complete physical old/new worker
-  cohorts and a persistent cache journal for each ordered server slot. Preserve
-  MLA nonwriters and repeated cache-local ranks across different servers.
-- Join paged raw block/key/exclusion evidence, actual native or per-kernel copy
-  legs, exact write finalization, independently queried existing source events,
-  and weak L1 allocation generations. Callback delivery is not device completion.
-- Pin selected native callable identity at installation, retain fallback-only
-  support, and seal unsealed cache journals after the existing shutdown drain
-  before context release. Frontend sealing follows successful worker seals.
-- Require object-shaped records through the existing map-only wire decoder,
-  including nested records and record-array elements. Preserve the hard
-  65,536-byte row cap and declared 64-request scheduler-observation limit.
-- Reuse validated layout identity and borrow decoded metadata instead of cloning
-  it. Check store publication only when that operation's completion state changes.
-  Share source-code inspection and compilation between registration and transfer
-  hooks, keeping their distinct rollback and observation-order guarantees.
-- Keep source-copy support separate from native and distributed admission
-  eligibility. The new verifier reports `INCONCLUSIVE`, not G7 qualification.
-  No native/backend execution or published artifact is implied by this source change.
-
-## Unreleased source-copy observation
+## Version 0.3.0 — experimental KV observation, runtime source contracts and shared tool declarations
 
 - Add an opt-in, source-pinned LMCache KV journal and `startup verify-kv`.
   Direct copy boundaries, typed operation-ID callbacks, per-key finalization,
   actual frontend/worker request bindings and finite terminal fences replace
-  aggregate-event inference for this new observation identity only.
-- Accept an explicit bounded cache-producer file set covering every selected
-  rank/group. Each cache process must persist while the corresponding observed
-  worker process changes; an adapter UUID change alone is not a restart.
-- Keep copy support separate from independently retained admission/warmup
-  eligibility. Historical captures and unavailable results are not upgraded.
-  Full-attention native-object-group LMCache-driven L1 is the declared scope;
-  sliding-window/skip, GDS/fallback, engine-driven/SHM, L2/disk/crash durability
-  and native backend qualification remain outside this implementation.
-- Package the stdlib-importable hook beside the runtime bridge. Installation
-  remains an explicit operator action; no serving process, dependency, device
-  synchronization, receiver or lifecycle manager is installed or started.
+  aggregate-event inference for this new observation identity only. The
+  bounded cache-producer file set must cover every selected rank/group, and
+  each cache process must persist while the corresponding observed worker
+  process changes. Full-attention native-object-group LMCache-driven L1 is the
+  declared scope; sliding-window/skip, GDS/fallback, engine-driven/SHM,
+  L2/disk/crash durability and native backend qualification remain outside
+  this implementation. The stdlib-importable hook is packaged beside the
+  runtime bridge; installation remains an explicit operator action.
+- Add the explicit `startup verify-kv-v2` command and runtime752
+  `--kv-v2-events` integration, preserving v1 producer/consumer bytes.
+  It requires prospective typed registered layout, complete physical old/new
+  worker cohorts and a persistent cache journal for each ordered server slot,
+  joins paged raw block/key/exclusion evidence with actual copy legs, exact
+  write finalization, independently queried existing source events and weak L1
+  allocation generations, and reports `INCONCLUSIVE` rather than qualification
+  when evidence is incomplete. Callback delivery is not device completion.
+- Select LMCache `ddc5fa34e23fe09bb9b3a5b48f67a3e7a801e130` with the existing
+  vLLM 752 source set. The `verify-kv-v2` command and file names remain, but
+  the journal, expectation and report contract is v3; historical captures are
+  not upgraded. The verifier observes actual worker results, supported
+  topology, exact successful store finalization and source-owned cache
+  dispatcher termination; missing completion, swallowed drain errors, dropped
+  callbacks and shutdown timeouts fail closed. Defining lifecycle and
+  decorator sources are pinned; replaced allocation readers or callback
+  bindings are rejected.
+- Add `runtime_vllm_752a3a504_bootstrap_v1` for the explicitly selected,
+  seven-file vLLM 752a3a504/Uvicorn 0.51.0 source set. It observes frontend
+  startup, listening, request admission and engine-client bootstrap boundaries;
+  it does not establish all-worker readiness or isolated device timings. The
+  v1 KV option stays restricted to its original 487 contract.
+- Workload versions 5 and 6 can explicitly share one tool declaration across a
+  history (`expect.shared: true`). Factual steps keep `tool_choice: "none"`;
+  tool steps still select the declared function. This avoids introducing the
+  schema only at the tool step when the backend retains declarations under
+  `none`. Historical workloads, correctness gates and example bytes are
+  unchanged. Prefix consistency is not proof of actual cache reuse.
+- Point the current installation guide at published v0.2.0 and its exact
+  source revision. Published archives, bundled documentation snapshots and
+  historical collector/workload pins remain unchanged.
 
+Verification and limits of this version:
 
-## Unreleased — shared tool declaration prefix consistency
-
-The `issue55-shared-tool-declarations` repair lets workload versions 5 and 6
-explicitly share one tool declaration across a history. Factual steps keep
-`tool_choice: "none"`; tool steps still select the declared function. This
-avoids introducing the schema only at the tool step when the backend retains
-declarations under `none`. Historical workloads and correctness gates are
-unchanged. Prefix consistency is not proof of actual cache reuse.
-
-A native GLM retest confirmed declaration retention in the rendered prompt.
-The strict workload then stopped on its first factual response: HTTP 200,
-completion usage and a stop boundary, but no answer text. No measured waves
-completed. A retained capture with the same prompt fingerprint and usage now
-shows the mechanism directly: under `tool_choice: "none"` the model emitted a
-complete tool call followed by the observation boundary token, terminated stop
-without answer text. The collector's gates rejected that response fail-closed;
-the raw failed capture remains evidence, not a passing factual answer.
-
-Review and publication of this prefix repair are separate from live
-qualification. It does not claim a passing GLM campaign, LMCache observer
-compatibility, end-to-end cache persistence or model-output correctness.
-The strict GLM workload and journaled store/restart/reload qualification remain
-open; neither is replaced by successful CUDA transfer checks or a server restart.
+- The KV observation modules (`startup verify-kv`, `verify-kv-v2`, the v3
+  contract and the runtime source checks) are exercised by the repository's
+  offline Python regressions and source smokes outside CI, not by in-repo
+  cargo tests; hosted CI covers the workspace build, format, tests and clippy
+  only. A journaled TP2 store/restart/reload run of this exact v3 source
+  identity has not been performed; the committed bytes are bound to offline
+  execution and strict source-pin checks only. This is a source-compatibility
+  candidate, not native admission.
+- A native GLM retest confirmed the backend retains shared tool declarations
+  in the rendered prompt under `tool_choice: "none"` (168 prompt tokens with
+  the declaration versus 17 without). The strict GLM workload nevertheless
+  stopped on its first factual response: the model emitted a complete tool
+  call ending at the observation boundary token and no answer text, and the
+  collector's gates rejected that response fail-closed. No measured waves
+  completed and no GLM campaign is claimed; until the backend honours
+  `tool_choice: "none"` for answer steps, the GLM shared-tools profile cannot
+  complete.
+- Strict GLM workload correctness, journaled store/restart/reload
+  qualification, LMCache observer admission and the remaining issue #55
+  qualification obligations remain separate open gates; none is established by
+  this release.
 
 ## Version 0.2.0 — experimental claim-coverage expansion
 
