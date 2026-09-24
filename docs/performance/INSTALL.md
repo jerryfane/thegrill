@@ -103,21 +103,6 @@ guessing them:
 Use HTTPS. A separately managed literal-loopback HTTP endpoint additionally needs
 `--local-http` on baseline; `localhost` is not a literal address.
 
-### Container networking
-
-HTTPS remains preferred. Plain HTTP is always an explicit local exception, not
-a portable-backend default. In an OrbStack container using host networking, a
-literal `http://127.0.0.1:PORT/v1/chat/completions` endpoint may be paired with
-`--local-http`; enabling host networking broadens the container's access to the
-host, so review that boundary separately. In bridge networking,
-`host.docker.internal` is a non-loopback name and **must not** be blessed with
-`--local-http`. Use HTTPS with normal certificate and hostname verification, or
-create a separately managed loopback forward inside the container.
-
-The portable request profile does not attest that a backend accepts its fields
-or reports token usage correctly. A capture from a Linux container measures that
-containerized path; it is not a native macOS measurement.
-
 In a private working directory, create the output parent and existing declaration
 format from actual inputs. A changed fingerprint does not prove one internal knob changed.
 

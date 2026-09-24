@@ -265,8 +265,7 @@ observed backend evidence, not attested facts.
 This selection declares unknown capacity and is descriptive-only: completion
 does not qualify the backend or produce a faster/slower, equivalence or
 no-regression verdict. See the [installation guide](INSTALL.md#optional-selections-and-failures)
-for current-source versus next-reviewed-release paths and the separate safe
-container-networking boundary.
+for current-source versus next-reviewed-release paths.
 
 ### Selected reports
 
