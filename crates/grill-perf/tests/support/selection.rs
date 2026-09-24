@@ -1,17 +1,23 @@
 use super::*;
 
-fn inputs(temp: &Temp, variant: bool) -> PathBuf {
+fn selection_input(temp: &Temp, name: &str) -> PathBuf {
     let examples = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
-    let name = if variant {
-        "concurrency-enable-thinking-selection-v1.json"
-    } else {
-        "concurrency-selection-v1.json"
-    };
     let manifest = read_json(&examples.join(name));
     let workload = manifest["workload"].as_str().unwrap();
     fs::copy(examples.join(workload), temp.path(workload)).unwrap();
     fs::copy(examples.join(name), temp.path("selection.json")).unwrap();
     temp.path("selection.json")
+}
+
+fn inputs(temp: &Temp, variant: bool) -> PathBuf {
+    selection_input(
+        temp,
+        if variant {
+            "concurrency-enable-thinking-selection-v1.json"
+        } else {
+            "concurrency-selection-v1.json"
+        },
+    )
 }
 
 fn selected_baseline(
@@ -305,6 +311,73 @@ fn selected_cli_inherits_pinned_workload_and_auth_outside_checkout_and_replays_o
         "{rejected}"
     );
     assert!(!temp.path("drift/acquisition-00").exists());
+}
+
+#[test]
+fn portable_selection_pins_portable_body_and_remains_descriptive() {
+    let temp = Temp::new();
+    let selection = selection_input(&temp, "portable-chat-selection-v1.json");
+    let declaration = deployment(&temp, "serving.json", "unchanged");
+    let server = Server::new(|stream, _, body| {
+        assert_eq!(body["model"], "neutral-fixture");
+        assert_eq!(body["stream"], true);
+        assert_eq!(body["max_tokens"], 64);
+        assert_eq!(body["stream_options"], json!({"include_usage":true}));
+        assert_eq!(
+            body["messages"][0]["content"],
+            "Repeat the word token, separated by single spaces. Continue until the response is cut off. Output no other text."
+        );
+        for field in [
+            "min_tokens",
+            "ignore_eos",
+            "chat_template_kwargs",
+            "cache_salt",
+            "seed",
+        ] {
+            assert!(body.get(field).is_none(), "unexpected {field}: {body}");
+        }
+        response(stream, Some(64), false);
+    });
+    let before = selected_baseline(
+        &temp,
+        &server.endpoint,
+        &declaration,
+        &selection,
+        "portable-before",
+    )
+    .output()
+    .unwrap();
+    let baseline = decoded(&before);
+    assert!(before.status.success(), "{baseline}");
+    assert_eq!(baseline["selected"]["manifest"]["id"], "portable-chat-v1");
+    assert_eq!(
+        baseline["selected"]["manifest"]["operation_scope"],
+        "unknown"
+    );
+    assert_eq!(
+        baseline["selected"]["request"]["profile"],
+        "portable-chat-v1"
+    );
+    let scope = baseline["selected"]["manifest"]["scope"].as_str().unwrap();
+    assert!(scope.contains("Descriptive-only"), "{scope}");
+    assert!(scope.contains("capacity unknown"), "{scope}");
+    assert!(scope.contains("no backend qualification"), "{scope}");
+
+    let check = command()
+        .arg("check")
+        .arg(temp.path("portable-before"))
+        .arg("--deployment")
+        .arg(&declaration)
+        .args(["--change", "none", "--json", "--out"])
+        .arg(temp.path("portable-control"))
+        .output()
+        .unwrap();
+    let report = decoded(&check);
+    assert!(check.status.success(), "{report}");
+    assert_eq!(report["result"], "DESCRIPTIVE");
+    assert!(report["observed_change_percent"].is_null());
+    assert!(report["model_based_interval_percent"].is_null());
+    assert_eq!(server.count.load(Ordering::SeqCst), 64);
 }
 
 #[test]

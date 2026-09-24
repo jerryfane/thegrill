@@ -246,6 +246,28 @@ guarantee. These observations are not a universal overhead correction.
 See [the finite offline C1 calibration](CALIBRATION.md) for measured simulation
 coverage and its assumptions. It does not qualify concurrency or history inference.
 
+### Portable local Chat Completions C1
+
+The [portable selection](../../crates/grill-perf/examples/portable-chat-selection-v1.json)
+pins the adjacent [`portable-chat-v1` workload](../../crates/grill-perf/examples/portable-chat-v1.json).
+It sends one streaming C1 cell with one warmup and three measured trials per
+acquisition, a 64-token output cap and `cache: observe`, using the existing
+conservative native limits. Across eight acquisitions that permits 32 requests
+and 2,048 requested output tokens.
+
+The request uses `max_tokens` and streaming usage collection. It deliberately
+omits exact-output `min_tokens`/`ignore_eos`, thinking controls, cache-prefix
+controls, `cache_salt` and a seed requirement. There is no backend detector,
+field-stripping retry or provider-specific fallback. The synthetic repetition
+prompt is intended to reach the cap, but cap delivery and reported usage remain
+observed backend evidence, not attested facts.
+
+This selection declares unknown capacity and is descriptive-only: completion
+does not qualify the backend or produce a faster/slower, equivalence or
+no-regression verdict. See the [installation guide](INSTALL.md#optional-selections-and-failures)
+for current-source versus next-reviewed-release paths and the separate safe
+container-networking boundary.
+
 ### Selected reports
 
 Selected reports use comparison v2 and retain `selected.manifest`, its digest,
