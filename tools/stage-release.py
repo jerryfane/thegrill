@@ -37,6 +37,8 @@ WORKLOADS = (
     "glm-prefill-v1.json",
     "glm-routine-decode-v3.json",
     "glm-routine-prefill-v3.json",
+    "portable-chat-selection-v1.json",
+    "portable-chat-v1.json",
     "prefill-ladder-v1.json",
     "quick.json",
     "recipe-smoke.json",

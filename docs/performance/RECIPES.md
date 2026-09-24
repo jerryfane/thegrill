@@ -41,6 +41,7 @@ needs descriptive selected scope. Choose the relevant path, not all alternatives
 | `$GRILL_HOME/workloads/concurrency-selection-v1.json` | C1/C2/C4 ladder, legacy `chat_template_kwargs.thinking: false` |
 | `$GRILL_HOME/workloads/concurrency-enable-thinking-selection-v1.json` | Separate ladder identity with `chat_template_kwargs.enable_thinking: false` |
 | `$GRILL_HOME/workloads/conversation-selection-v2.json` | [Bounded conversation profile](CONVERSATIONS.md), including its independently required tool/cache/usage controls |
+| `$GRILL_HOME/workloads/portable-chat-selection-v1.json` | Portable C1 cap observation without backend-specific request controls |
 
 Do not infer controls from a model name. The thinking variants cannot be paired
 as equivalent workloads, and rejection never triggers a switch between them.

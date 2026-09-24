@@ -186,6 +186,13 @@ Choose only the intended path; there is no resolver or automatic compatibility r
 | `concurrency-selection-v1.json` | C1/C2/C4 with legacy `thinking: false` |
 | `concurrency-enable-thinking-selection-v1.json` | Same ladder, distinct `enable_thinking: false` control |
 | `conversation-selection-v2.json` | Bounded factual/history and fixed-tool continuity |
+| `portable-chat-selection-v1.json` | Source/next-reviewed-release portable C1 cap observation; no backend-specific controls |
+
+For a current source build, pass
+`--selection "$SOURCE/crates/grill-perf/examples/portable-chat-selection-v1.json"`.
+The files are allowlisted for the next reviewed release, where the path will be
+`$GRILL_HOME/workloads/portable-chat-selection-v1.json`. The published v0.3.0
+artifacts remain immutable and do not gain these files retroactively.
 
 All explicit selections are descriptive, including a selected C1 workload.
 `workloads/recipes-v1.json` is the historical bundle, not a selection manifest.

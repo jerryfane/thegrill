@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "id": "portable-chat-v1",
+  "workload": "portable-chat-v1.json",
+  "source_sha256": "83cd436f9ba3aeb03345068fbd0f376928ac47a6461a95fd8941e344d6a4d28b",
+  "workload_sha256": "9a395fb95d5bef9c40b8ec2e9efc418d74b843155b5ddcd5612f31e75f55a68c",
+  "scope": "Descriptive-only C1 portable Chat Completions observation; capacity unknown and no backend qualification.",
+  "operation_scope": "unknown"
+}

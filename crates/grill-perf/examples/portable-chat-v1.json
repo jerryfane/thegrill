@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "name": "portable-chat-v1",
+  "request": {
+    "profile": "portable-chat-v1",
+    "stream": true,
+    "output": { "tokens": 64, "mode": "cap" },
+    "cache": "observe"
+  },
+  "limits": {
+    "total_ms": 60000,
+    "idle_ms": 30000,
+    "response_bytes": 1048576,
+    "wave_buffer_bytes": 67108864
+  },
+  "cases": [
+    {
+      "id": "synthetic-text",
+      "messages": [
+        { "role": "user", "content": "Repeat the word token, separated by single spaces. Continue until the response is cut off. Output no other text." }
+      ]
+    }
+  ],
+  "cells": [
+    { "id": "synthetic-text-1", "case": "synthetic-text", "concurrency": 1, "warmup_trials": 1, "trials": 3 }
+  ]
+}

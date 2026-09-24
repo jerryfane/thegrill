@@ -1,12 +1,7 @@
 use super::*;
 
-fn inputs(temp: &Temp, variant: bool) -> PathBuf {
+fn selection_input(temp: &Temp, name: &str) -> PathBuf {
     let examples = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
-    let name = if variant {
-        "concurrency-enable-thinking-selection-v1.json"
-    } else {
-        "concurrency-selection-v1.json"
-    };
     let manifest = read_json(&examples.join(name));
     let workload = manifest["workload"].as_str().unwrap();
     fs::copy(examples.join(workload), temp.path(workload)).unwrap();
@@ -145,7 +140,7 @@ fn assert_no_secret(root: &Path) {
 #[test]
 fn selected_cli_inherits_pinned_workload_and_auth_outside_checkout_and_replays_offline() {
     let temp = Temp::new();
-    let selection = inputs(&temp, false);
+    let selection = selection_input(&temp, "concurrency-selection-v1.json");
     let declaration = deployment(&temp, "serving.json", "unchanged");
     let server = AuthServer::new();
     let before = selected_baseline(&temp, &server.endpoint, &declaration, &selection, "before")
@@ -308,9 +303,72 @@ fn selected_cli_inherits_pinned_workload_and_auth_outside_checkout_and_replays_o
 }
 
 #[test]
+fn portable_selection_pins_portable_body_and_remains_descriptive() {
+    let temp = Temp::new();
+    let selection = selection_input(&temp, "portable-chat-selection-v1.json");
+    let declaration = deployment(&temp, "serving.json", "unchanged");
+    let server = Server::new(|stream, _, body| {
+        assert_eq!(body["model"], "neutral-fixture");
+        assert_eq!(body["stream"], true);
+        assert_eq!(body["max_tokens"], 64);
+        assert_eq!(body["stream_options"], json!({"include_usage":true}));
+        assert_eq!(
+            body["messages"][0]["content"],
+            "Repeat the word token, separated by single spaces. Continue until the response is cut off. Output no other text."
+        );
+        for field in [
+            "min_tokens",
+            "ignore_eos",
+            "chat_template_kwargs",
+            "cache_salt",
+            "seed",
+        ] {
+            assert!(body.get(field).is_none(), "unexpected {field}: {body}");
+        }
+        response(stream, Some(64), false);
+    });
+    let before = selected_baseline(
+        &temp,
+        &server.endpoint,
+        &declaration,
+        &selection,
+        "portable-before",
+    )
+    .output()
+    .unwrap();
+    let baseline = decoded(&before);
+    assert!(before.status.success(), "{baseline}");
+    assert_eq!(baseline["selected"]["manifest"]["id"], "portable-chat-v1");
+    assert_eq!(
+        baseline["selected"]["manifest"]["operation_scope"],
+        "unknown"
+    );
+    assert_eq!(
+        baseline["selected"]["request"]["profile"],
+        "portable-chat-v1"
+    );
+
+    let check = command()
+        .arg("check")
+        .arg(temp.path("portable-before"))
+        .arg("--deployment")
+        .arg(&declaration)
+        .args(["--change", "none", "--json", "--out"])
+        .arg(temp.path("portable-control"))
+        .output()
+        .unwrap();
+    let report = decoded(&check);
+    assert!(check.status.success(), "{report}");
+    assert_eq!(report["result"], "DESCRIPTIVE");
+    assert!(report["observed_change_percent"].is_null());
+    assert!(report["model_based_interval_percent"].is_null());
+    assert_eq!(server.count.load(Ordering::SeqCst), 64);
+}
+
+#[test]
 fn selected_preflight_rejects_source_normalized_control_and_path_drift_without_requests() {
     let temp = Temp::new();
-    let selection = inputs(&temp, false);
+    let selection = selection_input(&temp, "concurrency-selection-v1.json");
     let original = read_json(&selection);
     let source_path = temp.path("concurrency-v1.json");
     let original_source = fs::read(&source_path).unwrap();
@@ -355,7 +413,7 @@ fn selected_preflight_rejects_source_normalized_control_and_path_drift_without_r
 #[test]
 fn selected_partial_concurrent_wave_retains_failed_lane_and_withholds_whole_cell() {
     let temp = Temp::new();
-    let selection = inputs(&temp, true);
+    let selection = selection_input(&temp, "concurrency-enable-thinking-selection-v1.json");
     let declaration = deployment(&temp, "serving.json", "before");
     let server = Server::new(|stream, index, body| {
         assert_eq!(
@@ -394,7 +452,7 @@ fn selected_partial_concurrent_wave_retains_failed_lane_and_withholds_whole_cell
 #[test]
 fn selected_budget_exhaustion_remains_incomplete_without_replacement() {
     let temp = Temp::new();
-    let selection = inputs(&temp, false);
+    let selection = selection_input(&temp, "concurrency-selection-v1.json");
     let declaration = deployment(&temp, "serving.json", "before");
     let server = Server::new(|mut stream, _, _| {
         stream
@@ -628,7 +686,7 @@ fn assert_unavailable_load_failure(report: &Value, window_us: u64, waves_us: u64
 #[test]
 fn selected_window_overrun_replays_as_unavailable_without_partial_selection_or_verdict() {
     let temp = Temp::new();
-    let selection = inputs(&temp, true);
+    let selection = selection_input(&temp, "concurrency-enable-thinking-selection-v1.json");
     let declaration = deployment(&temp, "serving.json", "before");
     let server = Server::new(|stream, _, body| {
         assert_eq!(
