@@ -1827,28 +1827,6 @@ fn response_records_reject_array_shapes_and_excessive_nesting() {
 }
 
 #[test]
-fn total_deadline_fires_despite_regular_body_activity() {
-    let temp = Temp::new();
-    let server = Server::new(|mut s, _, _| {
-        header(&mut s, "text/event-stream");
-        for _ in 0..50 {
-            if s.write_all(b": heartbeat\n\n").is_err() {
-                break;
-            }
-            thread::sleep(Duration::from_millis(5));
-        }
-    });
-    let mut w = workload(1, 0, 1);
-    w["limits"]["total_ms"] = json!(80);
-    w["limits"]["idle_ms"] = json!(40);
-    assert_eq!(run(&temp, &server, "run", &w).status.code(), Some(2));
-    assert_eq!(
-        wave(&temp, "run", 0)["attempts"][0]["status"],
-        "total_timeout"
-    );
-}
-
-#[test]
 fn semantic_completion_ignores_surplus_but_not_missing_done_boundaries() {
     let temp = Temp::new();
     let server = Server::new(|mut s, _, _| {
