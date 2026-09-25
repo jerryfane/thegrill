@@ -25,7 +25,7 @@ static NEXT: AtomicUsize = AtomicUsize::new(0);
 struct Temp(PathBuf);
 impl Temp {
     fn new() -> Self {
-        let path = std::env::temp_dir().join(format!(
+        let path = std::env::temp_dir().canonicalize().unwrap().join(format!(
             "grill-perf-study-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
@@ -64,6 +64,7 @@ impl Server {
             while !done.load(Ordering::SeqCst) {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
+                        stream.set_nonblocking(false).unwrap();
                         stream
                             .set_read_timeout(Some(Duration::from_secs(5)))
                             .unwrap();

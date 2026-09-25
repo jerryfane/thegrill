@@ -888,28 +888,36 @@ impl Observer {
 }
 
 pub fn host_clock(id: String) -> Result<Clock> {
-    let mut resolution = std::mem::MaybeUninit::<libc::timespec>::uninit();
-    if unsafe { libc::clock_getres(libc::CLOCK_MONOTONIC, resolution.as_mut_ptr()) } != 0 {
-        return Err("monotonic resolution unavailable".into());
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = id;
+        Err("native resource observation is supported on Linux only".into())
     }
-    let resolution = unsafe { resolution.assume_init() };
-    let ns = u64::try_from(resolution.tv_sec)
-        .ok()
-        .and_then(|n| n.checked_mul(1_000_000_000))
-        .and_then(|n| {
-            u64::try_from(resolution.tv_nsec)
-                .ok()
-                .and_then(|r| n.checked_add(r))
+    #[cfg(target_os = "linux")]
+    {
+        let mut resolution = std::mem::MaybeUninit::<libc::timespec>::uninit();
+        if unsafe { libc::clock_getres(libc::CLOCK_MONOTONIC, resolution.as_mut_ptr()) } != 0 {
+            return Err("monotonic resolution unavailable".into());
+        }
+        let resolution = unsafe { resolution.assume_init() };
+        let ns = u64::try_from(resolution.tv_sec)
+            .ok()
+            .and_then(|n| n.checked_mul(1_000_000_000))
+            .and_then(|n| {
+                u64::try_from(resolution.tv_nsec)
+                    .ok()
+                    .and_then(|r| n.checked_add(r))
+            })
+            .ok_or("monotonic resolution overflow")?;
+        // Retained offsets are truncated to microseconds even when the host clock is finer.
+        Ok(Clock {
+            id,
+            kind: ClockKind::LinuxMonotonic,
+            unit: ClockUnit::Microseconds,
+            resolution_ns: ns.max(1000),
+            synchronization: Synchronization::LocalOrigin,
         })
-        .ok_or("monotonic resolution overflow")?;
-    // Retained offsets are truncated to microseconds even when the host clock is finer.
-    Ok(Clock {
-        id,
-        kind: ClockKind::LinuxMonotonic,
-        unit: ClockUnit::Microseconds,
-        resolution_ns: ns.max(1000),
-        synchronization: Synchronization::LocalOrigin,
-    })
+    }
 }
 fn validate_clock(clock: &Clock) -> Result<()> {
     if !label(&clock.id) || clock.resolution_ns == 0 || clock.resolution_ns > 1_000_000_000 {

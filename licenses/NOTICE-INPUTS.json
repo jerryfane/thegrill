@@ -2,7 +2,7 @@
   "cargo_lock_sha256": "d78477995c81d34e9fcd9d8dc7194c39b036bba37dcd04b7d73f601ecfdb7552",
   "manifest_sha256": {
     "Cargo.toml": "ae5e157d4c7bd5229f6765d43b0b4fd56ab4e94346f7f6389a20b60f02b1f46e",
-    "crates/grill-perf/Cargo.toml": "7fc4d2a4e54c3df1a07b4c5f0e99759bc202fb2e746f1bf0e6d85e19f125a4ed",
+    "crates/grill-perf/Cargo.toml": "eed0e5d5499adae0e4e5e7d6e0cfc31ecfc067b90ac8aa789aaf4ba31083e6ed",
     "crates/grill-sse/Cargo.toml": "ba697c044b157e98194cfb668e51668f5e2e89031bfdc5e385f6d74073a62d78"
   },
   "notice_sha256": {

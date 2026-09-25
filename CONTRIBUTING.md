@@ -9,7 +9,7 @@ There are no published releases yet; reviewed staged archives and the documented
 source fallback work before publication. The quality CLI remains a separate
 source-built work in progress.
 
-The Grill is a Rust CLI for Linux. Build and check it with:
+The Grill is a Rust CLI for Linux. Build and check the workspace with:
 
 ```sh
 cargo build --workspace --locked
@@ -18,9 +18,20 @@ cargo test --workspace --locked
 cargo clippy --workspace --locked --all-targets -- -D warnings
 ```
 
+Apple Silicon macOS supports the `grill-perf` portable serving slice:
+
+```sh
+cargo build -p grill-perf --locked
+cargo test -p grill-perf --locked -- --test-threads=1
+cargo clippy -p grill-perf --locked --all-targets -- -D warnings
+```
+
+Native `/proc`/cgroup/NVML resource capture and external-program microbench
+capture remain Linux-only. macOS changes must not weaken those Linux contracts.
+
 Integration tests run the CLI against synthetic inputs and loopback fixtures. Do not point tests at a model service. Use `cargo test --locked --test offline` or `cargo test --locked --test runner` for a focused run.
 
-GitHub CI runs these four checks on Ubuntu 24.04 with Rust 1.98.0 for pushes and pull requests. It uses synthetic and loopback fixtures only; hosted CI does not qualify a live model deployment.
+GitHub CI runs the workspace checks on Ubuntu 24.04 and the `grill-perf` macOS checks on `macos-15`, both with Rust 1.98.0, for pushes and pull requests. It uses synthetic and loopback fixtures only; hosted CI does not qualify a live model deployment.
 
 Performance CLI fixtures live in `crates/grill-perf/tests/`; a focused capture
 run is `cargo test -p grill-perf --locked --test study`. For recipe-facing

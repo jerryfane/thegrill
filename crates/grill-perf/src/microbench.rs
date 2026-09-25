@@ -2151,6 +2151,7 @@ struct ProgramRun {
     stderr: Vec<u8>,
     stdout_truncated: bool,
     stderr_truncated: bool,
+    #[cfg(target_os = "linux")]
     status: Option<i32>,
     failure: Option<String>,
     elapsed_ms: u64,
@@ -2869,6 +2870,7 @@ pub fn capture(options: &CaptureOptions) -> Result<CaptureReport> {
         .adapter
         .external()
         .then(program_signals::Guard::install);
+    #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
     let (artifact, mut receipt, mut failure) = if plan.adapter.external() {
         let program = options.program.as_deref();
         let mut program_sha256 = None;
@@ -2991,6 +2993,7 @@ pub fn capture(options: &CaptureOptions) -> Result<CaptureReport> {
         let failure = receipt.failure.clone();
         (Some(artifact), receipt, failure)
     };
+    #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
     let mut findings = match &artifact {
         Some(artifact) => check_artifact(Some(&plan), artifact),
         None => {

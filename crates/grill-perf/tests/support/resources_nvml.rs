@@ -395,6 +395,7 @@ fn observed_uuid_and_runtime_changes_cannot_replay_as_same_source() {
     assert_eq!(decode(&t, false), Err(Failure::Malformed));
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn bounded_missing_library_and_budget_paths_never_load_nvidia() {
     // Absolute private nonexistent filename: no search-path fallback to NVIDIA.
@@ -441,6 +442,7 @@ impl Drop for Temp {
     }
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn cpu_shared_library_exercises_c_abi_without_driver_or_devices() {
     let temp = Temp::new();

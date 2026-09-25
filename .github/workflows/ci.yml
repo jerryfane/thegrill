@@ -28,3 +28,19 @@ jobs:
         run: cargo --config profile.dev.package.sha2.opt-level=3 test --workspace --locked -- --test-threads=1
       - name: Clippy
         run: cargo --config profile.dev.package.sha2.opt-level=3 clippy --workspace --locked --all-targets -- -D warnings
+
+  macos-performance:
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: 1.98.0
+          components: clippy
+      - name: Build performance CLI
+        run: cargo --config profile.dev.package.sha2.opt-level=3 build -p grill-perf --locked
+      - name: Test performance CLI
+        run: cargo --config profile.dev.package.sha2.opt-level=3 test -p grill-perf --locked -- --test-threads=1
+      - name: Clippy performance CLI
+        run: cargo --config profile.dev.package.sha2.opt-level=3 clippy -p grill-perf --locked --all-targets -- -D warnings
