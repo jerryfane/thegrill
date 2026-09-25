@@ -1432,10 +1432,11 @@ pub fn human(report: &Report) -> String {
                     acquisition.acquisition, acquisition.status, acquisition.summary.wave_preparation_us,
                     acquisition.summary.reservation_publication_us, acquisition.summary.wave_publication_us));
                 for cell in &acquisition.cells {
-                    text.push_str(&format!("  {}: {}/{} observed trials, {} eligible; makespan median {:?}us; aggregate achieved {:?} tokens/s; per-stream settlement decode {:?}, text-window decode {:?} tokens/s\n",
+                    text.push_str(&format!("  {}: {}/{} observed trials, {} eligible; makespan median {:?}us; aggregate achieved {:?} tokens/s; per-stream settlement decode {:?}, text-window decode {:?}, prefill {:?} tokens/s\n",
                         cell.cell, cell.observed_trials, cell.planned_trials, cell.eligible_trials,
                         cell.median_wave_latency_us, cell.median_achieved_completion_tokens_per_second,
-                        cell.median_decode_tokens_per_second, cell.median_text_decode_tokens_per_second));
+                        cell.median_decode_tokens_per_second, cell.median_text_decode_tokens_per_second,
+                        cell.median_prefill_tokens_per_second));
                     if let Some(check) = &cell.sequence_check {
                         text.push_str(&format!("    history {}; parent {:?}; semantic correct {}; strict match {:?}; canonical formatting {:?}; detail {:?}\n",
                             check.history, check.parent, check.correct, check.strict_match, check.canonical_match, check.error));

@@ -9,6 +9,10 @@
   external-program microbench capture remain unavailable on macOS; no Apple GPU
   or unified-memory claim is inferred. The dependency graph and notice text are
   unchanged; the notice ledger records the re-reviewed manifest declaration.
+- Include each selected cell's median prefill rate in the human-readable
+  baseline/check report alongside its achieved and decode rates. JSON evidence
+  and comparison semantics are unchanged.
+
 
 ## Version 0.3.0 — experimental KV observation, runtime source contracts and shared tool declarations
 

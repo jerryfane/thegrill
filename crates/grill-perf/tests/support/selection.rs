@@ -191,6 +191,15 @@ fn selected_cli_inherits_pinned_workload_and_auth_outside_checkout_and_replays_o
     );
     assert!(!terminal.lines().next().unwrap().contains("INCONCLUSIVE"));
     let report = read_json(&temp.path("control/report.json"));
+    let human = fs::read_to_string(temp.path("control/report.txt")).unwrap();
+    let prefill = report["selected"]["baseline_acquisitions"][0]["cells"][0]
+        ["median_prefill_tokens_per_second"]
+        .as_f64()
+        .unwrap();
+    assert!(
+        human.contains(&format!("prefill Some({prefill}) tokens/s")),
+        "{human}"
+    );
     assert_eq!(
         terminal.lines().nth(1).unwrap(),
         format!(
