@@ -26,10 +26,13 @@ The published [v0.1.0 pre-release](https://github.com/plotarmordev/thegrill/rele
 covers the baseline workflow. The expanded claim coverage below requires a
 separately reviewed staged artifact until its own release is approved; do not
 assume the historical binary contains newer source features.
-The performance archive contains `bin/grill-perf`, pinned `workloads/` and
-offline performance guides. The native CLI needs Linux, not Rust or a TheGrill
-checkout. Opt-in Python producers additionally require their explicitly reviewed
-Python/backend runtime; the archive does not install those dependencies.
+The published performance archive contains `bin/grill-perf`, pinned `workloads/`
+and offline performance guides. Published binaries require Linux and no Rust or
+TheGrill checkout. A Rust 1.98 source build additionally supports portable
+serving captures on Apple Silicon macOS; Linux-native resource and external
+program collectors remain unavailable there. Opt-in Python producers require
+their explicitly reviewed Python/backend runtime; the archive does not install
+those dependencies.
 
 ## Speed benchmarks
 

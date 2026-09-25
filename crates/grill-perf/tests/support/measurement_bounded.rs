@@ -84,6 +84,7 @@ fn bounded_capture_preserves_invalid_prefix_facts_but_not_missing_usage_guesses(
                     }
                     Err(error) => panic!("fixture accept: {error}"),
                 };
+                stream.set_nonblocking(false).unwrap();
                 stream
                     .set_read_timeout(Some(Duration::from_secs(5)))
                     .unwrap();

@@ -633,8 +633,12 @@ their separately authorized evidence and independent review.
 
 ## Build and use
 
-Requirements match the workspace: Linux, Rust/Cargo 1.98 and the native build
-tools needed by the existing rustls/AWS-LC dependency.
+Portable serving collection supports Linux and Apple Silicon macOS source builds
+with Rust/Cargo 1.98 and the native build tools required by rustls/AWS-LC.
+Published archives and the complete native resource/external-program collector
+remain Linux-only. On macOS, `baseline`, `check`, ordinary `run`/lifecycle,
+offline comparison, and bundle inspection are supported; a resource attachment
+fails closed instead of substituting incomplete Apple telemetry.
 
 From the workspace root:
 

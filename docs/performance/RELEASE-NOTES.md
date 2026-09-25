@@ -1,5 +1,14 @@
 # Performance release notes
 
+## Unreleased
+
+- Add Apple Silicon macOS source support for portable `grill-perf` serving
+  captures. Binary identity uses the native executable path while Unix evidence
+  no-follow opens, directory synchronization and advisory locking retain their
+  existing fail-closed behavior. Linux `/proc`/cgroup/NVML resource capture and
+  external-program microbench capture remain unavailable on macOS; no Apple GPU
+  or unified-memory claim is inferred.
+
 ## Version 0.3.0 — experimental KV observation, runtime source contracts and shared tool declarations
 
 - Add an opt-in, source-pinned LMCache KV journal and `startup verify-kv`.

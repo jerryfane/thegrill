@@ -610,3 +610,9 @@ fn import_cannot_promote_a_native_claim_and_digest_corruption_is_rejected() {
         Outcome::Pass
     );
 }
+
+#[cfg(not(target_os = "linux"))]
+#[test]
+fn native_resource_observation_fails_closed_on_unsupported_hosts() {
+    assert!(host_clock("unsupported-host".into()).is_err());
+}

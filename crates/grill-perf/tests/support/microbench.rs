@@ -12,6 +12,7 @@
 
 use super::*;
 use sha2::{Digest, Sha256};
+#[cfg(target_os = "linux")]
 use std::os::unix::fs::PermissionsExt;
 
 const NCCL_BYTE_SOURCE_SHA256: &str =
@@ -740,6 +741,7 @@ fn capture_rejects_drifted_declarations_before_running() {
 /// A device plan below the frozen cell's derived minimum is refused by plan
 /// admission before any output directory exists and before the declared program
 /// is executed; the same plan with the shipped allowance reaches the launch.
+#[cfg(target_os = "linux")]
 #[test]
 fn device_allowance_below_the_frozen_minimum_is_rejected_before_launch() {
     type Mutate = fn(&mut Value);
@@ -1752,6 +1754,7 @@ fn e3_parity_tolerance_boundaries_and_tier_fallbacks() {
     assert!(mb_has(&report, "invalid", "IDENTITY_DRIFT"), "{report}");
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn external_program_launch_pins_the_program_and_retains_failures() {
     let temp = Temp::new();

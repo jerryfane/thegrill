@@ -113,8 +113,11 @@ pub fn binary_digest() -> Result<String> {
     DIGEST.clone()
 }
 fn hash_binary() -> Result<String> {
-    let mut file =
-        File::open("/proc/self/exe").map_err(|e| format!("read collector binary: {e}"))?;
+    #[cfg(target_os = "linux")]
+    let path = PathBuf::from("/proc/self/exe");
+    #[cfg(not(target_os = "linux"))]
+    let path = std::env::current_exe().map_err(|e| format!("locate collector binary: {e}"))?;
+    let mut file = File::open(path).map_err(|e| format!("read collector binary: {e}"))?;
     let mut buf = [0u8; 65536];
     let mut hash = Sha256::new();
     loop {

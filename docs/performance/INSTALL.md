@@ -226,7 +226,9 @@ export GRILL_PERF="$SOURCE/target/release/grill-perf" &&
 "$GRILL_PERF" --version
 ```
 
-Source builds need Linux, Rust/Cargo 1.98.0, C/C++ tools and CMake. Use explicit
-selection paths under `$SOURCE/crates/grill-perf/examples/` instead of packaged
-`workloads/`. Record build flags and actual hashes; a local build is not proof of
-native installed-artifact verification or live backend qualification.
+Source builds of the portable serving workflow need Linux or Apple Silicon
+macOS, Rust/Cargo 1.98.0, C/C++ tools and CMake. Published archives, native
+resource capture and external-program microbench capture remain Linux-only. Use
+explicit selection paths under `$SOURCE/crates/grill-perf/examples/` instead of
+packaged `workloads/`. Record build flags and actual hashes; a local build is not
+proof of native installed-artifact verification or live backend qualification.
