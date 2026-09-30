@@ -23,6 +23,7 @@ TARGETS = {
 }
 WORKLOADS = (
     "baseline-v1.json",
+    "baseline-v2.json",
     "concurrency-enable-thinking-selection-v1.json",
     "concurrency-enable-thinking-v1.json",
     "concurrency-selection-v1.json",
@@ -39,6 +40,7 @@ WORKLOADS = (
     "glm-routine-prefill-v3.json",
     "portable-chat-selection-v1.json",
     "portable-chat-v1.json",
+    "portable-v1.json",
     "prefill-ladder-v1.json",
     "quick.json",
     "recipe-smoke.json",

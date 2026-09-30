@@ -93,23 +93,34 @@ Unknown workload fields and invalid controls are rejected before dispatch.
 
 `request` declares `profile`, `stream`, `output: {tokens, mode}`, `cache`, and
 nullable `temperature_milli`, `top_p_milli`, `seed`. Thousandths are encoded as
-decimal sampling values. Nullable `thinking` requires `vllm-fixed-v1` when declared
+decimal sampling values. Output mode `cap` sends `max_tokens`; `exact` also sends
+`min_tokens` and `ignore_eos` and requires `vllm-fixed-v1`; `cap-reached` sends
+only `max_tokens` under either flat profile and checks equal work from the
+response instead (see [eligibility](#completion-failures-and-eligibility)).
+Nullable `thinking` requires `vllm-fixed-v1` when declared
 and is sent as `chat_template_kwargs.thinking`; null leaves the provider default.
 Alternatively, nullable `thinking_control: {"kind":"vllm-enable-thinking-v1",
 "enabled":false}` declares `chat_template_kwargs.enable_thinking` under the same
-explicit profile; `enabled` accepts either boolean. Unknown kinds and nested
+explicit profile, and `{"kind":"chat-template-thinking-v1","enabled":false}`
+sends both `chat_template_kwargs.thinking` and `enable_thinking` with that value
+under either flat profile; `enabled` accepts either boolean. Unknown kinds and nested
 fields are rejected. Both controls cannot be non-null, even when their booleans
-agree. Neither key is inferred from a model name or sent alongside the other.
+agree. No key is inferred from a model name.
 Absent or null controls are omitted from normalized workloads and leave provider
 defaults unchanged; legacy `thinking` request bytes remain unchanged.
-`portable-chat-v1` rejects either non-null control. No generic `extra_body` or
+`portable-chat-v1` rejects `thinking` and `vllm-enable-thinking-v1`. No generic `extra_body` or
 other generation fields are sent or inferred.
 
 These controls record requested behavior, not evidence that a template honored
 it. Inspect reported reasoning tokens and observed generated/answer channels;
 an answer-first event does not prove reasoning was absent elsewhere. A successful
-response does not qualify a provider's template support. Thinking declarations
-do not change eligibility or impose an answer-only requirement.
+response does not qualify a provider's template support. Only
+`chat-template-thinking-v1` with `enabled: false` changes eligibility: a lane
+whose usage reports reasoning tokens, or whose first generated event carries
+reasoning text, is ineligible with `reasoning_reported_with_thinking_disabled`.
+The check depends on the server reporting reasoning; servers without a reasoning
+parser cannot be checked this way. Other thinking declarations do not change
+eligibility or impose an answer-only requirement.
 Streaming requests explicitly request usage with `stream_options.include_usage`.
 
 Only workload v3 may declare `request.warmup_output: {tokens, mode}`. When absent,
@@ -255,7 +266,11 @@ Bytes co-read after semantic completion are retained within the response cap;
 the completion offset and observed surplus are recorded. Bytes never read are not
 claimed as retained. Missing usage stays null. Reported lengths exceeding the cap,
 exact-length mismatches and unmet reported-prefix requirements make the wave
-ineligible. Usage is provider evidence, not verified billing or engine attestation.
+ineligible. A `cap-reached` lane is eligible only when reported completion
+tokens equal the cap (`reported_output_below_cap` otherwise) and the finish
+reason is `length` (`cap_not_reported_as_length` otherwise), so a backend that
+ignores `min_tokens` cannot make lanes silently unequal.
+Usage is provider evidence, not verified billing or engine attestation.
 In particular, a reported prefix miss after warmup can reflect server-specific
 cache-block alignment rather than collector malfunction; priming alone does not
 establish reusable cache blocks. The reported-hit requirement is not relaxed.
