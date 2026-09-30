@@ -329,11 +329,6 @@ fn short(s: &str) -> bool {
         && s.bytes()
             .all(|b| b.is_ascii_alphanumeric() || b"-_.:".contains(&b))
 }
-fn hash(s: &str) -> bool {
-    s.len() == 64
-        && s.bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-}
 fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>> {
     serde_json::to_vec(value).map_err(|e| e.to_string())
 }
@@ -404,14 +399,15 @@ impl Plan {
             _ => vec!["first_inference".into()],
         }
     }
+    #[expect(clippy::too_many_lines, reason = "predates the function-length limit")]
     pub fn validate(&self) -> Result<()> {
         if self.version != 1
             || self.kind != "startup-study-v1"
             || !short(&self.study_id)
-            || !hash(&self.collector_sha256)
-            || !hash(&self.adapter_sha256)
+            || !evidence::is_digest(&self.collector_sha256)
+            || !evidence::is_digest(&self.adapter_sha256)
             || !short(&self.setup_axis)
-            || self.setup_sha256.iter().any(|h| !hash(h))
+            || self.setup_sha256.iter().any(|h| !evidence::is_digest(h))
             || self.setup_sha256[0] != self.setup_sha256[2]
             || self.slots.len() > 360
             || self.slots.is_empty()
@@ -505,7 +501,7 @@ impl Plan {
         {
             if identity.version != 1
                 || identity.prompt_sha256 != evidence::digest(self.request.prompt.as_bytes())
-                || !hash(&identity.source_sha256)
+                || !evidence::is_digest(&identity.source_sha256)
                 || !short(&identity.cache_salt)
                 || identity.hash_seed_contract != "PYTHONHASHSEED=0:engine+cache_server"
                 || post_restart.is_empty()
@@ -1015,6 +1011,7 @@ async fn collect_request(
     })
 }
 
+#[expect(clippy::too_many_lines, reason = "predates the function-length limit")]
 pub fn capture(args: &CaptureArgs, stage: Stage, store: Option<&Path>) -> Result<Inspection> {
     let plan_bytes = evidence::read(&args.plan, CAP)?;
     let plan: Plan = decode(&plan_bytes)?;
@@ -1278,6 +1275,7 @@ fn response_valid(plan: &Plan, record: &RequestRecord, bytes: &[u8]) -> Result<(
     Ok(())
 }
 
+#[expect(clippy::too_many_lines, reason = "predates the function-length limit")]
 fn analyze(root: &Path, plan: &Plan, c: &Capture, raw: &[u8]) -> Result<Inspection> {
     let mut report = Inspection {
         version: 1,
@@ -1643,7 +1641,7 @@ fn analyze(root: &Path, plan: &Plan, c: &Capture, raw: &[u8]) -> Result<Inspecti
                                 content_sha256,
                                 generation,
                             },
-                        ) => hash(content_sha256) && short(generation),
+                        ) => evidence::is_digest(content_sha256) && short(generation),
                         _ => false,
                     };
                     if !valid {
@@ -2009,7 +2007,9 @@ fn load(root: &Path) -> Result<Loaded> {
         || c.requests.len() > MAX_REQUESTS
         || c.failures.len() > 64
         || c.failures.iter().any(|s| s.len() > 4096)
-        || c.previous_sha256.as_ref().is_some_and(|s| !hash(s))
+        || c.previous_sha256
+            .as_ref()
+            .is_some_and(|s| !evidence::is_digest(s))
         || c.previous_sha256.is_none() != (c.slot == 0)
         || (c.stage == Stage::Reload) != c.store_sha256.is_some()
         || !matches!(

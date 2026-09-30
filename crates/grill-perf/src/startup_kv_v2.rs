@@ -692,6 +692,7 @@ impl<'a> Operation<'a> {
     }
 }
 
+#[expect(clippy::too_many_lines, reason = "predates the function-length limit")]
 fn transfers(
     caches: &[Journal],
     roster: &registration::RegistryRoster,

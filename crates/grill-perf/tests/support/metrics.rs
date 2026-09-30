@@ -1,5 +1,4 @@
 use super::*;
-use sha2::{Digest, Sha256};
 
 const DRAFT: &str = "vllm:spec_decode_num_draft_tokens_total";
 const ACCEPTED: &str = "vllm:spec_decode_num_accepted_tokens_total";
@@ -151,12 +150,6 @@ fn padded() -> Vec<u8> {
         body.push(b'\n');
     }
     body
-}
-fn digest(bytes: &[u8]) -> String {
-    Sha256::digest(bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
 }
 fn rewrite_receipt(root: &Path, edit: impl FnOnce(&mut Value)) {
     let dir = root.join("wave-000000");
@@ -689,6 +682,7 @@ fn metrics_interrupt_retains_settled_wave_and_refuses_continuation() {
     .unwrap();
     let release = releases.recv_timeout(Duration::from_secs(30)).unwrap();
     assert_eq!(
+        // SAFETY: kill takes plain integers; the unreaped child keeps its PID reserved.
         unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGINT) },
         0
     );

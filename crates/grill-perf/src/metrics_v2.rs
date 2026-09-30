@@ -1068,6 +1068,7 @@ pub struct Views {
     pub excluded: Vec<Excluded>,
 }
 
+#[expect(clippy::too_many_lines, reason = "predates the function-length limit")]
 pub fn derive(before: &[Series], after: &[Series], complete: bool) -> Views {
     let full = slices(before, after, &[]);
     let base_map = slices(before, after, &["source", "position"]);
@@ -1311,6 +1312,7 @@ struct Row {
 /// whole capture (including between-wave boundaries and every required
 /// snapshot). A nondecreasing pair is not continuity: counters additionally
 /// need their exporter epoch unchanged across every observation.
+#[expect(clippy::too_many_lines, reason = "predates the function-length limit")]
 pub fn acquisition(waves: &[super::WaveReport]) -> Option<Acquisition> {
     let mut snapshots: Vec<&Snapshot> = Vec::new();
     let mut lists: Vec<&Vec<Series>> = Vec::new();

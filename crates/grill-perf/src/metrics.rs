@@ -280,6 +280,13 @@ pub fn unix_ms() -> u64 {
         .map(|d| d.as_millis().min(u128::from(u64::MAX)) as u64)
         .unwrap_or(0)
 }
+/// Like `unix_ms`, but a pre-epoch or out-of-range clock is an error, not a clamp.
+pub fn unix_ms_checked() -> Result<u64> {
+    let elapsed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| "system clock precedes Unix epoch")?;
+    u64::try_from(elapsed.as_millis()).map_err(|_| "system clock exceeds timestamp range".into())
+}
 
 pub async fn scrape(
     client: &reqwest::Client,

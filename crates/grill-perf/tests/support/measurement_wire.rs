@@ -11,6 +11,7 @@ fn close(actual: Option<f64>, expected: Option<f64>) {
 }
 
 #[test]
+#[expect(clippy::too_many_lines, reason = "predates the function-length limit")]
 fn shared_arrival_traces_preserve_chunk_clocks_and_distinct_rate_arithmetic() {
     // Eight reported tokens give seven decode intervals. Text spans 0.02s;
     // ordinary settlement spans 0.05s, and terminal-tail settlement spans 0.09s.

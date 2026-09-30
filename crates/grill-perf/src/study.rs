@@ -1,7 +1,7 @@
-use crate::{evidence, model::*, run, selection, wire};
+use crate::{evidence, metrics, model::*, run, selection, wire};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 const WORKLOAD: &[u8] = include_bytes!("../examples/baseline-v1.json");
 const ACQUISITIONS: usize = 8;
@@ -401,6 +401,7 @@ fn selected_identity(capture_sha256: &str, timing: &[u8]) -> String {
     evidence::hex(&hash.finalize())
 }
 
+#[expect(clippy::too_many_lines, reason = "predates the function-length limit")]
 fn load(root: &Path) -> Result<Verified> {
     evidence::directory(root)?;
     let bytes = evidence::read(&root.join("capture.json"), FILE_CAP)?;
@@ -738,13 +739,6 @@ fn load(root: &Path) -> Result<Verified> {
     })
 }
 
-fn unix_ms() -> Result<u64> {
-    let duration = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| "system clock precedes Unix epoch")?;
-    u64::try_from(duration.as_millis()).map_err(|_| "system clock exceeds timestamp range".into())
-}
-
 fn collect(
     root: &Path,
     mut manifest: Capture,
@@ -784,7 +778,7 @@ fn collect(
             json: true,
         };
         let outcome = run::execute_bounded(&options, deadline);
-        let finished_unix_ms = unix_ms()?;
+        let finished_unix_ms = metrics::unix_ms_checked()?;
         match evidence::load(&options.out) {
             Ok(loaded) => {
                 let (status, median) = match inspect(&loaded, manifest.selection_sha256.is_some()) {
@@ -1360,6 +1354,7 @@ fn assess(report: &mut Report, before: &[f64], after: &[f64]) -> Result<()> {
     Ok(())
 }
 
+#[expect(clippy::too_many_lines, reason = "predates the function-length limit")]
 pub fn human(report: &Report) -> String {
     let label = if report.baseline_ready && report.selected.is_some() {
         "BASELINE READY - DESCRIPTIVE ONLY: observations collected; comparison not yet performed"

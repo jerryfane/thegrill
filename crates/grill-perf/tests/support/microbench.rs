@@ -1756,6 +1756,7 @@ fn e3_parity_tolerance_boundaries_and_tier_fallbacks() {
 
 #[cfg(target_os = "linux")]
 #[test]
+#[expect(clippy::too_many_lines, reason = "predates the function-length limit")]
 fn external_program_launch_pins_the_program_and_retains_failures() {
     let temp = Temp::new();
 
@@ -2046,8 +2047,8 @@ fn external_program_cancellation_cleans_only_owned_group() {
             thread::sleep(Duration::from_millis(2));
         }
         if !pid.exists() {
-            // The unreaped child still owns this PID; ask its normal cleanup
-            // path to settle before reporting a readiness failure.
+            // SAFETY: the unreaped child still owns this PID; ask its normal
+            // cleanup path to settle before reporting a readiness failure.
             unsafe { libc::kill(collector.id() as libc::pid_t, libc::SIGTERM) };
             let output = collector.wait_with_output().unwrap();
             panic!(
@@ -2057,8 +2058,8 @@ fn external_program_cancellation_cleans_only_owned_group() {
         }
         // A separately owned finite child is outside the collector's new group.
         let mut unrelated = Command::new("sleep").arg("30").spawn().unwrap();
-        // Collector has not been reaped, so its PID remains reserved.
         assert_eq!(
+            // SAFETY: the collector has not been reaped, so its PID remains reserved.
             unsafe { libc::kill(collector.id() as libc::pid_t, signal) },
             0
         );

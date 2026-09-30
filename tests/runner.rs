@@ -1094,6 +1094,7 @@ fn one_case(s: &Scratch, server: &Server, name: &str, extra: &[&str]) -> (PathBu
 }
 
 #[test]
+#[expect(clippy::too_many_lines, reason = "predates the function-length limit")]
 fn streaming_commitment_boundaries() {
     let s = Scratch::new();
     let done_then_surplus = b"data: [DONE]\r\n\r\nid: late\ndata: {\"choices\":[]}\n\n";

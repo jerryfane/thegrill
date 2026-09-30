@@ -363,6 +363,7 @@ fn retime(root: &Path, elapsed: [u64; 8], baseline: Option<(&str, u64)>) {
 }
 
 #[test]
+#[expect(clippy::too_many_lines, reason = "predates the function-length limit")]
 fn complete_workflow_replays_without_mutation_and_assesses_acquisition_not_wave_samples() {
     let temp = Temp::new();
     let server = Server::new(|stream, _, body| {
@@ -974,6 +975,7 @@ fn interruption_still_cancels_an_active_request_after_the_first_acquisition() {
         ready
             .recv_timeout(Duration::from_secs(30))
             .map_err(|e| e.to_string())?;
+        // SAFETY: kill takes plain integers; the unreaped child keeps its PID reserved.
         if unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGINT) } != 0 {
             return Err("cannot interrupt fixture collector".into());
         }

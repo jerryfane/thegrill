@@ -102,7 +102,7 @@ jobs:
                   ['git', 'rev-parse', 'HEAD'], text=True).strip() != source:
               raise SystemExit('Source must be the exact checked-out commit')
           roots = {'.editorconfig', '.gitattributes', '.github', '.gitignore', 'AGENTS.md', 'CONTRIBUTING.md',
-                   'Cargo.lock', 'Cargo.toml', 'LICENSE', 'NOTICE', 'README.md', 'SECURITY.md',
+                   'Cargo.lock', 'Cargo.toml', 'LICENSE', 'NOTICE', 'README.md', 'SECURITY.md', 'clippy.toml',
                    'assets', 'crates', 'docs', 'examples', 'licenses', 'src', 'tests', 'tools'}
           destination = Path(os.environ['RUNNER_TEMP']) / 'release-source'
           destination.mkdir()

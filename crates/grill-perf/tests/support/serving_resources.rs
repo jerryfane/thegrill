@@ -140,6 +140,7 @@ fn serving_resource_cancellation_drains_raw_samples_and_retains_missing_members(
     server.wait_for_request(&mut child);
     let release = receive.recv_timeout(Duration::from_secs(3)).unwrap();
     thread::sleep(Duration::from_millis(10));
+    // SAFETY: kill takes plain integers; the unreaped child keeps its PID reserved.
     assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGINT) }, 0);
     let output = child.wait_with_output().unwrap();
     release.send(()).unwrap();

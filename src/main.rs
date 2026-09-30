@@ -221,6 +221,7 @@ fn result_line(counts: &report::ResultCounts) -> String {
     text
 }
 
+#[expect(clippy::too_many_lines, reason = "predates the function-length limit")]
 fn execute(cli: Cli) -> Result<()> {
     match cli.command {
         Command::Pilot { seed, units } => json(&pilot::generate(seed, units)?),

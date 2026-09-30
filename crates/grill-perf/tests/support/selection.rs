@@ -139,6 +139,7 @@ fn assert_no_secret(root: &Path) {
 }
 
 #[test]
+#[expect(clippy::too_many_lines, reason = "predates the function-length limit")]
 fn selected_cli_inherits_pinned_workload_and_auth_outside_checkout_and_replays_offline() {
     let temp = Temp::new();
     let selection = selection_input(&temp, "concurrency-selection-v1.json");

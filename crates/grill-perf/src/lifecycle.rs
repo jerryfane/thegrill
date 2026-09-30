@@ -18,6 +18,7 @@ pub fn ownership(root: &Path) -> Result<File> {
         .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
         .open(root)
         .map_err(|e| format!("open run ownership: {e}"))?;
+    // SAFETY: flock only operates on the fd owned by `file`, which stays open.
     if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
         return Err(
             "run already has an active collector/resumer (or filesystem locking failed)".into(),
@@ -39,6 +40,7 @@ fn admission_file(session: &Path) -> Result<File> {
 
 pub fn admission(session: &Path) -> Result<File> {
     let file = admission_file(session)?;
+    // SAFETY: flock only operates on the fd owned by `file`, which stays open.
     if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
         return Err("cannot acquire wave admission lock".into());
     }
@@ -52,6 +54,7 @@ pub fn admission_bounded(session: &Path, deadline: Instant) -> Result<Option<Fil
         if now >= deadline {
             return Ok(None);
         }
+        // SAFETY: flock only operates on the fd owned by `file`, which stays open.
         if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
             return Ok((Instant::now() < deadline).then_some(file));
         }
@@ -99,6 +102,7 @@ pub fn exists(path: &Path) -> Result<bool> {
 }
 
 // Called by the ordinary offline evidence loader, not a competing verifier.
+#[expect(clippy::too_many_lines, reason = "predates the function-length limit")]
 pub fn history(
     root: &Path,
     plan: &Plan,

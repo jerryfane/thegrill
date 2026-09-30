@@ -272,6 +272,13 @@ fn run_declared(
 fn value(path: impl AsRef<Path>) -> Value {
     serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
 }
+fn digest(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
 fn wave(temp: &Temp, name: &str, index: usize) -> Value {
     value(temp.path(name).join(format!("wave-{index:06}/wave.json")))
 }
@@ -286,6 +293,7 @@ fn successful(output: &Output) {
 
 // Release one whole wave at a time, with bounded waits even if an assertion fails.
 #[test]
+#[expect(clippy::too_many_lines, reason = "predates the function-length limit")]
 fn pause_drains_wave_resume_is_exclusive_and_preserves_evidence() {
     let temp = Temp::new();
     let (ready, releases) = std::sync::mpsc::sync_channel(6);
@@ -609,6 +617,7 @@ fn pause_and_wave_admission_share_serialization() {
         server.wait_for_request(&mut child);
         let session = temp.path("run/session-000000");
         let gate = fs::File::open(&session).unwrap();
+        // SAFETY: flock only operates on the fd owned by `gate`, which stays open.
         assert_eq!(unsafe { libc::flock(gate.as_raw_fd(), libc::LOCK_EX) }, 0);
         let release = releases.recv_timeout(Duration::from_secs(3)).unwrap();
         if pause_writer {
@@ -1646,6 +1655,7 @@ fn cancellation_case(signal: i32) {
         releases.recv_timeout(Duration::from_secs(3)).unwrap(),
         releases.recv_timeout(Duration::from_secs(3)).unwrap(),
     ];
+    // SAFETY: kill takes plain integers; the unreaped child keeps its PID reserved.
     assert_eq!(unsafe { libc::kill(child.id() as i32, signal) }, 0);
     let output = child.wait_with_output().unwrap();
     for release in releases {

@@ -515,6 +515,7 @@ impl Exchange<'_> {
         }
     }
 
+    #[expect(clippy::too_many_lines, reason = "predates the function-length limit")]
     async fn collect(&mut self, request: reqwest::Request, sent: Instant) -> Settle {
         let acquired = tokio::select! {
             biased;

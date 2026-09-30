@@ -3,6 +3,7 @@ use std::cell::RefCell;
 
 const STEPS: usize = 13;
 
+#[expect(clippy::too_many_lines, reason = "predates the function-length limit")]
 fn fixture(fault: Option<(usize, &'static str)>) -> Server {
     let prefixes = RefCell::new(Vec::<(String, Vec<u8>)>::new());
     Server::new(move |mut stream, index, request| {
@@ -421,6 +422,7 @@ fn interrupted_sequence_retains_partial_response_without_followups_or_resume() {
         thread::sleep(Duration::from_millis(1));
     }
     assert!(started.load(Ordering::SeqCst));
+    // SAFETY: kill takes plain integers; the unreaped child keeps its PID reserved.
     assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGINT) }, 0);
     let output = child.wait_with_output().unwrap();
     assert_eq!(decoded(&output)["status"], "interrupted");

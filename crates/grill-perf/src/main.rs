@@ -132,6 +132,7 @@ fn print_json(value: &impl serde::Serialize) -> model::Result<()> {
     }
     writeln!(output).map_err(|e| e.to_string())
 }
+#[expect(clippy::too_many_lines, reason = "predates the function-length limit")]
 fn execute(cli: Cli) -> model::Result<u8> {
     match cli.command {
         Command::Resource { command } => resources::execute(command),

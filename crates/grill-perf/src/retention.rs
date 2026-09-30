@@ -89,7 +89,7 @@ impl Plan {
             || self.recovery.len() > 16
             || self.intended_pressure.trim().is_empty()
             || self.intended_pressure.len() > 1024
-            || !pin(&self.producer_sha256)
+            || !evidence::is_digest(&self.producer_sha256)
             || !(4096..=16 * 1024 * 1024).contains(&self.journal_bytes)
             || !(8..=10000).contains(&self.max_events)
             || !(1000..=3_600_000_000).contains(&self.max_window_us)
@@ -195,11 +195,6 @@ fn accounting_complete(a: &crate::metrics::v2::Acquisition, plan: &Plan, expecte
             .iter()
             .any(|c| c.labels == plan.metrics_labels && c.rule == rule && c.status == "consistent")
     })
-}
-fn pin(s: &str) -> bool {
-    s.len() == 64
-        && s.bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -408,13 +403,15 @@ fn events(raw: &[u8], plan: &Plan) -> Result<Vec<Event>> {
                 if cache_salt.is_empty()
                     || cache_salt.len() > 256
                     || keys.len() > 1024
-                    || keys.iter().any(|k| !pin(k))
+                    || keys.iter().any(|k| !evidence::is_digest(k))
                 {
                     return Err("invalid cache source identity".into());
                 }
             }
             Kind::Evict { keys }
-                if keys.is_empty() || keys.len() > 1024 || keys.iter().any(|k| !pin(k)) =>
+                if keys.is_empty()
+                    || keys.len() > 1024
+                    || keys.iter().any(|k| !evidence::is_digest(k)) =>
             {
                 return Err("invalid eviction keys".into());
             }
@@ -492,6 +489,7 @@ fn events(raw: &[u8], plan: &Plan) -> Result<Vec<Event>> {
     Ok(events)
 }
 
+#[expect(clippy::too_many_lines, reason = "predates the function-length limit")]
 pub fn report(
     root: &Path,
     index: usize,

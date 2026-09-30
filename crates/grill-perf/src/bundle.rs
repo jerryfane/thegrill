@@ -91,12 +91,6 @@ pub struct Verification {
     entries: Vec<VerifiedEntry>,
     recipes: Recipes,
 }
-pub(crate) fn sha256(value: &str) -> bool {
-    value.len() == 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-}
 pub(crate) fn root(manifest: &Path) -> Result<PathBuf> {
     let parent = manifest
         .parent()
@@ -143,7 +137,9 @@ pub fn verify(path: &Path) -> Result<Verification> {
         {
             return Err("entry filename must be the declared identity's leaf filename".into());
         }
-        if !sha256(&entry.source_sha256) || !sha256(&entry.workload_sha256) {
+        if !evidence::is_digest(&entry.source_sha256)
+            || !evidence::is_digest(&entry.workload_sha256)
+        {
             return Err("entry digests must be lowercase SHA256 hex".into());
         }
         let source = evidence::read(&root.join(&entry.file), FILE_CAP)?;
