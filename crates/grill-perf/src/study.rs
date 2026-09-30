@@ -1409,9 +1409,9 @@ pub fn human(report: &Report) -> String {
             selected.manifest.operation_scope,
             SELECTED_SCOPE
         ));
-        text.push_str(&format!("Elapsed through capture publication: baseline {}us; candidate {:?}us. Includes setup and publication, excludes this timing receipt and reports; OS/filesystem stalls have no hard wall-clock guarantee.\n",
+        text.push_str(&format!("Elapsed through capture publication: baseline {}us; candidate {}us. Includes setup and publication, excludes this timing receipt and reports; OS/filesystem stalls have no hard wall-clock guarantee.\n",
             selected.baseline_timing.elapsed_through_capture_publication_us,
-            selected.candidate_timing.as_ref().map(|t| t.elapsed_through_capture_publication_us)));
+            OrNull(selected.candidate_timing.as_ref().map(|t| t.elapsed_through_capture_publication_us))));
         for cell in &selected.cells {
             text.push_str(&format!(
                 "Cell {}: concurrency {}; warmup {}; measured trials {} per acquisition\n",
@@ -1427,14 +1427,14 @@ pub fn human(report: &Report) -> String {
                     acquisition.acquisition, acquisition.status, acquisition.summary.wave_preparation_us,
                     acquisition.summary.reservation_publication_us, acquisition.summary.wave_publication_us));
                 for cell in &acquisition.cells {
-                    text.push_str(&format!("  {}: {}/{} observed trials, {} eligible; makespan median {:?}us; aggregate achieved {:?} tokens/s; per-stream settlement decode {:?}, text-window decode {:?}, prefill {:?} tokens/s\n",
+                    text.push_str(&format!("  {}: {}/{} observed trials, {} eligible; makespan median {}us; aggregate achieved {} tokens/s; per-stream settlement decode {}, text-window decode {}, prefill {} tokens/s\n",
                         cell.cell, cell.observed_trials, cell.planned_trials, cell.eligible_trials,
-                        cell.median_wave_latency_us, cell.median_achieved_completion_tokens_per_second,
-                        cell.median_decode_tokens_per_second, cell.median_text_decode_tokens_per_second,
-                        cell.median_prefill_tokens_per_second));
+                        OrNull(cell.median_wave_latency_us), OrNull(cell.median_achieved_completion_tokens_per_second),
+                        OrNull(cell.median_decode_tokens_per_second), OrNull(cell.median_text_decode_tokens_per_second),
+                        OrNull(cell.median_prefill_tokens_per_second)));
                     if let Some(check) = &cell.sequence_check {
-                        text.push_str(&format!("    history {}; parent {:?}; semantic correct {}; strict match {:?}; canonical formatting {:?}; detail {:?}\n",
-                            check.history, check.parent, check.correct, check.strict_match, check.canonical_match, check.error));
+                        text.push_str(&format!("    history {}; parent {}; semantic correct {}; strict match {}; canonical formatting {}; detail {}\n",
+                            check.history, OrNull(check.parent.as_deref()), check.correct, OrNull(check.strict_match), OrNull(check.canonical_match), OrNull(check.error.as_deref())));
                     }
                 }
                 for wave in acquisition.waves.iter().flatten() {
@@ -1448,9 +1448,10 @@ pub fn human(report: &Report) -> String {
                     }) {
                         text.push_str(&format!("  {} {:?} trial {}: performance eligible {}; makespan {}us; dispatch spread {}us\n",
                             wave.spec.cell, wave.spec.phase, wave.spec.trial, wave.eligible, wave.elapsed_us, wave.dispatch_spread_us));
-                        text.push_str(&format!("    lane {}: {:?}; dispatched {}; first generated {:?}us; first answer {:?}us; terminal {:?}us; settlement {}us; errors {:?}\n",
-                            lane.lane, lane.status, lane.dispatched, lane.timing.first_generated_text_us,
-                            lane.timing.first_answer_text_us, lane.timing.terminal_us, lane.timing.settle_us, lane.eligibility_errors));
+                        text.push_str(&format!("    lane {}: {:?}; dispatched {}; first generated {}us; first answer {}us; terminal {}us; settlement {}us; errors {}\n",
+                            lane.lane, lane.status, lane.dispatched, OrNull(lane.timing.first_generated_text_us),
+                            OrNull(lane.timing.first_answer_text_us), OrNull(lane.timing.terminal_us), lane.timing.settle_us,
+                            if lane.eligibility_errors.is_empty() { "none".into() } else { lane.eligibility_errors.join("; ") }));
                     }
                 }
             }
@@ -1503,7 +1504,12 @@ pub fn human(report: &Report) -> String {
             text.push_str(UNCHANGED_SCOPE);
             text.push('\n');
         } else {
-            text.push_str(&format!("Selected declaration change: {change:?}\n"));
+            let name =
+                clap::ValueEnum::to_possible_value(&change).expect("every change is a CLI value");
+            text.push_str(&format!(
+                "Selected declaration change: {}\n",
+                name.get_name()
+            ));
         }
     }
     if let Some(observed) = report.observed_change_percent {

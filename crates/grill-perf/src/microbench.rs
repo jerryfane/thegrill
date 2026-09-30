@@ -63,7 +63,7 @@
 use crate::envelope::{self, Direction, EnvelopeDecision, EnvelopeReason, Rational};
 use crate::evidence;
 use crate::metrics;
-use crate::model::{FILE_CAP, Result};
+use crate::model::{FILE_CAP, OrNull, Result};
 use crate::policy::Outcome;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -3989,8 +3989,11 @@ pub fn human_decision(decision: &Decision) -> String {
         ("reference", &decision.roles.reference),
     ] {
         text.push_str(&format!(
-            "  {name}: revision {:?}, {}/{} complete, eligible {}\n",
-            group.revision, group.complete, group.declared, group.eligible
+            "  {name}: revision {}, {}/{} complete, eligible {}\n",
+            OrNull(group.revision.as_deref()),
+            group.complete,
+            group.declared,
+            group.eligible
         ));
         for view in &group.acquisitions {
             match view.statistic {

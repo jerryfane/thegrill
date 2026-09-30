@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::fmt;
 
 pub type Result<T, E = String> = std::result::Result<T, E>;
 pub const FILE_CAP: usize = 4 * 1024 * 1024;
@@ -6,6 +7,17 @@ pub const FRAME_CAP: usize = 256 * 1024;
 pub const REQUEST_CAP: usize = 2 * 1024 * 1024;
 pub const MAX_ATTEMPTS: u64 = 10_000;
 pub const METRIC_CONTRACT: &str = "generated-text-arrival-v2";
+
+/// Human-report rendering of an optional value: the value, or `null` like the JSON evidence.
+pub struct OrNull<T>(pub Option<T>);
+impl<T: fmt::Display> fmt::Display for OrNull<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.0 {
+            Some(value) => value.fmt(f),
+            None => f.write_str("null"),
+        }
+    }
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]

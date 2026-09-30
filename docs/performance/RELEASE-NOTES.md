@@ -12,6 +12,10 @@
 - Include each selected cell's median prefill rate in the human-readable
   baseline/check report alongside its achieved and decode rates. JSON evidence
   and comparison semantics are unchanged.
+- Human-readable selected reports, bundle inspection and microbench decisions
+  print absent values as `null` (matching the JSON) instead of Rust
+  `Some(...)`/`None`, lane eligibility errors as a `;`-separated list, and a
+  declared change by its `--change` name. JSON evidence is unchanged.
 
 ## Version 0.3.0 — experimental KV observation, runtime source contracts and shared tool declarations
 
