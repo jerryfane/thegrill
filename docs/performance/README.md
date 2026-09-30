@@ -200,6 +200,23 @@ Selection manifests use a separate closed schema, not the frozen four-entry
 | `scope` | nonblank control-free text, at most 256 bytes |
 | `operation_scope` | closed enum `normal`, `stress`, or `unknown` |
 
+To pin a custom workload, run `grill-perf preflight WORKLOAD --endpoint URL --model NAME`.
+It validates the workload offline, sends no request and prints both digests
+(`source_sha256` and `workload_sha256`); put them in a manifest beside the
+workload file:
+
+```json
+{
+  "version": 1,
+  "id": "my-decode-v1",
+  "workload": "my-decode-v1.json",
+  "source_sha256": "<source_sha256 from preflight>",
+  "workload_sha256": "<workload_sha256 from preflight>",
+  "scope": "Descriptive C1 decode on my coding prompts.",
+  "operation_scope": "normal"
+}
+```
+
 The manifest is bounded to 64 KiB and the workload to the existing native
 admission limits. There is no provider registry, model-name mapping or field
 stripping. Any natively validated bounded workload may be selected, including
