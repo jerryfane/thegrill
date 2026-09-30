@@ -14,6 +14,8 @@ use std::time::{Duration, Instant};
 
 #[path = "support/conversation.rs"]
 mod conversation;
+#[path = "support/deployment.rs"]
+mod deployment;
 #[path = "support/first_run.rs"]
 mod first_run;
 #[path = "support/selection.rs"]
@@ -117,7 +119,11 @@ impl Drop for Server {
     }
 }
 
-fn response(mut stream: TcpStream, tokens: Option<u64>, error: bool) {
+fn response(stream: TcpStream, tokens: Option<u64>, error: bool) {
+    respond(stream, tokens, error, 4);
+}
+
+fn respond(mut stream: TcpStream, tokens: Option<u64>, error: bool, prompt_tokens: u64) {
     let mut body =
         String::from("data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"1 2\"}}]}\n\n");
     if error {
@@ -129,8 +135,8 @@ fn response(mut stream: TcpStream, tokens: Option<u64>, error: bool) {
         if let Some(tokens) = tokens {
             body.push_str(&format!(
                 "data: {}\n\n",
-                json!({"choices":[],"usage":{
-                "prompt_tokens":4,"completion_tokens":tokens,"total_tokens":tokens+4}})
+                json!({"choices":[],"usage":{"prompt_tokens":prompt_tokens,
+                "completion_tokens":tokens,"total_tokens":tokens+prompt_tokens}})
             ));
         }
         body.push_str("data: [DONE]\n\n");
@@ -179,7 +185,7 @@ fn baseline(temp: &Temp, server: &Server, declaration: &Path, name: &str) -> Out
         .arg(declaration)
         .arg("--out")
         .arg(temp.path(name))
-        .args(["--local-http", "--json"])
+        .args(["--local-http", "--client-placement", "same-host", "--json"])
         .output()
         .unwrap()
 }
@@ -296,18 +302,27 @@ fn seal_native(root: &Path) -> String {
     plan_hash
 }
 
-fn repin_collector(root: &Path, collector: &str) {
+/// Edits the capture manifest and every native plan, then reseals the evidence links.
+fn rewrite(root: &Path, edit_capture: impl FnOnce(&mut Value), edit_plan: impl Fn(&mut Value)) {
     let mut capture = read_json(&root.join("capture.json"));
-    capture["collector_sha256"] = json!(collector);
+    edit_capture(&mut capture);
     for index in 0..8 {
         let path = root.join(format!("acquisition-{index:02}"));
         let mut plan = read_json(&path.join("plan.json"));
-        plan["collector_sha256"] = json!(collector);
+        edit_plan(&mut plan);
         write_json(&path.join("plan.json"), &plan);
         capture["acquisitions"][index]["plan_sha256"] = json!(seal_native(&path));
         capture["acquisitions"][index]["evidence_sha256"] = json!(native_hash(&path));
     }
     write_json(&root.join("capture.json"), &capture);
+}
+
+fn repin_collector(root: &Path, collector: &str) {
+    rewrite(
+        root,
+        |capture| capture["collector_sha256"] = json!(collector),
+        |plan| plan["collector_sha256"] = json!(collector),
+    );
 }
 
 fn copy_tree(source: &Path, target: &Path) {
@@ -914,7 +929,14 @@ fn whole_budget_stop_withholds_direction_and_does_not_dispatch_replacement() {
         .arg(&declaration)
         .arg("--out")
         .arg(temp.path("before"))
-        .args(["--local-http", "--seconds", "1", "--json"])
+        .args([
+            "--local-http",
+            "--client-placement",
+            "same-host",
+            "--seconds",
+            "1",
+            "--json",
+        ])
         .output()
         .unwrap();
     let report = decoded(&output);
@@ -961,6 +983,8 @@ fn interruption_still_cancels_an_active_request_after_the_first_acquisition() {
             "--model",
             "fixture-model",
             "--local-http",
+            "--client-placement",
+            "same-host",
             "--json",
         ])
         .arg("--deployment")

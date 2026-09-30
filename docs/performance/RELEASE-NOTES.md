@@ -16,6 +16,20 @@
   disabled, reported reasoning makes a lane ineligible. Add the `baseline-v2`
   and `portable-v1` workloads. Existing modes, controls and stored evidence
   keep their eligibility.
+- Add whole-deployment comparison. New baselines write capture v3, which records
+  the collector's version, source commit and build target, the required
+  `--client-placement same-host|network` and the built-in workload chosen with
+  `baseline --workload baseline-v1|baseline-v2|portable-v1` (default
+  `baseline-v1`). `check --change deployment` accepts another endpoint, model,
+  credential name and collector binary when the collector version and recorded
+  source commit match, and reports `PENDING` (exit 0). `compare A B --reference A2`
+  gives a verdict only when B differs in the same direction from the baseline and
+  from its unchanged control A2 captured after B; the report kind is
+  `performance-deployment-comparison-v1`. `--client-placement` is now required on
+  `baseline`. v1 and v2 captures load, check and compare unchanged, and cannot be
+  the baseline of a deployment comparison; re-capture. The completion-rate floor
+  now also covers `cap-reached` phases. See the
+  [contract](CONTRACT.md#capture-v3-and-deployment-comparison).
 - Add Apple Silicon macOS source support for portable `grill-perf` serving
   captures. Binary identity uses the native executable path while Unix evidence
   no-follow opens, directory synchronization and advisory locking retain their

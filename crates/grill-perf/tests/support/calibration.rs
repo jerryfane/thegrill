@@ -19,7 +19,7 @@ fn crosscheck_corpus() {
         "kind":"c1-assess-crosscheck-v1",
         "corpus_sha256":evidence::digest(&corpus),
         "study_sha256":evidence::digest(&std::fs::read(root.join("src/study.rs")).unwrap()),
-        "workload_sha256":evidence::digest(WORKLOAD),
+        "workload_sha256":evidence::digest(Builtin::BaselineV1.bytes()),
         "evaluator_sha256":evidence::binary_digest().unwrap()
     });
     serde_json::to_writer(&mut output, &header).unwrap();

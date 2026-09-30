@@ -18,26 +18,29 @@ fn fixture(selected: bool) -> (PathBuf, Capture) {
         local_http: true,
         auth_env: None,
         selection: None,
+        workload: Builtin::BaselineV1,
+        client_placement: Some(Placement::SameHost),
         seconds: 1,
         json: false,
     };
-    let workload = selection::workload(WORKLOAD).unwrap();
+    let source = Builtin::BaselineV1.bytes();
+    let workload = selection::workload(source).unwrap();
     let selection = serde_json::to_vec(&selection::Manifest {
         version: 1,
         id: "finalization-fixture".into(),
         workload: "workload.json".into(),
-        source_sha256: evidence::digest(WORKLOAD),
+        source_sha256: evidence::digest(source),
         workload_sha256: evidence::digest(&serde_json::to_vec(&workload).unwrap()),
         scope: "CPU finalization-boundary fixture".into(),
         operation_scope: selection::OperationScope::Unknown,
     })
     .unwrap();
-    let capture = manifest(&options, br#"{"model_revision":"fixture","runtime":"fixture","hardware":"cpu","settings":"fixture"}"#, "0".repeat(64), None, WORKLOAD, selected.then_some(selection.as_slice())).unwrap();
+    let capture = manifest(&options, 3, br#"{"model_revision":"fixture","runtime":"fixture","hardware":"cpu","settings":"fixture"}"#, "0".repeat(64), None, source, selected.then_some(selection.as_slice())).unwrap();
     (root, capture)
 }
 
 #[test]
-fn finalization_deadline_fault_preserves_v1_and_records_selected_overrun() {
+fn finalization_deadline_fault_preserves_builtin_and_records_selected_overrun() {
     let (legacy_root, legacy) = fixture(false);
     finalize_capture(&legacy_root, legacy, || Duration::from_secs(2)).unwrap();
     let legacy: Capture = serde_json::from_slice(
