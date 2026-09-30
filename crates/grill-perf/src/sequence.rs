@@ -545,6 +545,7 @@ impl State {
         Ok(encoded)
     }
 
+    #[expect(clippy::too_many_lines, reason = "predates the function-length limit")]
     pub fn observe(
         &mut self,
         plan: &Plan,

@@ -62,13 +62,14 @@
 
 use crate::envelope::{self, Direction, EnvelopeDecision, EnvelopeReason, Rational};
 use crate::evidence;
+use crate::metrics;
 use crate::model::{FILE_CAP, Result};
 use crate::policy::Outcome;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 #[cfg(target_os = "linux")]
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 pub const KIND: &str = "microbench-artifact-v1";
 pub const PLAN_KIND: &str = "microbench-plan-v1";
@@ -919,13 +920,6 @@ fn mean(values: &[Rational]) -> Option<Rational> {
     )
 }
 
-fn sha256(text: &str) -> bool {
-    text.len() == 64
-        && text
-            .bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-}
-
 fn identifier(text: &str) -> bool {
     !text.is_empty()
         && text.len() <= 256
@@ -936,13 +930,6 @@ fn identifier(text: &str) -> bool {
 
 fn printable(text: &str, max: usize) -> bool {
     !text.is_empty() && text.len() <= max && !text.chars().any(char::is_control)
-}
-
-fn unix_ms() -> Result<u64> {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .map_err(|e| format!("system clock before the Unix epoch: {e}"))
 }
 
 /// The single admitted cell per adapter. Pinning this in code, not only in a
@@ -1221,7 +1208,7 @@ fn observations_admitted(
             present(ObservationName::NcclVersion, &mut reasons);
             present(ObservationName::Device, &mut reasons);
             match value(ObservationName::Exl3ModuleSha256) {
-                Some(observed) if sha256(observed) => (),
+                Some(observed) if evidence::is_digest(observed) => (),
                 Some(_) => push(&mut reasons, Reason::ObservationDrift),
                 None => push(&mut reasons, Reason::ObservationMissing),
             }
@@ -1409,7 +1396,7 @@ pub fn check_plan(plan: &Plan) -> Vec<Reason> {
         push(&mut reasons, Reason::InvalidPlan);
         return reasons;
     }
-    if !sha256(&plan.revision) {
+    if !evidence::is_digest(&plan.revision) {
         push(&mut reasons, Reason::InvalidPlan);
     }
     if !identifier(&plan.acquisition.id) || plan.acquisition.started_unix_ms == 0 {
@@ -1443,7 +1430,10 @@ pub fn check_plan(plan: &Plan) -> Vec<Reason> {
         push(&mut reasons, Reason::InvalidBounds);
     }
     for source in &plan.sources {
-        if source.path.is_empty() || source.path.len() > 4096 || !sha256(&source.sha256) {
+        if source.path.is_empty()
+            || source.path.len() > 4096
+            || !evidence::is_digest(&source.sha256)
+        {
             push(&mut reasons, Reason::InvalidPlan);
         }
     }
@@ -1463,7 +1453,10 @@ pub fn check_plan(plan: &Plan) -> Vec<Reason> {
             }
         }
         AdapterId::Exl3E3Grouped => {
-            if !plan.program_sha256.as_deref().is_some_and(sha256)
+            if !plan
+                .program_sha256
+                .as_deref()
+                .is_some_and(evidence::is_digest)
                 || !plan
                     .sources
                     .iter()
@@ -1477,7 +1470,10 @@ pub fn check_plan(plan: &Plan) -> Vec<Reason> {
             }
         }
         AdapterId::NcclAllreduceSum => {
-            if !plan.program_sha256.as_deref().is_some_and(sha256)
+            if !plan
+                .program_sha256
+                .as_deref()
+                .is_some_and(evidence::is_digest)
                 || !plan
                     .sources
                     .iter()
@@ -1507,8 +1503,8 @@ pub fn check_study(study: &Study) -> Vec<Reason> {
         return reasons;
     }
     if study.started_unix_ms == 0
-        || !sha256(&study.revision_axis.baseline)
-        || !sha256(&study.revision_axis.candidate)
+        || !evidence::is_digest(&study.revision_axis.baseline)
+        || !evidence::is_digest(&study.revision_axis.candidate)
     {
         push(&mut reasons, Reason::InvalidStudy);
     }
@@ -1560,13 +1556,13 @@ fn check_artifact(plan: Option<&Plan>, artifact: &Artifact) -> Findings {
     if artifact.provenance == Provenance::Declared {
         findings.invalidate(Reason::InvalidArtifact);
     }
-    if !sha256(&artifact.revision)
+    if !evidence::is_digest(&artifact.revision)
         || !identifier(&artifact.acquisition.id)
         || artifact.acquisition.started_unix_ms == 0
         || artifact
             .program_sha256
             .as_deref()
-            .is_some_and(|hash| !sha256(hash))
+            .is_some_and(|hash| !evidence::is_digest(hash))
     {
         findings.invalidate(Reason::InvalidArtifact);
     }
@@ -1708,7 +1704,7 @@ fn check_artifact(plan: Option<&Plan>, artifact: &Artifact) -> Findings {
 fn check_sources(pinned: Option<&[Source]>, observed: &[Source], findings: &mut Findings) {
     let mut seen = std::collections::BTreeSet::new();
     for source in observed {
-        if !printable(&source.path, 4096) || !sha256(&source.sha256) {
+        if !printable(&source.path, 4096) || !evidence::is_digest(&source.sha256) {
             findings.invalidate(Reason::InvalidArtifact);
         }
         if !seen.insert(source.sha256.clone()) {
@@ -2213,7 +2209,9 @@ mod program_signals {
                 _lock: lock,
             };
             // Auto-reaping or a competing SIGCHLD handler can release the PID/PGID.
+            // SAFETY: sigaction is plain C data; all-zero is a valid value.
             let mut chld: libc::sigaction = unsafe { std::mem::zeroed() };
+            // SAFETY: a null new action only queries into the owned out-parameter.
             if unsafe { libc::sigaction(libc::SIGCHLD, std::ptr::null(), &mut chld) } != 0
                 || chld.sa_sigaction != libc::SIG_DFL
                 || chld.sa_flags & libc::SA_NOCLDWAIT != 0
@@ -2221,10 +2219,15 @@ mod program_signals {
                 return Err("external capture requires a waitable child leader".into());
             }
             for signal in [libc::SIGINT, libc::SIGTERM] {
+                // SAFETY: sigaction is plain C data; all-zero is a valid value.
                 let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
                 action.sa_sigaction = cancel as *const () as libc::sighandler_t;
+                // SAFETY: initializes the mask of the owned action.
                 unsafe { libc::sigemptyset(&mut action.sa_mask) };
+                // SAFETY: sigaction is plain C data; all-zero is a valid value.
                 let mut previous = unsafe { std::mem::zeroed() };
+                // SAFETY: `cancel` only performs an atomic store, so it is
+                // async-signal-safe; both pointers are live locals.
                 if unsafe { libc::sigaction(signal, &action, &mut previous) } != 0 {
                     return Err(format!(
                         "install capture signal handler: {}",
@@ -2240,6 +2243,7 @@ mod program_signals {
     impl Drop for Guard {
         fn drop(&mut self) {
             for (signal, previous) in self.previous.iter().rev() {
+                // SAFETY: restores the action saved when this signal was installed.
                 unsafe { libc::sigaction(*signal, previous, std::ptr::null_mut()) };
             }
         }
@@ -2249,7 +2253,9 @@ mod program_signals {
 #[cfg(target_os = "linux")]
 fn nonblocking(stream: &impl std::os::fd::AsRawFd) -> std::io::Result<()> {
     let fd = stream.as_raw_fd();
+    // SAFETY: fcntl only operates on the fd borrowed from `stream` for this call.
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    // SAFETY: as above; the new flags extend the flags just read.
     if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
         return Err(std::io::Error::last_os_error());
     }
@@ -2295,7 +2301,9 @@ fn drain(
 /// Observe exit without reaping: the owned leader reserves its PID and PGID.
 #[cfg(target_os = "linux")]
 fn leader_exited(pid: u32) -> std::io::Result<bool> {
+    // SAFETY: siginfo_t is plain C data; all-zero is a valid value.
     let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    // SAFETY: WNOWAIT observes without reaping; `info` is an owned out-parameter.
     let result = unsafe {
         libc::waitid(
             libc::P_PID,
@@ -2307,6 +2315,7 @@ fn leader_exited(pid: u32) -> std::io::Result<bool> {
     if result != 0 {
         return Err(std::io::Error::last_os_error());
     }
+    // SAFETY: waitid succeeded with WNOHANG, so si_pid is set (zero when no change).
     Ok(unsafe { info.si_pid() } != 0)
 }
 
@@ -2409,6 +2418,8 @@ fn run_program(
             if exited || run.failure.is_some() {
                 // This is the ONLY group signal. WNOWAIT above kept the leader
                 // unreaped even on normal exit; no try_wait occurs before it.
+                // SAFETY: kill takes plain integers; the unreaped leader keeps
+                // its PGID reserved, so the signal cannot reach a reused group.
                 if unsafe { libc::kill(-(pid as libc::pid_t), libc::SIGKILL) } != 0 {
                     run.fail(format!(
                         "owned group cleanup signal failed: {}",
@@ -2836,6 +2847,7 @@ impl ReceiptSeed {
     }
 }
 
+#[expect(clippy::too_many_lines, reason = "predates the function-length limit")]
 pub fn capture(options: &CaptureOptions) -> Result<CaptureReport> {
     let plan_bytes = evidence::read(&options.plan, FILE_CAP)?;
     let plan = parse_plan(&plan_bytes)?;
@@ -2848,7 +2860,7 @@ pub fn capture(options: &CaptureOptions) -> Result<CaptureReport> {
     }
     let collector_sha256 = evidence::binary_digest()?;
     let plan_sha256 = evidence::digest(&plan_bytes);
-    let started_unix_ms = unix_ms()?;
+    let started_unix_ms = metrics::unix_ms_checked()?;
     if plan.acquisition.started_unix_ms > started_unix_ms {
         return Err(
             "plan declares an acquisition start in the future; declare a plan before running it"
@@ -2940,7 +2952,7 @@ pub fn capture(options: &CaptureOptions) -> Result<CaptureReport> {
             plan_sha256: plan_sha256.clone(),
             collector_sha256: collector_sha256.clone(),
             started_unix_ms,
-            observation_unix_ms: unix_ms()?,
+            observation_unix_ms: metrics::unix_ms_checked()?,
             duration_ms: run.elapsed_ms,
         }
         .build();
@@ -2984,7 +2996,7 @@ pub fn capture(options: &CaptureOptions) -> Result<CaptureReport> {
             plan_sha256: plan_sha256.clone(),
             collector_sha256: collector_sha256.clone(),
             started_unix_ms,
-            observation_unix_ms: unix_ms()?,
+            observation_unix_ms: metrics::unix_ms_checked()?,
             duration_ms: 0,
         }
         .build();
@@ -3044,7 +3056,7 @@ pub fn import(options: &ImportOptions) -> Result<CaptureReport> {
     let artifact_bytes = evidence::read(&options.artifact, FILE_CAP)?;
     let mut artifact = parse_artifact(&artifact_bytes)?;
     let collector_sha256 = evidence::binary_digest()?;
-    let observation_unix_ms = unix_ms()?;
+    let observation_unix_ms = metrics::unix_ms_checked()?;
     if plan.acquisition.started_unix_ms > observation_unix_ms {
         return Err("plan declares an acquisition start in the future".into());
     }
@@ -3141,8 +3153,8 @@ fn check_program_output(
     let Some(output) = &receipt.program_output else {
         return Ok(None);
     };
-    if !sha256(&output.stdout_sha256)
-        || !sha256(&output.stderr_sha256)
+    if !evidence::is_digest(&output.stdout_sha256)
+        || !evidence::is_digest(&output.stderr_sha256)
         || output.stdout_bytes > OUTPUT_CAP as u64
         || output.stderr_bytes > STDERR_CAP as u64
         || receipt.provenance != Provenance::NativeObserved
@@ -3193,7 +3205,7 @@ fn load_dir(path: &Path) -> std::result::Result<Loaded, LoadError> {
                 || receipt.adapter != artifact.adapter
                 || receipt.provenance != artifact.provenance
                 || receipt.program_sha256 != artifact.program_sha256
-                || !sha256(&receipt.collector_sha256)
+                || !evidence::is_digest(&receipt.collector_sha256)
             {
                 findings.invalidate(Reason::IdentityDrift);
             }
@@ -3505,6 +3517,7 @@ fn pins_match(a: &Plan, b: &Plan) -> bool {
 
 /// Complete A/B/A2 group comparison. A missing, extra or unusable acquisition
 /// withholds the verdict; there is no survivor-only or one-per-role path.
+#[expect(clippy::too_many_lines, reason = "predates the function-length limit")]
 pub fn compare(options: &CompareOptions) -> Decision {
     let study_bytes = evidence::read(&options.study, FILE_CAP).ok();
     let study: Option<Study> = study_bytes

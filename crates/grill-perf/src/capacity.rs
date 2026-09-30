@@ -399,6 +399,7 @@ pub fn collect(options: &Options) -> Result<Report> {
     evidence::publish(&options.out, "capacity-report.json", &report)?;
     Ok(report)
 }
+#[expect(clippy::too_many_lines, reason = "predates the function-length limit")]
 pub fn inspect(root: &Path) -> Result<Report> {
     evidence::directory(root)?;
     let (plan, bytes) = load_plan(&root.join("capacity-plan.json"))?;

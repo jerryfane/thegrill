@@ -18,6 +18,12 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
 pub fn digest(bytes: &[u8]) -> String {
     hex(&Sha256::digest(bytes))
 }
+/// True for exactly the form `digest` produces: 64 lowercase hex digits.
+pub(crate) fn is_digest(s: &str) -> bool {
+    s.len() == 64
+        && s.bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
 pub fn read(path: &Path, cap: usize) -> Result<Vec<u8>> {
     let file = OpenOptions::new()
         .read(true)
@@ -217,6 +223,7 @@ impl From<&str> for LoadError {
         detail.to_owned().into()
     }
 }
+#[expect(clippy::too_many_lines, reason = "predates the function-length limit")]
 pub(crate) fn load_verified(root: &Path) -> Result<Loaded, LoadError> {
     directory(root)?;
     let plan_bytes = read(&root.join("plan.json"), 8 * 1024 * 1024)?;
@@ -665,6 +672,7 @@ fn range(values: &[f64]) -> Option<[f64; 2]> {
         [min.min(value), max.max(value)]
     }))
 }
+#[expect(clippy::too_many_lines, reason = "predates the function-length limit")]
 pub fn summarize(run: &Loaded) -> Vec<CellSummary> {
     let warmups_complete = run
         .plan
@@ -1006,6 +1014,7 @@ pub(crate) fn compatible(a: &Plan, b: &Plan) -> bool {
         && a.metrics == b.metrics
 }
 
+#[expect(clippy::too_many_lines, reason = "predates the function-length limit")]
 pub fn compare(a: &Path, b: &Path, reference: Option<&Path>) -> Result<Comparison> {
     let left = load(a)?;
     let right = load(b)?;

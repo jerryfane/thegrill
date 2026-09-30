@@ -863,6 +863,7 @@ pub struct CollectContext {
     pub first_generated: Option<tokio::sync::mpsc::Sender<crate::schedule::FirstGenerated>>,
     pub tool_expectation: Option<crate::sequence::ToolExpectation>,
 }
+#[expect(clippy::too_many_lines, reason = "predates the function-length limit")]
 pub async fn collect(
     client: reqwest::Client,
     request: reqwest::Request,

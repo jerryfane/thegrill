@@ -1,5 +1,5 @@
 //! New source-copy observation identity. Never upgrades historical captures.
-use super::{ProcessIdentity, Stage, Study, decode, hash, load};
+use super::{ProcessIdentity, Stage, Study, decode, load};
 use crate::{evidence, model::Result, policy::Outcome};
 use clap::Args;
 use serde::{Deserialize, Serialize};
@@ -472,6 +472,7 @@ fn extents_valid(extents: &[Extent], rank: usize, expected: &Expectation) -> boo
             && positions.insert((x.key.group, x.start))
     })
 }
+#[expect(clippy::too_many_lines, reason = "predates the function-length limit")]
 fn transfers(
     caches: &[Journal],
     before: &str,
@@ -719,13 +720,14 @@ pub struct Report {
     reasons: Vec<String>,
 }
 
+#[expect(clippy::too_many_lines, reason = "predates the function-length limit")]
 pub fn verify(args: &VerifyArgs) -> Result<Report> {
     let bytes = evidence::read(&args.expectation, 65536)?;
     let expected: Expectation = decode(&bytes)?;
     if expected.version != 1
         || expected.source != SOURCE
         || expected.scope != SCOPE
-        || !hash(&expected.producer_sha256)
+        || !evidence::is_digest(&expected.producer_sha256)
         || expected.model.is_empty()
         || expected.model.len() > 256
         || expected.salt.len() > 128

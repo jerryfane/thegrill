@@ -1,12 +1,5 @@
 use super::*;
-use sha2::{Digest, Sha256};
 
-fn digest(bytes: &[u8]) -> String {
-    Sha256::digest(bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
-}
 fn examples() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("examples")
 }

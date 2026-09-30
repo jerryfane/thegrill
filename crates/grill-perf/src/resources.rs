@@ -2,7 +2,7 @@
 //! Native observations are unauthenticated; imports never acquire native provenance.
 use crate::{
     envelope::{self, Rational},
-    evidence,
+    evidence, metrics,
     model::Result,
     policy::Outcome,
 };
@@ -314,11 +314,6 @@ fn number(s: &str) -> std::result::Result<u64, Failure> {
 }
 fn checked(n: Option<u64>) -> std::result::Result<u64, Failure> {
     n.ok_or(Failure::Overflow)
-}
-fn pin(s: &str) -> bool {
-    s.len() == 64
-        && s.bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 fn native_adapter(config: &ResourcesConfig) -> &'static str {
@@ -634,6 +629,7 @@ fn open_source(source: &Source) -> OpenSource {
         if unsafe { libc::fstatfs(directory.as_raw_fd(), filesystem.as_mut_ptr()) } != 0 {
             return Err(Failure::Io);
         }
+        // SAFETY: fstatfs returned 0, so it initialized the buffer.
         let filesystem = unsafe { filesystem.assume_init() };
         let expected = if matches!(source.target, Target::CgroupV2 { .. }) {
             0x63677270
@@ -675,6 +671,7 @@ fn read_source(open: &OpenSource, name: &str, cap: usize) -> Raw {
     // Names come only from expected_files, never from evidence-controlled paths.
     let filename = std::ffi::CString::new(if name == "stat_after" { "stat" } else { name })
         .expect("fixed filename");
+    // SAFETY: the directory fd is live and `filename` is NUL-terminated.
     let fd = unsafe {
         libc::openat(
             directory.as_raw_fd(),
@@ -686,6 +683,7 @@ fn read_source(open: &OpenSource, name: &str, cap: usize) -> Raw {
         raw.error = Some(io_failure(&std::io::Error::last_os_error()));
         return raw;
     }
+    // SAFETY: `fd` is a fresh descriptor from openat that nothing else owns.
     let file = unsafe { File::from_raw_fd(fd) };
     match file.metadata() {
         Ok(meta) if meta.is_file() => {}
@@ -896,9 +894,11 @@ pub fn host_clock(id: String) -> Result<Clock> {
     #[cfg(target_os = "linux")]
     {
         let mut resolution = std::mem::MaybeUninit::<libc::timespec>::uninit();
+        // SAFETY: clock_getres only writes into the owned timespec buffer.
         if unsafe { libc::clock_getres(libc::CLOCK_MONOTONIC, resolution.as_mut_ptr()) } != 0 {
             return Err("monotonic resolution unavailable".into());
         }
+        // SAFETY: clock_getres returned 0, so it initialized the buffer.
         let resolution = unsafe { resolution.assume_init() };
         let ns = u64::try_from(resolution.tv_sec)
             .ok()
@@ -947,7 +947,7 @@ pub fn validate_observation(observation: &Observation) -> Result<()> {
     if o.version != 1
         || o.kind != "resource-observation-v1"
         || !label(&o.adapter)
-        || !pin(&o.binary_sha256)
+        || !evidence::is_digest(&o.binary_sha256)
         || o.clk_tck == 0
         || o.clk_tck > 1_000_000_000
         || o.observer_started_us > o.observer_settled_us
@@ -1116,6 +1116,7 @@ fn source_supports(source: &Source, metric: Metric) -> bool {
         Target::Imported { .. } => true,
     }
 }
+#[expect(clippy::too_many_lines, reason = "predates the function-length limit")]
 fn summary_value(o: &Observation, gate: &Gate) -> std::result::Result<Rational, Failure> {
     if !gate_supported(gate) {
         return Err(Failure::UnsupportedMetric);
@@ -1341,8 +1342,8 @@ impl Study {
     pub fn validate(&self) -> Result<()> {
         if self.version != 1
             || !label(&self.id)
-            || !pin(&self.exposure_pin)
-            || !pin(&self.collector_sha256)
+            || !evidence::is_digest(&self.exposure_pin)
+            || !evidence::is_digest(&self.collector_sha256)
             || !label(&self.candidate_change)
             || self.duration_us == 0
             || self.duration_us > 3_600_000_000
@@ -1356,7 +1357,7 @@ impl Study {
         for (arm, role) in self.arms.iter().zip([Role::A, Role::B, Role::A2]) {
             arm.config.validate()?;
             if arm.role != role
-                || !pin(&arm.deployment_pin)
+                || !evidence::is_digest(&arm.deployment_pin)
                 || arm.warmup_ids.is_empty()
                 || arm.warmup_ids.len() > 20
                 || !(3..=1000).contains(&arm.measured_ids.len())
@@ -1502,7 +1503,7 @@ pub fn load(root: &Path) -> Result<Capture> {
 }
 fn validate_capture(capture: &Capture) -> Result<()> {
     if capture.version != 1
-        || !pin(&capture.study_sha256)
+        || !evidence::is_digest(&capture.study_sha256)
         || !label(&capture.acquisition_id)
         || capture.index >= 1000
         || capture.started_unix_ms > capture.settled_unix_ms
@@ -1521,12 +1522,6 @@ pub fn import(input: &Path, out: &Path) -> Result<Capture> {
     Ok(capture)
 }
 
-fn unix_ms() -> Result<u64> {
-    let elapsed = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| e.to_string())?;
-    u64::try_from(elapsed.as_millis()).map_err(|_| "resource provenance clock overflow".into())
-}
 pub fn capture(plan: &Path, role: Role, phase: Phase, index: u32, out: &Path) -> Result<Capture> {
     let plan_bytes = evidence::read(plan, PLAN_CAP)?;
     let study: Study = serde_json::from_slice(&plan_bytes).map_err(|e| e.to_string())?;
@@ -1550,7 +1545,7 @@ pub fn capture(plan: &Path, role: Role, phase: Phase, index: u32, out: &Path) ->
         .enable_all()
         .build()
         .map_err(|e| e.to_string())?;
-    let started_unix_ms = unix_ms()?;
+    let started_unix_ms = metrics::unix_ms_checked()?;
     let clock = host_clock(acquisition_id.clone())?;
     let origin = Instant::now();
     let mut observer = Observer::start(config.clone(), origin, clock.clone())?;
@@ -1595,7 +1590,7 @@ pub fn capture(plan: &Path, role: Role, phase: Phase, index: u32, out: &Path) ->
         phase,
         index,
         started_unix_ms,
-        settled_unix_ms: unix_ms()?,
+        settled_unix_ms: metrics::unix_ms_checked()?,
         observation,
     };
     publish_capture(out, &capture, None)?;
@@ -1632,6 +1627,7 @@ fn failure_outcome(failure: Failure) -> Outcome {
         Outcome::Inconclusive
     }
 }
+#[expect(clippy::too_many_lines, reason = "predates the function-length limit")]
 fn compare_inner(plan: &Path, groups: [&[PathBuf]; 3], result: &mut Decision) -> Result<()> {
     let (study, hash) = study(plan)?;
     result.gates = study

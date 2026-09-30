@@ -195,11 +195,7 @@ impl Reason {
         }
     }
 }
-fn sha(s: &str) -> bool {
-    s.len() == 64
-        && s.bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-}
+#[expect(clippy::too_many_lines, reason = "predates the function-length limit")]
 pub fn parse(
     bytes: &[u8],
     collector_sha256: &str,
@@ -220,8 +216,8 @@ pub fn parse(
         (policy.version, policy.method.as_str()),
         (1, "observed-envelope-v1") | (2, "observed-envelope-v2") | (3, "observed-envelope-v3")
     ) || !identifier(&policy.id)
-        || !sha(&policy.collector_sha256)
-        || !sha(&policy.workload_source_sha256)
+        || !evidence::is_digest(&policy.collector_sha256)
+        || !evidence::is_digest(&policy.workload_source_sha256)
         || !(3..=if policy.version == 3 { 1000 } else { 100 }).contains(&policy.min_trials)
     {
         return Err(Reason::InvalidPolicy);
@@ -669,6 +665,7 @@ fn add(reasons: &mut Vec<Reason>, reason: Reason) {
         reasons.push(reason);
     }
 }
+#[expect(clippy::too_many_lines, reason = "predates the function-length limit")]
 pub fn decide(a: &Path, b: &Path, reference: Option<&Path>) -> Decision {
     let mut result = Decision {
         version: 1,
@@ -698,7 +695,7 @@ pub fn decide(a: &Path, b: &Path, reference: Option<&Path>) -> Decision {
         }
     }
     let mut load = |path: Option<&Path>| match path.map(evidence::load_verified) {
-        Some(Ok(run)) if sha(&run.plan.collector_sha256) => Some(run),
+        Some(Ok(run)) if evidence::is_digest(&run.plan.collector_sha256) => Some(run),
         Some(Ok(_)) => {
             result.decision = Outcome::Error;
             add(&mut result.reason_codes, Reason::InvalidEvidence);

@@ -14,6 +14,7 @@ impl Drop for Temp {
 }
 
 #[test]
+#[expect(clippy::too_many_lines, reason = "predates the function-length limit")]
 fn bounded_capture_preserves_invalid_prefix_facts_but_not_missing_usage_guesses() {
     // Hashing is outside these synthetic request-deadline scenarios.
     evidence::binary_digest().unwrap();

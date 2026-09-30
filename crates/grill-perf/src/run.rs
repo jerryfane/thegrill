@@ -4,7 +4,7 @@ use std::io::Read;
 use std::path::PathBuf;
 use std::sync::LazyLock;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 use tokio::sync::watch;
 use tokio::task::JoinSet;
 
@@ -15,6 +15,7 @@ extern "C" fn latch(_: libc::c_int) {
 static LATCH_INSTALLATION: LazyLock<Result<()>> = LazyLock::new(|| {
     // Later acquisitions must not replace Tokio's process-wide chained handler.
     for signal in [libc::SIGINT, libc::SIGTERM] {
+        // SAFETY: `latch` only performs an atomic store, so it is async-signal-safe.
         if unsafe { libc::signal(signal, latch as *const () as libc::sighandler_t) }
             == libc::SIG_ERR
         {
@@ -28,12 +29,6 @@ fn install_latch() -> Result<()> {
 }
 fn interrupted() -> bool {
     INTERRUPTED.load(Ordering::SeqCst)
-}
-fn unix_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis().min(u128::from(u64::MAX)) as u64)
-        .unwrap_or(0)
 }
 #[derive(clap::Args)]
 pub struct CommonArgs {
@@ -203,6 +198,7 @@ pub fn execute_capacity_bounded(o: &Options, deadline: Instant) -> Result<Summar
     execute_inner(o, Some(deadline))
 }
 
+#[expect(clippy::too_many_lines, reason = "predates the function-length limit")]
 fn admit(o: &CommonArgs) -> Result<Admitted> {
     let source = evidence::read(&o.workload, FILE_CAP)?;
     let workload: Workload =
@@ -488,7 +484,7 @@ fn execute_inner(o: &Options, deadline: Option<Instant>) -> Result<Summary> {
         auth_env: o.common.auth_env.clone(),
         local_http: o.common.local_http,
         pool_max_idle_per_host: pool,
-        started_unix_ms: unix_ms(),
+        started_unix_ms: metrics::unix_ms(),
         cache_namespace,
         waves: admitted.waves,
         metrics: admitted.metrics,
@@ -551,6 +547,7 @@ pub fn resume(root: &std::path::Path, json: bool) -> Result<Summary> {
     )
 }
 
+#[expect(clippy::too_many_lines, reason = "predates the function-length limit")]
 fn collect(
     root: &std::path::Path,
     plan: &Plan,
@@ -571,7 +568,7 @@ fn collect(
             first_wave,
             plan_sha256: plan_hash.into(),
             collector_sha256: plan.collector_sha256.clone(),
-            started_unix_ms: unix_ms(),
+            started_unix_ms: metrics::unix_ms(),
         },
     )?;
     install_latch()?;

@@ -226,6 +226,7 @@ impl Workload {
                         .is_some_and(|r| r.profile != Profile::PortableChatV1)
                 })
     }
+    #[expect(clippy::too_many_lines, reason = "predates the function-length limit")]
     pub fn validate(&self) -> Result<()> {
         if !matches!(self.version, 1..=6) || !identifier(&self.name) {
             return Err("expected workload version 1 through 6 and a short ASCII name".into());

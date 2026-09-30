@@ -265,6 +265,7 @@ fn schedule4_cancel_settles_all_admitted_peers_before_publication() {
     ready.recv_timeout(Duration::from_secs(5)).unwrap();
     ready.recv_timeout(Duration::from_secs(5)).unwrap();
     assert!(!temp.path("run/wave-000000/wave.json").exists());
+    // SAFETY: kill takes plain integers; the unreaped child keeps its PID reserved.
     assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGTERM) }, 0);
     assert!(!child.wait_with_output().unwrap().status.success());
     let receipt = wave(&temp, "run", 0);

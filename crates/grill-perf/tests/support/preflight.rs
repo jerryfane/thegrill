@@ -3,17 +3,10 @@
 // listeners and asserts they stay untouched, so the capability is proven
 // network-free rather than merely assumed.
 use super::*;
-use sha2::{Digest, Sha256};
 
 const CREDENTIAL_ENV: &str = "GRILL_PREFLIGHT_TEST_KEY";
 const SENTINEL: &str = "preflight-sentinel-credential";
 
-fn digest(bytes: &[u8]) -> String {
-    Sha256::digest(bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
-}
 fn save(path: impl AsRef<Path>, value: &Value) {
     fs::write(path, serde_json::to_vec(value).unwrap()).unwrap();
 }

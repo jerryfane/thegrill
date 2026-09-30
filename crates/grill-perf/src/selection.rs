@@ -56,7 +56,9 @@ pub fn parse(bytes: &[u8], source: &[u8]) -> Result<Manifest> {
     {
         return Err("selection workload must be a leaf filename beside the manifest".into());
     }
-    if !bundle::sha256(&manifest.source_sha256) || !bundle::sha256(&manifest.workload_sha256) {
+    if !evidence::is_digest(&manifest.source_sha256)
+        || !evidence::is_digest(&manifest.workload_sha256)
+    {
         return Err("selection digests must be lowercase SHA256 hex".into());
     }
     if evidence::digest(source) != manifest.source_sha256 {

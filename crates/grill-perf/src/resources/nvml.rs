@@ -220,20 +220,21 @@ impl Library {
         if handle.is_null() {
             return Err(LoadFailure::LibraryUnavailable);
         }
+        // SAFETY: `handle` is the live dlopen result; the name is a NUL-terminated constant.
         let shutdown = unsafe { libc::dlsym(handle, Api::Shutdown.symbol().as_ptr()) };
         if shutdown.is_null() {
+            // SAFETY: closes the handle opened above exactly once; it is never stored.
             unsafe {
                 libc::dlclose(handle);
             }
             return Err(LoadFailure::ShutdownSymbolMissing);
         }
         // SAFETY: exact documented symbol and C function prototype; library stays live.
-        Ok(Self {
-            handle,
-            shutdown: unsafe { std::mem::transmute::<*mut c_void, Shutdown>(shutdown) },
-        })
+        let shutdown = unsafe { std::mem::transmute::<*mut c_void, Shutdown>(shutdown) };
+        Ok(Self { handle, shutdown })
     }
     fn symbol(&self, api: Api, trace: &mut Trace) -> Option<*mut c_void> {
+        // SAFETY: `handle` stays open until Drop; symbol names are NUL-terminated constants.
         let symbol = unsafe { libc::dlsym(self.handle, api.symbol().as_ptr()) };
         if symbol.is_null() {
             trace.calls.push(Call {
@@ -249,13 +250,16 @@ impl Library {
         let Some(symbol) = self.symbol(Api::Init, trace) else {
             return;
         };
+        // SAFETY: nvmlInitWithFlags matches the `Init` prototype (pinned nvml.h).
         let init = unsafe { std::mem::transmute::<*mut c_void, Init>(symbol) };
         // Lazy v2 initialization permits the selected UUID lookup; NO_ATTACH can
         // make a present device unresolvable. Never fall back to legacy nvmlInit.
+        // SAFETY: calls the resolved function with its documented integer argument.
         if !trace.push(Api::Init, unsafe { init(INIT_FLAGS) }, None) {
             return;
         }
         self.collect_initialized(uuid, memory, trace);
+        // SAFETY: balances the successful init above with the resolved nvmlShutdown.
         trace.push(Api::Shutdown, unsafe { (self.shutdown)() }, None);
     }
     fn collect_initialized(&self, uuid: &str, memory: bool, trace: &mut Trace) {
@@ -263,8 +267,10 @@ impl Library {
             let Some(symbol) = self.symbol(api, trace) else {
                 return;
             };
+            // SAFETY: both version getters match the `Text` prototype (pinned nvml.h).
             let get = unsafe { std::mem::transmute::<*mut c_void, Text>(symbol) };
             let mut bytes = vec![0u8; 80];
+            // SAFETY: the owned buffer outlives the call and its length is passed.
             let code = unsafe { get(bytes.as_mut_ptr().cast(), bytes.len() as c_uint) };
             if !trace.push(api, code, Some(Payload::Text(bytes))) {
                 return;
@@ -273,12 +279,14 @@ impl Library {
         let Some(symbol) = self.symbol(Api::Handle, trace) else {
             return;
         };
+        // SAFETY: nvmlDeviceGetHandleByUUID matches the `Handle` prototype (pinned nvml.h).
         let get = unsafe { std::mem::transmute::<*mut c_void, Handle>(symbol) };
         // Admission already requires a full ASCII UUID; no evidence-selected symbol/path.
         let Ok(uuid) = CString::new(uuid) else {
             return;
         };
         let mut device = std::ptr::null_mut();
+        // SAFETY: `uuid` is NUL-terminated and `device` is an owned out-parameter.
         let code = unsafe { get(uuid.as_ptr(), &mut device) };
         if !trace.push(Api::Handle, code, Some(Payload::Handle(!device.is_null())))
             || device.is_null()
@@ -293,15 +301,18 @@ impl Library {
             return;
         };
         let (code, payload) = if memory {
+            // SAFETY: nvmlDeviceGetMemoryInfo matches the `Memory` prototype (pinned nvml.h).
             let get = unsafe { std::mem::transmute::<*mut c_void, Memory>(symbol) };
             let mut value = MemoryInfo {
                 total: 0,
                 free: 0,
                 used: 0,
             };
+            // SAFETY: `device` came from a successful lookup; `value` is repr(C) and owned.
             let code = unsafe { get(device, &mut value) };
             (code, Payload::Memory(value))
         } else {
+            // SAFETY: nvmlDeviceGetFieldValues matches the `Power` prototype (pinned nvml.h).
             let get = unsafe { std::mem::transmute::<*mut c_void, Power>(symbol) };
             let mut field = FieldValue {
                 field_id: POWER_INSTANT,
@@ -312,9 +323,11 @@ impl Library {
                 code: -1,
                 value: NvmlValue { ull: 0 },
             };
+            // SAFETY: passes a count of 1 with one owned repr(C) field value.
             let code = unsafe { get(device, 1, &mut field) };
-            // Only read the active union member after BOTH return codes succeed.
             let value = if code == 0 && field.code == 0 {
+                // SAFETY: BOTH return codes succeeded, so `value_type` names the
+                // initialized union member; unknown types are never read.
                 unsafe {
                     match field.value_type {
                         0 => Some(Scalar::DoubleBits(field.value.d.to_bits())),
@@ -352,14 +365,17 @@ impl Library {
         let Some(symbol) = self.symbol(api, trace) else {
             return false;
         };
+        // SAFETY: nvmlDeviceGetUUID matches the `Uuid` prototype (pinned nvml.h).
         let get = unsafe { std::mem::transmute::<*mut c_void, Uuid>(symbol) };
         let mut bytes = vec![0u8; 96];
+        // SAFETY: the owned buffer outlives the call and its length is passed.
         let code = unsafe { get(device, bytes.as_mut_ptr().cast(), bytes.len() as c_uint) };
         trace.push(api, code, Some(Payload::Text(bytes)))
     }
 }
 impl Drop for Library {
     fn drop(&mut self) {
+        // SAFETY: Drop runs once for the handle this value owns.
         unsafe {
             libc::dlclose(self.handle);
         }
