@@ -197,7 +197,7 @@ fn selected_cli_inherits_pinned_workload_and_auth_outside_checkout_and_replays_o
         .as_f64()
         .unwrap();
     assert!(
-        human.contains(&format!("prefill Some({prefill}) tokens/s")),
+        human.contains(&format!("prefill Some({prefill:?}) tokens/s")),
         "{human}"
     );
     assert_eq!(
