@@ -119,11 +119,29 @@ fn capture_v3_records_collector_placement_and_builtin_while_v1_still_checks() {
     ));
     assert_eq!(server.count.load(Ordering::SeqCst), count);
 
-    assert!(
-        baseline(&temp, &server, &declaration, "current")
-            .status
-            .success()
-    );
+    // A v1 capture holds baseline-v1 bytes, so forge it from an explicit baseline-v1 capture.
+    let current = command()
+        .args([
+            "baseline",
+            "--endpoint",
+            &server.endpoint,
+            "--model",
+            "fixture",
+        ])
+        .args([
+            "--workload",
+            "baseline-v1",
+            "--client-placement",
+            "same-host",
+        ])
+        .arg("--deployment")
+        .arg(&declaration)
+        .arg("--out")
+        .arg(temp.path("current"))
+        .args(["--local-http", "--json"])
+        .output()
+        .unwrap();
+    assert!(current.status.success());
     copy_tree(&temp.path("current"), &temp.path("legacy"));
     as_v1(&temp.path("legacy"));
     let control = decoded(&check_none(&temp, "legacy", &declaration, "legacy-control"));
@@ -134,6 +152,21 @@ fn capture_v3_records_collector_placement_and_builtin_while_v1_still_checks() {
     assert_eq!(
         decoded(&compare_captures(&temp, "legacy", "legacy-control", None)),
         control
+    );
+
+    // Without --workload, a baseline captures baseline-v2, which turns thinking off for every template family.
+    assert!(
+        baseline(&temp, &server, &declaration, "default")
+            .status
+            .success()
+    );
+    assert_eq!(
+        read_json(&temp.path("default/capture.json"))["workload"],
+        "baseline-v2"
+    );
+    assert_eq!(
+        fs::read(temp.path("default/workload.json")).unwrap(),
+        fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/baseline-v2.json")).unwrap()
     );
 }
 

@@ -547,7 +547,7 @@ they record `collector: {version, source_commit, target}` (the binary
 fingerprint stays in `collector_sha256`), the declared `client_placement`
 (`same-host` or `network`, from the required `baseline --client-placement`) and,
 without a selection, the built-in `workload` name (`baseline-v1`, `baseline-v2`
-or `portable-v1`, from `baseline --workload`, default `baseline-v1`). The
+or `portable-v1`, from `baseline --workload`, default `baseline-v2`). The
 loader verifies the retained workload bytes against that built-in and the
 collector version against every native plan; v1 captures hold `baseline-v1`.
 A `check` keeps its baseline's capture version, so v1 and v2 baselines check and
