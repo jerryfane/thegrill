@@ -18,6 +18,8 @@ mod conversation;
 mod deployment;
 #[path = "support/first_run.rs"]
 mod first_run;
+#[path = "support/output_captures.rs"]
+mod output_captures;
 #[path = "support/selection.rs"]
 mod selection;
 #[path = "support/tool_conversation.rs"]
@@ -120,12 +122,19 @@ impl Drop for Server {
 }
 
 fn response(stream: TcpStream, tokens: Option<u64>, error: bool) {
-    respond(stream, tokens, error, 4);
+    respond(stream, "1 2", tokens, error, 4);
 }
 
-fn respond(mut stream: TcpStream, tokens: Option<u64>, error: bool, prompt_tokens: u64) {
-    let mut body =
-        String::from("data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"1 2\"}}]}\n\n");
+fn respond(
+    mut stream: TcpStream,
+    content: &str,
+    tokens: Option<u64>,
+    error: bool,
+    prompt_tokens: u64,
+) {
+    let mut body = format!(
+        "data: {{\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\"{content}\"}}}}]}}\n\n"
+    );
     if error {
         body.push_str("data: {\"error\":{\"message\":\"synthetic failure\"}}\n\n");
     } else {

@@ -445,6 +445,15 @@ fn present(raw: Option<&RawValue>) -> bool {
     raw.is_some_and(|v| !matches!(v.get().trim(), "null" | "[]" | "\"\""))
 }
 #[derive(Default)]
+enum Retain {
+    #[default]
+    Nothing,
+    /// The answer a conversation carries into its next request, bounded like request text.
+    SequenceAnswer,
+    /// Both generated channels, bounded only by the retained response.
+    Channels,
+}
+#[derive(Default)]
 struct Semantic {
     allow_tools: bool,
     tool: Option<crate::sequence::ToolStream>,
@@ -453,7 +462,9 @@ struct Semantic {
     usage: Usage,
     content: bool,
     generated: bool,
-    answer: Option<String>,
+    retain: Retain,
+    answer: String,
+    reasoning: String,
 }
 impl Semantic {
     fn event(
@@ -575,15 +586,7 @@ impl Semantic {
             if stream && content && timing.first_answer_text_us.is_none() {
                 timing.first_answer_text_us = Some(observed);
             }
-            if let (Some(answer), Some(content)) = (&mut self.answer, delta.content.as_ref()) {
-                if answer.len() + content.len() > 64 * 1024 {
-                    return Err((
-                        Status::ResponseLimit,
-                        "sequence answer exceeds response bound",
-                    ));
-                }
-                answer.push_str(content);
-            }
+            self.retain_text(&delta)?;
             self.content |= content;
             self.generated |= generated;
         }
@@ -613,6 +616,39 @@ impl Semantic {
         }
         Ok(Flow::Continue)
     }
+    fn retain_text(
+        &mut self,
+        delta: &Delta<'_>,
+    ) -> std::result::Result<(), (Status, &'static str)> {
+        match self.retain {
+            Retain::Nothing => (),
+            Retain::SequenceAnswer => {
+                if let Some(content) = &delta.content {
+                    if self.answer.len() + content.len() > 64 * 1024 {
+                        return Err((
+                            Status::ResponseLimit,
+                            "sequence answer exceeds response bound",
+                        ));
+                    }
+                    self.answer.push_str(content);
+                }
+            }
+            Retain::Channels => {
+                self.answer
+                    .push_str(delta.content.as_deref().unwrap_or_default());
+                // One reasoning field per event, so text mirrored in both is not doubled.
+                self.reasoning.push_str(
+                    delta
+                        .reasoning
+                        .as_deref()
+                        .filter(|s| !s.is_empty())
+                        .or(delta.reasoning_content.as_deref())
+                        .unwrap_or_default(),
+                );
+            }
+        }
+        Ok(())
+    }
 }
 
 pub fn verify_complete(
@@ -622,7 +658,15 @@ pub fn verify_complete(
     arrival_contract: bool,
     profile: Profile,
 ) -> Result<()> {
-    complete_semantic(attempt, body, stream, arrival_contract, profile, false).map(|_| ())
+    complete_semantic(
+        attempt,
+        body,
+        stream,
+        arrival_contract,
+        profile,
+        Retain::Nothing,
+    )
+    .map(|_| ())
 }
 
 pub(crate) fn sequence_answer(
@@ -636,10 +680,28 @@ pub(crate) fn sequence_answer(
         true,
         arrival_contract,
         Profile::VllmConversationV2,
-        true,
-    )?
-    .answer
-    .ok_or_else(|| "sequence response lacks answer text".into())
+        Retain::SequenceAnswer,
+    )
+    .map(|semantic| semantic.answer)
+}
+
+/// Replays verified completion evidence into its (answer, reasoning) channel text.
+pub(crate) fn completion_text(
+    attempt: &Attempt,
+    body: &[u8],
+    stream: bool,
+    arrival_contract: bool,
+    profile: Profile,
+) -> Result<(String, String)> {
+    complete_semantic(
+        attempt,
+        body,
+        stream,
+        arrival_contract,
+        profile,
+        Retain::Channels,
+    )
+    .map(|semantic| (semantic.answer, semantic.reasoning))
 }
 
 fn complete_semantic(
@@ -648,11 +710,11 @@ fn complete_semantic(
     stream: bool,
     arrival_contract: bool,
     profile: Profile,
-    retain_answer: bool,
+    retain: Retain,
 ) -> Result<Semantic> {
     let mut semantic = Semantic {
         allow_tools: profile == Profile::VllmConversationV2,
-        answer: retain_answer.then(String::new),
+        retain,
         ..Semantic::default()
     };
     let mut timing = Timing::default();

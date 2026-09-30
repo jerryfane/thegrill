@@ -7,6 +7,7 @@ mod lifecycle;
 mod metrics;
 mod microbench;
 mod model;
+mod outputs;
 mod policy;
 mod resources;
 mod retention;
@@ -81,6 +82,13 @@ enum Command {
         candidate: PathBuf,
         #[arg(long)]
         reference: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Compare replayed completion text of measured lanes between two evidence sets of one greedy workload.
+    Outputs {
+        a: PathBuf,
+        b: PathBuf,
         #[arg(long)]
         json: bool,
     },
@@ -252,6 +260,15 @@ fn execute(cli: Cli) -> model::Result<u8> {
                 print_json(&decision)?;
             }
             Ok(decision.decision.exit())
+        }
+        Command::Outputs { a, b, json } => {
+            let report = outputs::compare(&a, &b)?;
+            if json {
+                print_json(&report)?;
+            } else {
+                print!("{}", outputs::human(&report));
+            }
+            Ok(report.exit())
         }
         Command::Compare {
             baseline,
