@@ -1,0 +1,18 @@
+# Pyflakes-level errors only (unused or undefined names, syntax errors).
+# Byte-pinned files are excluded: their exact bytes are plan or producer
+# identities, so fixing them would be a contract change, not a lint fix.
+extend-exclude = [
+    "calibrate-perf.py",
+    "calibrate-policy.py",
+    "kv-journal-v2.py",
+    "kv-lifetime-v2.py",
+    "kv-registration-hooks.py",
+    "kv-registration.py",
+    "kv-transfer-v2.py",
+    "microbench/exl3_e3_grouped.py",
+    "microbench/nccl_allreduce_sum.py",
+    "retention-journal.py",
+]
+
+[lint]
+select = ["E9", "F"]

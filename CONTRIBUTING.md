@@ -49,6 +49,22 @@ Recipe facts are explicit data, not a reason to add a provider wrapper.
 - Identify external code or data incorporated into a change and preserve any required notices.
 - Review staged files for credentials, sensitive inputs, and generated results before publishing.
 
+## Code standards
+
+Each change is the smallest complete one that solves its stated problem.
+
+- One purpose per pull request. Do not refactor, rename or reformat code the change does not need.
+- Search before adding a helper. Keep one implementation per concept; a second copy is a review defect. Deliberately versioned contract modules (for example `startup_kv_v2`) are the exception.
+- Add a trait, generic, module, flag or configuration field only when two real callers need it now.
+- Delete what a change replaces in the same pull request: no dead code, commented-out code, compatibility shims or TODOs.
+- Comments explain why or state an invariant, never what the next line does. Every `unsafe` block states its safety invariant in a `// SAFETY:` comment.
+- Keep functions under 150 lines. Existing longer functions carry `#[expect(clippy::too_many_lines)]`; remove it when shortening one and never add one.
+- Human-readable output prints values, not Rust `Debug` of options or strings; absent values print `null`, as in the JSON (`model::OrNull`).
+- Do no avoidable work, allocation or copying on capture and timing paths. A speed claim needs before/after measurements under stated conditions.
+- Documentation states each fact once and links to it rather than repeating it.
+
+CI enforces the mechanical part: clippy denies `dbg!`, `todo!`, `unimplemented!` and undocumented `unsafe` blocks and rejects new functions over 150 lines; `ruff` rejects unused or undefined names in `tools/`, excluding files whose bytes are pinned identities. The rest is review.
+
 ## Evaluation claims
 
 Distinguish task self-checks from independent validation, and submitted outputs from controlled model execution. Preserve failed and incomplete attempts in reports. State the task set, protocol, sampling assumptions, and uncertainty behind a comparison; a small pilot is not evidence of general capability.
