@@ -233,14 +233,15 @@ pub fn show(verification: &Verification) {
     println!("Verified offline bundle {}", verification.manifest_sha256);
     for entry in &verification.entries {
         println!(
-            "{}: source {}; workload {}; {} requests; {} output tokens ceiling; thinking {:?}; thinking_control {:?}",
+            "{}: source {}; workload {}; {} requests; {} output tokens ceiling; thinking {}; thinking_control {}",
             entry.name,
             entry.identity.source_sha256,
             entry.identity.workload_sha256,
             entry.budgets.total_requests,
             entry.budgets.total_output_token_ceiling,
-            entry.request.thinking,
-            entry.request.thinking_control,
+            OrNull(entry.request.thinking),
+            serde_json::to_string(&entry.request.thinking_control)
+                .expect("a thinking control always serializes"),
         );
     }
     println!("Declared controls only; no live qualification or cross-recipe equivalence.");

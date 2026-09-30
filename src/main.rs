@@ -458,12 +458,14 @@ fn execute(cli: Cli) -> Result<()> {
             ))?;
             for a in &inspection.attempts {
                 line(&format!(
-                    "  {:06} {} {:?}; grade={:?} stop={:?} metadata={:?}; {}",
+                    "  {:06} {} {:?}; grade={:?} stop={} metadata={:?}; {}",
                     a.attempt,
                     report::escape(a.case_id),
                     a.result,
                     a.outcome,
-                    a.stop,
+                    a.stop
+                        .as_ref()
+                        .map_or_else(|| "null".into(), |stop| format!("{stop:?}")),
                     a.metadata_source,
                     a.detail.map(report::escape).unwrap_or_default()
                 ))?;
