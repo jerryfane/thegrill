@@ -278,8 +278,8 @@ unstarted acquisition slots remain in `capture.json`, not replacement samples.
 
 Read each cell separately: planned/observed/eligible trial counts, first generated
 and first answer text, terminal/settlement latency, dispatch spread, whole-wave
-makespan, aggregate achieved throughput, per-stream settlement decode and
-text-window decode rates. These retain the [native boundaries](#interpret-the-result);
+makespan, aggregate achieved throughput, per-stream settlement decode,
+text-window decode and prefill rates. These retain the [native boundaries](#interpret-the-result);
 decode-only rates are not whole-wave throughput. Undefined metrics remain null.
 Sparse trial counts do not support production p95/p99 claims. Concurrent lanes
 share a wave and are not independent acquisitions; cells are never pooled.
