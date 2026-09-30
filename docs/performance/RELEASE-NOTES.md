@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Record the build's source commit in `grill-perf --version`:
+  `grill-perf <version> (source <commit>)`. Release staging sets it through
+  `GRILL_PERF_SOURCE_COMMIT` and checks the output; inside a git checkout that
+  value must equal a clean HEAD. Other builds record HEAD only when the compiled
+  inputs, including untracked files, match it, and otherwise print
+  `(source unrecorded)` with a build warning.
 - Add output mode `cap-reached`: it sends only `max_tokens` under either flat
   profile, and a lane is eligible only when the server reports completion
   tokens equal to the cap with finish reason `length`. Add thinking control

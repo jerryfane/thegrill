@@ -249,7 +249,8 @@ def main():
     runtime_lines = clean.stdout.strip().splitlines()
     require(runtime_lines == [TARGETS[options.target], "glibc 2.39"], "unexpected native runtime/libc baseline")
     version_result = installed.run(["--version"], network=False)
-    require(version_result.returncode == 0 and version_result.stdout.strip() == "grill-perf " + options.version,
+    require(version_result.returncode == 0 and version_result.stdout.strip()
+            == f"grill-perf {options.version} (source {receipt['source_commit']})",
             "installed binary version mismatch")
     require(installed.run(["--help"], network=False).returncode == 0, "installed help failed")
     require(installed.run(["bundle", "verify", "/opt/grill/workloads/recipes-v1.json", "--json"], network=False).returncode == 0,

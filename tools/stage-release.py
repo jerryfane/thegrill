@@ -250,11 +250,11 @@ def main():
         require(all(path.is_file() and not path.is_symlink() for path in files.values()),
                 "a required allowlisted release input is missing or not an ordinary file")
         source_hashes = {name: digest(path) for name, path in files.items()}
-        env["CARGO_TARGET_DIR"] = str(work / "target")
+        env.update(CARGO_TARGET_DIR=str(work / "target"), GRILL_PERF_SOURCE_COMMIT=args.source)
         subprocess.run(command, cwd=source, env=env, check=True)
         binary = work / "target" / args.target / "release" / "grill-perf"
-        require(run([str(binary), "--version"], work, env) == f"grill-perf {version}",
-                "built binary version disagrees with package version")
+        require(run([str(binary), "--version"], work, env) == f"grill-perf {version} (source {args.source})",
+                "built binary version disagrees with package version or source")
         require(digest(source / "Cargo.lock") == lock_hash, "build changed Cargo.lock")
         require(all(digest(path) == source_hashes[name] for name, path in files.items()),
                 "build changed a packaged source asset")
