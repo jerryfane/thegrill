@@ -48,10 +48,11 @@ pub enum Cache {
     ReportedPrefixHit,
 }
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "kebab-case")]
 pub enum OutputMode {
     Cap,
     Exact,
+    CapReached,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -116,10 +117,13 @@ impl RequestSettings {
                     .as_ref()
                     .is_some_and(|output| output.mode == OutputMode::Exact)
                 || r.cache != Cache::Observe
-                || r.thinking_control.is_some()
+                || matches!(
+                    r.thinking_control,
+                    Some(ThinkingControl::VllmEnableThinkingV1 { .. })
+                )
                 || r.thinking.is_some())
         {
-            return Err("exact output, required prefix evidence, and thinking controls need the explicit vllm-fixed-v1 request profile".into());
+            return Err("exact output, required prefix evidence, and vLLM thinking controls need the explicit vllm-fixed-v1 request profile".into());
         }
         if let Some(seed) = r.seed {
             seed.checked_add(100 * 64 + 63)
@@ -133,6 +137,8 @@ impl RequestSettings {
 pub enum ThinkingControl {
     #[serde(rename = "vllm-enable-thinking-v1")]
     VllmEnableThinkingV1 { enabled: bool },
+    #[serde(rename = "chat-template-thinking-v1")]
+    ChatTemplateThinkingV1 { enabled: bool },
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -831,10 +837,24 @@ pub fn eligibility(a: &Attempt, r: &RequestSettings, phase: Phase) -> Vec<String
         Some(n) if n > u64::from(r.output.tokens) => {
             errors.push("reported_output_exceeds_cap".into())
         }
-        Some(n) if r.output.mode == OutputMode::Exact && n != u64::from(r.output.tokens) => {
-            errors.push("reported_output_not_exact".into())
-        }
+        Some(n) if n != u64::from(r.output.tokens) => match r.output.mode {
+            OutputMode::Cap => (),
+            OutputMode::Exact => errors.push("reported_output_not_exact".into()),
+            OutputMode::CapReached => errors.push("reported_output_below_cap".into()),
+        },
         _ => (),
+    }
+    if r.output.mode == OutputMode::CapReached && a.finish_reason.as_deref() != Some("length") {
+        errors.push("cap_not_reported_as_length".into());
+    }
+    if r.thinking_control == Some(ThinkingControl::ChatTemplateThinkingV1 { enabled: false })
+        && (a.usage.reasoning_tokens.is_some_and(|n| n > 0)
+            || matches!(
+                a.timing.first_generated_channel,
+                Some(TextChannel::Reasoning | TextChannel::MixedEvent)
+            ))
+    {
+        errors.push("reasoning_reported_with_thinking_disabled".into());
     }
     if r.cache != Cache::Observe && !(r.cache == Cache::ReportedPrefixHit && phase == Phase::Warmup)
     {

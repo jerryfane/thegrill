@@ -227,6 +227,21 @@ fn preflight_accepts_workload_without_optional_run_inputs() {
 }
 
 #[test]
+fn verdict_workloads_pass_offline_preflight() {
+    let temp = Temp::new();
+    let model = Server::new(normal);
+    let examples = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
+    for name in ["baseline-v2.json", "portable-v1.json"] {
+        successful(
+            &preflight_command(&temp, &examples.join(name), &model.endpoint)
+                .output()
+                .unwrap(),
+        );
+    }
+    assert_eq!(model.count.load(Ordering::SeqCst), 0);
+}
+
+#[test]
 fn preflight_and_run_share_declaration_field_and_observed_byte_errors() {
     let temp = Temp::new();
     let model = Server::new(normal);

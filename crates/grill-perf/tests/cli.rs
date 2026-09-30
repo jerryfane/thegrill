@@ -918,6 +918,12 @@ fn thinking_control_rejects_conflicts_profiles_and_open_extensions_before_dispat
             json!({"kind":"vllm-enable-thinking-v1","enabled":false}),
         ),
         (
+            "agree-chat-template",
+            "vllm-fixed-v1",
+            json!(false),
+            json!({"kind":"chat-template-thinking-v1","enabled":false}),
+        ),
+        (
             "portable",
             "portable-chat-v1",
             Value::Null,
@@ -956,6 +962,114 @@ fn thinking_control_rejects_conflicts_profiles_and_open_extensions_before_dispat
         assert!(!temp.path(name).exists());
     }
     assert_eq!(server.count.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn cap_reached_is_eligible_only_at_the_cap_with_length() {
+    for (profile, tokens, finish, error) in [
+        ("portable-chat-v1", 8, "length", None),
+        ("vllm-fixed-v1", 8, "length", None),
+        (
+            "portable-chat-v1",
+            7,
+            "length",
+            Some("reported_output_below_cap"),
+        ),
+        (
+            "portable-chat-v1",
+            8,
+            "stop",
+            Some("cap_not_reported_as_length"),
+        ),
+    ] {
+        let temp = Temp::new();
+        let server = Server::new(move |mut s, _, _| {
+            header(&mut s, "text/event-stream");
+            frame(
+                &mut s,
+                json!({"choices":[{"index":0,"delta":{"content":"x"},"finish_reason":finish}]}),
+            );
+            frame(
+                &mut s,
+                json!({"choices":[],"usage":{"prompt_tokens":4,"completion_tokens":tokens}}),
+            );
+            s.write_all(b"data: [DONE]\n\n").unwrap();
+        });
+        let mut w = workload(1, 0, 1);
+        w["request"]["profile"] = json!(profile);
+        w["request"]["output"]["mode"] = json!("cap-reached");
+        let output = run(&temp, &server, "run", &w);
+        let body = server.seen.try_recv().unwrap();
+        assert_eq!(body["max_tokens"], 8);
+        assert!(body.get("min_tokens").is_none() && body.get("ignore_eos").is_none());
+        let errors = wave(&temp, "run", 0)["attempts"][0]["eligibility_errors"].clone();
+        match error {
+            None => {
+                successful(&output);
+                assert_eq!(errors, json!([]));
+                successful(
+                    &cli()
+                        .arg("compare")
+                        .arg(temp.path("run"))
+                        .arg(temp.path("run"))
+                        .output()
+                        .unwrap(),
+                );
+            }
+            Some(error) => {
+                assert_eq!(output.status.code(), Some(2));
+                assert_eq!(errors, json!([error]));
+            }
+        }
+    }
+}
+
+#[test]
+fn chat_template_thinking_sends_both_keys_and_disabled_rejects_reported_reasoning() {
+    let reasoning = || Some(json!({"reasoning_content":"r"}));
+    let mixed = || Some(json!({"content":"a","reasoning_content":"r"}));
+    for (enabled, first, reasoning_tokens, eligible) in [
+        (false, None, None, true),
+        (false, None, Some(0), true),
+        (false, None, Some(2), false),
+        (false, reasoning(), None, false),
+        (false, mixed(), None, false),
+        (true, reasoning(), Some(2), true),
+    ] {
+        let temp = Temp::new();
+        let server = Server::new(move |mut s, _, _| {
+            header(&mut s, "text/event-stream");
+            if let Some(delta) = &first {
+                frame(&mut s, json!({"choices":[{"index":0,"delta":delta}]}));
+            }
+            frame(
+                &mut s,
+                json!({"choices":[{"index":0,"delta":{"content":"x"},"finish_reason":"length"}]}),
+            );
+            let mut usage = json!({"prompt_tokens":4,"completion_tokens":8});
+            if let Some(n) = reasoning_tokens {
+                usage["completion_tokens_details"] = json!({"reasoning_tokens":n});
+            }
+            frame(&mut s, json!({"choices":[],"usage":usage}));
+            s.write_all(b"data: [DONE]\n\n").unwrap();
+        });
+        let mut w = workload(1, 0, 1);
+        w["request"]["thinking_control"] =
+            json!({"kind":"chat-template-thinking-v1","enabled":enabled});
+        let output = run(&temp, &server, "run", &w);
+        assert_eq!(
+            server.seen.try_recv().unwrap()["chat_template_kwargs"],
+            json!({"thinking":enabled,"enable_thinking":enabled})
+        );
+        let errors = wave(&temp, "run", 0)["attempts"][0]["eligibility_errors"].clone();
+        if eligible {
+            successful(&output);
+            assert_eq!(errors, json!([]));
+        } else {
+            assert_eq!(output.status.code(), Some(2));
+            assert_eq!(errors, json!(["reasoning_reported_with_thinking_disabled"]));
+        }
+    }
 }
 
 #[test]

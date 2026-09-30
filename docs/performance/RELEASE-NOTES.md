@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Add output mode `cap-reached`: it sends only `max_tokens` under either flat
+  profile, and a lane is eligible only when the server reports completion
+  tokens equal to the cap with finish reason `length`. Add thinking control
+  `chat-template-thinking-v1`, which sends `thinking` and `enable_thinking`
+  with the same value and is allowed on `portable-chat-v1`; with thinking
+  disabled, reported reasoning makes a lane ineligible. Add the `baseline-v2`
+  and `portable-v1` workloads. Existing modes, controls and stored evidence
+  keep their eligibility.
 - Add Apple Silicon macOS source support for portable `grill-perf` serving
   captures. Binary identity uses the native executable path while Unix evidence
   no-follow opens, directory synchronization and advisory locking retain their

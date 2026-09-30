@@ -14,8 +14,16 @@ struct StreamOptions {
 #[derive(Serialize)]
 #[serde(untagged)]
 enum ChatTemplateKwargs {
-    Legacy { thinking: bool },
-    EnableThinking { enable_thinking: bool },
+    Legacy {
+        thinking: bool,
+    },
+    EnableThinking {
+        enable_thinking: bool,
+    },
+    ChatTemplateThinking {
+        thinking: bool,
+        enable_thinking: bool,
+    },
 }
 #[derive(Serialize)]
 struct Body<'a> {
@@ -133,6 +141,12 @@ pub fn request_body(context: &BodyContext<'_>, wave: &WaveSpec, lane: u32) -> Re
             (Some(thinking), None) => Some(ChatTemplateKwargs::Legacy { thinking }),
             (None, Some(ThinkingControl::VllmEnableThinkingV1 { enabled })) => {
                 Some(ChatTemplateKwargs::EnableThinking {
+                    enable_thinking: enabled,
+                })
+            }
+            (None, Some(ThinkingControl::ChatTemplateThinkingV1 { enabled })) => {
+                Some(ChatTemplateKwargs::ChatTemplateThinking {
+                    thinking: enabled,
                     enable_thinking: enabled,
                 })
             }

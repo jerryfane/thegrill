@@ -971,6 +971,7 @@ pub(crate) fn irrevocable_invalid(attempt: &Attempt) -> bool {
                     | "provider_reported_prefix_cache_nonzero"
                     | "inconsistent_provider_cache_usage"
                     | "inconsistent_provider_reasoning_usage"
+                    | "reasoning_reported_with_thinking_disabled"
             )
         }
     })

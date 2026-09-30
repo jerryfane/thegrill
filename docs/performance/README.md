@@ -900,6 +900,19 @@ For a consenting vLLM-compatible server, use request profile `vllm-fixed-v1`.
 reported completion length. These extensions are never silently sent under
 `portable-chat-v1` or stripped and retried after an error.
 
+For any Chat Completions server, `output.mode: "cap-reached"` sends only
+`max_tokens` and accepts a lane only when the server reports exactly that many
+completion tokens with finish reason `length`. The
+`chat-template-thinking-v1` control sends both `thinking` and `enable_thinking`
+template keys; with thinking disabled, reported reasoning makes a lane
+ineligible ([contract](CONTRACT.md#workload-admission)).
+[`portable-v1`](../../crates/grill-perf/examples/portable-v1.json) combines both
+at C1 with greedy sampling on `portable-chat-v1`;
+[`baseline-v2`](../../crates/grill-perf/examples/baseline-v2.json) is
+`baseline-v1` with the new thinking control. Both count numbers, a synthetic
+and highly predictable prompt: they measure request throughput at C1 including
+prefill, and speculative decoding on either side dominates the result.
+
 Cache modes:
 
 | Mode | Meaning |
