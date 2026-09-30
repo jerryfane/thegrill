@@ -16,9 +16,11 @@ verified native runs in versioned capture manifests. Its capture-period
 assessment is not the captured observed-envelope policy below. Historical
 policies, gates and verdicts retain their meanings.
 
-Explicit [selected captures](README.md#explicit-selected-captures) use capture v2,
-pin their workload/control selection and include the final timing receipt in
-comparison identity. They do not inherit structured-C1 inference.
+Explicit [selected captures](README.md#explicit-selected-captures) pin their
+workload/control selection and include the final timing receipt in comparison
+identity. They do not inherit structured-C1 inference. New captures use
+[capture v3](#capture-v3-and-deployment-comparison); earlier built-in captures
+are v1 and earlier selected captures v2.
 [Conversation workload v2](CONVERSATIONS.md) adds bounded ordered case steps and
 the sole `vllm-conversation-v2` profile (streamed factual steps, nonstream tool
 steps); wave receipts remain v1 with an
@@ -136,7 +138,7 @@ Request/output ceilings are phase-weighted with checked arithmetic. Local
 admission bounds both active, distinct phase encodings, including exact-output
 extensions and reservation JSON escaping. Failure expectations use the failing
 wave's budget. Full-capture minimum output rates require every planned phase to
-be exact; a capped phase is not an exact-output obligation.
+fix its output count (`exact` or `cap-reached`); a capped phase has none.
 
 Cases may declare `fill: {unit, repeat}`. The unit is nonempty and at most 64
 bytes; repeat is 1..1,000,000. Such a case requires exactly one `{fill}` and at
@@ -537,6 +539,55 @@ retain the previous range method. Run, plan, reservation and wave receipt
 formats and legacy readers are unchanged. Exit status follows cell eligibility:
 supplied ineligible reference evidence cannot produce an eligible A/B exit;
 metric-specific absence or overlap alone does not change cell eligibility.
+
+## Capture v3 and deployment comparison
+
+New `baseline` captures are `performance-capture-v3`. Besides the v1/v2 fields
+they record `collector: {version, source_commit, target}` (the binary
+fingerprint stays in `collector_sha256`), the declared `client_placement`
+(`same-host` or `network`, from the required `baseline --client-placement`) and,
+without a selection, the built-in `workload` name (`baseline-v1`, `baseline-v2`
+or `portable-v1`, from `baseline --workload`, default `baseline-v1`). The
+loader verifies the retained workload bytes against that built-in and the
+collector version against every native plan; v1 captures hold `baseline-v1`.
+A `check` keeps its baseline's capture version, so v1 and v2 baselines check and
+compare as before. Older readers reject v3 captures and the `deployment` change.
+
+`check A --change deployment` records a candidate B served by another
+deployment. `--endpoint`, `--model`, `--auth-env`, `--local-http` (with
+`--endpoint`) and `--client-placement` (required here) are accepted only for this
+change; unset values are inherited from A. Before any request, A must be a v3
+capture of a built-in workload, the parsed declaration must differ in at least
+one field, the client placement must be equal, and the collector version and
+source commit must be equal and recorded (not `unrecorded`). Endpoint, model and
+binary fingerprint may differ and are recorded, not admitted on. Every other
+`--change` keeps requiring the baseline's binary. A complete deployment check
+reports `PENDING` (exit 0); it has no verdict on its own.
+
+`compare A B --reference A2` gives the verdict, where A2 is an unchanged control
+(`check A --change none`) of A captured after B. By recorded timestamps, B must
+start at least 60 s after A finished and A2 at least 60 s after B finished. With
+same-host placement on two client hosts this ordering relies on each client's
+clock. The unchanged C1 interval model is computed for A→B, A2→B and A→A2. The
+result is `IMPROVED` or `REGRESSED` only when A→B and A2→B are directional in the
+same direction; otherwise it is `INCONCLUSIVE` with the reason "candidate is not
+directional against both baseline capture periods". A directional A→A2 adds the
+reason "baseline deployment shifted between capture periods" without gating the
+result. Without A2 a deployment pair is `INCONCLUSIVE` without an interval; a
+reference with any other capture pair is `INVALID`.
+
+The report kind is `performance-deployment-comparison-v1`. Its top-level interval
+fields hold A→B; `deployment` holds each side's endpoint, model, declaration,
+collector identity, binary fingerprint, client placement and median reported
+`usage.prompt_tokens` over measured requests, the reference path and identity,
+and the A2→B (`candidate_against_reference`) and A→A2
+(`reference_against_baseline`) intervals. Differing prompt-token medians add a
+reason, because the servers then do different prefill work. The scope is a
+whole-deployment comparison of request throughput at C1 including prefill:
+hardware, runtime, model build, settings, endpoint and placement are confounded,
+so no single factor such as a quantization format is attributed; only the
+baseline deployment has a drift control; and the synthetic count prompt lets
+speculative decoding on either side dominate.
 
 ## Validation
 

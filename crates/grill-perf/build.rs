@@ -43,6 +43,10 @@ fn main() {
         },
     };
     println!("cargo:rustc-env=GRILL_PERF_SOURCE={source}");
+    println!(
+        "cargo:rustc-env=GRILL_PERF_TARGET={}",
+        env::var("TARGET").expect("cargo sets TARGET for build scripts")
+    );
 }
 
 fn unrecorded(reason: &str) -> String {

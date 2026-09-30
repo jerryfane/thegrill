@@ -46,7 +46,9 @@ The default is the short structured **C1** comparison. For explicitly selected,
 descriptive-only concurrent or conversation observations, use the same CLI with
 [packaged selection paths](docs/performance/INSTALL.md#optional-selections-and-failures).
 [Recipe embedding](docs/performance/RECIPES.md) supplies data, not a model-specific
-wrapper or registry.
+wrapper or registry. To compare two whole deployments, such as one model on a
+Mac and on an NVIDIA host, use the
+[A/B/A2 deployment comparison](docs/performance/INSTALL.md#compare-two-deployments-aba2).
 
 | Display label | Existing JSON `result` code | Meaning |
 |---|---|---|
@@ -54,6 +56,7 @@ wrapper or registry.
 | **MEASURED SLOWER** | `REGRESSED` | It supports lower measured throughput between these periods |
 | **COMPLETE - DESCRIPTIVE ONLY** | `DESCRIPTIVE` | An explicitly selected comparison completed successfully; no faster/slower, equivalence or no-regression verdict |
 | **INCONCLUSIVE** | `INCONCLUSIVE` | No direction is established, or evidence is insufficient; this does not mean equivalent performance |
+| **VERDICT PENDING** | `PENDING` | A deployment candidate is captured; its verdict needs the unchanged reference |
 | **INVALID** | `INVALID` | Response, identity or evidence checks failed; the report explains why and retains the available evidence |
 
 Baseline readiness is not a comparison verdict. Exit success is not a universal

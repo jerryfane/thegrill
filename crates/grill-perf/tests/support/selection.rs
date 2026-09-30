@@ -25,6 +25,8 @@ fn selected_baseline(
             "--model",
             "neutral-fixture",
             "--local-http",
+            "--client-placement",
+            "same-host",
             "--json",
         ])
         .arg("--deployment")
@@ -166,7 +168,7 @@ fn selected_cli_inherits_pinned_workload_and_auth_outside_checkout_and_replays_o
         baseline["selected"]["manifest"]["operation_scope"],
         "unknown"
     );
-    assert_eq!(read_json(&temp.path("before/capture.json"))["version"], 2);
+    assert_eq!(read_json(&temp.path("before/capture.json"))["version"], 3);
     let pinned = fs::read(temp.path("before/selection.json")).unwrap();
     fs::remove_file(selection).unwrap();
     fs::remove_file(temp.path("concurrency-v1.json")).unwrap();
@@ -372,6 +374,63 @@ fn portable_selection_pins_portable_body_and_remains_descriptive() {
     assert!(report["observed_change_percent"].is_null());
     assert!(report["model_based_interval_percent"].is_null());
     assert_eq!(server.count.load(Ordering::SeqCst), 64);
+}
+
+#[test]
+fn legacy_v2_selected_capture_still_checks_and_selections_admit_no_deployment_check() {
+    let temp = Temp::new();
+    let selection = selection_input(&temp, "portable-chat-selection-v1.json");
+    let declaration = deployment(&temp, "serving.json", "unchanged");
+    let changed = deployment(&temp, "changed.json", "changed");
+    let server = Server::new(|stream, _, _| response(stream, Some(64), false));
+    let before = selected_baseline(&temp, &server.endpoint, &declaration, &selection, "current")
+        .output()
+        .unwrap();
+    assert!(before.status.success(), "{}", decoded(&before));
+    let count = server.count.load(Ordering::SeqCst);
+    let deployment_check = command()
+        .arg("check")
+        .arg(temp.path("current"))
+        .arg("--deployment")
+        .arg(&changed)
+        .args(["--change", "deployment", "--client-placement", "same-host"])
+        .args(["--json", "--out"])
+        .arg(temp.path("deployment"))
+        .output()
+        .unwrap();
+    assert_eq!(decoded(&deployment_check)["result"], "INVALID");
+    assert_eq!(server.count.load(Ordering::SeqCst), count);
+
+    copy_tree(&temp.path("current"), &temp.path("legacy"));
+    let mut capture = read_json(&temp.path("legacy/capture.json"));
+    capture["version"] = json!(2);
+    capture["kind"] = json!("performance-capture-v2");
+    for field in ["collector", "client_placement"] {
+        capture.as_object_mut().unwrap().remove(field);
+    }
+    write_json(&temp.path("legacy/capture.json"), &capture);
+    let mut timing = read_json(&temp.path("legacy/capture-timing.json"));
+    timing["capture_sha256"] = json!(file_hash(&temp.path("legacy/capture.json")));
+    write_json(&temp.path("legacy/capture-timing.json"), &timing);
+    let check = command()
+        .arg("check")
+        .arg(temp.path("legacy"))
+        .arg("--deployment")
+        .arg(&declaration)
+        .args(["--change", "none", "--json", "--out"])
+        .arg(temp.path("legacy-control"))
+        .output()
+        .unwrap();
+    let report = decoded(&check);
+    assert_eq!(report["result"], "DESCRIPTIVE", "{report}");
+    assert_eq!(
+        read_json(&temp.path("legacy-control/capture.json"))["version"],
+        2
+    );
+    assert_eq!(
+        decoded(&compare(&temp.path("legacy"), &temp.path("legacy-control")))["result"],
+        "DESCRIPTIVE"
+    );
 }
 
 #[test]

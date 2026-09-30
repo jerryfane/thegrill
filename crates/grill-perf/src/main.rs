@@ -264,12 +264,7 @@ fn execute(cli: Cli) -> model::Result<u8> {
                 || reference.as_deref().is_some_and(study::is_capture)
                 || (!baseline.join("plan.json").exists() && !candidate.join("plan.json").exists())
             {
-                let mut report = study::compare(&baseline, &candidate);
-                if reference.is_some() {
-                    report.invalidate(
-                        "capture comparison does not accept a raw reference run".into(),
-                    );
-                }
+                let report = study::compare(&baseline, &candidate, reference.as_deref());
                 return show_study(&report, json);
             }
             let comparison = evidence::compare(&baseline, &candidate, reference.as_deref())?;

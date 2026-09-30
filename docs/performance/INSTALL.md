@@ -101,7 +101,9 @@ guessing them:
   fingerprint. These are operator declarations, not server attestation.
 
 Use HTTPS. A separately managed literal-loopback HTTP endpoint additionally needs
-`--local-http` on baseline; `localhost` is not a literal address.
+`--local-http` on baseline; `localhost` is not a literal address. Declare where
+the collector runs with `--client-placement`: `same-host` on the serving host,
+`network` when it reaches the server from another host.
 
 In a private working directory, create the output parent and existing declaration
 format from actual inputs. A changed fingerprint does not prove one internal knob changed.
@@ -130,7 +132,7 @@ it is not a prompt or proof that the backend supports those controls.
 
 ```sh
 "$GRILL_PERF" baseline --endpoint "${ENDPOINT:?full resource URL}" \
-  --model "${MODEL:?explicit model selector}" \
+  --model "${MODEL:?explicit model selector}" --client-placement same-host \
   --deployment serving-before.json --out results/before
 ```
 
@@ -168,6 +170,7 @@ A budget stop is not automatically a broken server; retain the partial evidence.
 | MEASURED SLOWER | `REGRESSED` / 2 | Lower measured default-C1 throughput in these periods |
 | COMPLETE - DESCRIPTIVE ONLY | `DESCRIPTIVE` / 0 | Selected observations complete; no performance verdict |
 | INCONCLUSIVE | `INCONCLUSIVE` / 2 | No direction established or coverage incomplete; not equivalence |
+| VERDICT PENDING | `PENDING` / 0 | Deployment candidate captured; run the A/B/A2 comparison below |
 | INVALID | `INVALID` / 1 | Invalid input, response or incompatible evidence |
 
 Baseline readiness is separate: ready exits 0, incomplete 2, invalid 1.
@@ -175,6 +178,40 @@ Neither exit 0 nor a direction establishes causality, useful effect or guarantee
 regression detection. `compare` replays offline without credentials/network and
 never rewrites saved evidence. Raw requests, responses and declarations stay
 private; share only a separately reviewed sanitized summary.
+
+## Compare two deployments (A/B/A2)
+
+To compare whole deployments, for example the same model on an Apple Silicon
+Mac and on an NVIDIA host, use the portable workload, which needs only a Chat
+Completions server that reports streaming usage. The result compares hardware,
+runtime, model build and settings together; see the
+[deployment comparison contract](CONTRACT.md#capture-v3-and-deployment-comparison).
+
+Both collectors must be built from the same clean git commit, so
+`"$GRILL_PERF" --version` prints the same `(source <commit>)` on each host;
+`unrecorded` is refused. There is no macOS release archive: on the Mac, build
+from a `git clone` checked out at that commit, as in
+[source fallback](#upgrade-rollback-and-source-fallback). Use the same
+`--client-placement` on both sides and at least 60 seconds between captures.
+
+```sh
+# A, on the Mac host (collector next to the server).
+"$GRILL_PERF" baseline --workload portable-v1 --client-placement same-host \
+  --endpoint "$MAC_ENDPOINT" --model "$MAC_MODEL" --local-http \
+  --deployment mac.json --out results/a
+# B: copy results/a to the NVIDIA host, then check it against that deployment.
+"$GRILL_PERF" check results/a --change deployment --client-placement same-host \
+  --endpoint "$NVIDIA_ENDPOINT" --model "$NVIDIA_MODEL" --local-http \
+  --deployment nvidia.json --out results/b
+# A2, back on the Mac, with the Mac deployment unchanged.
+"$GRILL_PERF" check results/a --change none --deployment mac.json --out results/a2
+# With all three directories on one host:
+"$GRILL_PERF" compare results/a results/b --reference results/a2
+```
+
+`check --change deployment` exits 0 with `VERDICT PENDING`; the verdict comes only
+from the three-way `compare`. Drop `--local-http` for an HTTPS endpoint. The
+declarations must differ in at least one field.
 
 ## Optional selections and failures
 

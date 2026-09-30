@@ -276,7 +276,7 @@ def main():
             def baseline_args(output):
                 arguments = ["baseline", "--endpoint", fixture.endpoint, "--model", name,
                              "--deployment", "/evidence/" + before_file, "--out", "/evidence/" + output,
-                             "--local-http", "--seconds", "60"]
+                             "--local-http", "--client-placement", "same-host", "--seconds", "60"]
                 if selection:
                     arguments += ["--selection", "/opt/grill/workloads/" + selection]
                 if token:

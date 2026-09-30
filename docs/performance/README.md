@@ -29,8 +29,10 @@ fingerprint cannot prove only one internal knob changed.
 The candidate inherits the verified baseline's endpoint, model selector, fixed
 workload and authentication-environment **name**. Pass `--auth-env NAME` to
 `baseline` when needed; the credential value is never saved. The same collector
-binary and measurement contract are required. Declarations are not independently
-read from or attested by the server.
+binary and measurement contract are required, except for a
+[deployment comparison](#deployment-comparison). Declarations are not
+independently read from or attested by the server. `baseline` records the
+declared `--client-placement` (`same-host` or `network`).
 
 ### Unchanged-deployment control
 
@@ -57,10 +59,29 @@ Directional labels describe sign, not practical significance: a small observed
 change is not automatically a useful upgrade.
 Matching declarations remain operator claims, not proof of unchanged server state.
 
+### Deployment comparison
+
+To compare two deployments as a whole, for example one model on an Apple Silicon
+Mac and on an NVIDIA host, follow the [A/B/A2 steps](INSTALL.md#compare-two-deployments-aba2):
+
+1. A: `baseline` on the first deployment, usually `--workload portable-v1`.
+2. B: `check A --change deployment` against the second deployment, with its own
+   `--endpoint`, `--model`, declaration and the same `--client-placement`. It
+   reports `VERDICT PENDING` (JSON `PENDING`, exit 0).
+3. A2: `check A --change none` on the unchanged first deployment, after B.
+4. `compare A B --reference A2` gives `MEASURED FASTER`/`SLOWER` only when B
+   differs in the same direction from both A and A2.
+
+Both collectors must be the same version built from the same recorded source
+commit; their binaries may differ. The [deployment comparison contract](CONTRACT.md#capture-v3-and-deployment-comparison)
+defines admission, the 60-second ordering, the verdict rule and what the
+whole-deployment scope does not support.
+
 ### Default scope and budget
 
-The versioned `baseline-v1.json` workload selects the existing structured count
-prompt at C1. It requests streaming, thinking off through the legacy
+The versioned `baseline-v1.json` workload, the default for `baseline --workload`,
+selects the existing structured count prompt at C1. It requests streaming,
+thinking off through the legacy
 `chat_template_kwargs.thinking` field, temperature zero, top_p one and **exactly
 400** output tokens using vLLM controls. A backend rejecting those controls is
 an error, not an invitation to retry with weaker controls. Generated text and
@@ -93,6 +114,7 @@ a valid use of the reported model interval.
 | `MEASURED SLOWER` | `REGRESSED` | The interval lies below zero: lower measured throughput in these periods |
 | `COMPLETE - DESCRIPTIVE ONLY` | `DESCRIPTIVE` | Explicit selection completed successfully; no default-C1 direction, equivalence or no-regression verdict |
 | `INCONCLUSIVE` | `INCONCLUSIVE` | No direction is established, variation cannot be estimated, or coverage is incomplete; this does not establish equivalence |
+| `VERDICT PENDING` | `PENDING` | A complete deployment candidate; the verdict needs the unchanged reference ([deployment comparison](#deployment-comparison)) |
 | `INVALID` | `INVALID` | Corrupt/incompatible evidence, unexplained declarations or an invalid response prevents assessment |
 
 This is a presentation mapping for the capture workflow, not a new verdict
@@ -153,7 +175,8 @@ Concurrent lanes/waves are never counted as independent statistical samples.
 For default C1 `check` and capture `compare`, exits are 0 for `IMPROVED`, 2 for `REGRESSED`
 or `INCONCLUSIVE`, and 1 for `INVALID`. Read the structured result rather than
 treating exit 2 as a particular verdict. Complete explicit selected comparisons
-instead return `DESCRIPTIVE`/exit 0, not a no-regression certificate.
+instead return `DESCRIPTIVE`/exit 0, not a no-regression certificate. A complete
+`check --change deployment` returns `PENDING`/exit 0.
 The advanced raw-run/policy commands below retain their distinct semantics.
 
 ## Explicit selected captures
@@ -186,25 +209,26 @@ requests. Offline validation detects declared incompatibilities, not whether a
 backend actually implements a control. Backend rejection is retained without
 retry or weaker fallback.
 
-Selected captures use `performance-capture-v2`; `selection_sha256` binds the
-exact retained `selection.json`, which pins raw and normalized workload digests.
+Selected captures (`performance-capture-v2`, and v3 with a selection) bind the
+exact retained `selection.json` through `selection_sha256`; it pins raw and
+normalized workload digests.
 Native acquisitions retain their own source, workload and collector identities.
 Any manifest byte change, scope change, control change, workload membership
 change or collector mismatch prevents comparison. Membership changes are
 prospective: approve a new selection and acquire a new baseline rather than
-removing an inconvenient cell after collection. The built-in default has no
-selection manifest and continues to write capture v1 with its original
-structured-C1 inference. Explicitly selecting even that C1 workload is a
+removing an inconvenient cell after collection. Built-in captures (v1, and v3
+naming a built-in) have no selection manifest and keep their structured-C1
+inference. Explicitly selecting even that C1 workload is a
 different descriptive identity and never enables the default inference.
 
-For v2, report fields `baseline_capture_sha256`/`candidate_capture_sha256` and
+For selected captures, report fields `baseline_capture_sha256`/`candidate_capture_sha256` and
 the candidate's `baseline_sha256` bind the capture **and** its timing receipt:
 SHA-256 of `grill-perf-selected-capture-v2` followed by a NUL byte, the lowercase
 raw `capture.json` SHA-256 hex, then the exact `capture-timing.json` bytes.
 `CaptureTiming.capture_sha256` itself remains the raw capture-file digest.
 Timing changes break an existing candidate link; impossible elapsed observations
-below retained native timing bounds are rejected. Default v1 identity remains the
-raw capture-file digest.
+below retained native timing bounds are rejected. Built-in capture identity
+remains the raw capture-file digest.
 
 ### Small concurrency ladder
 
@@ -911,7 +935,8 @@ at C1 with greedy sampling on `portable-chat-v1`;
 [`baseline-v2`](../../crates/grill-perf/examples/baseline-v2.json) is
 `baseline-v1` with the new thinking control. Both count numbers, a synthetic
 and highly predictable prompt: they measure request throughput at C1 including
-prefill, and speculative decoding on either side dominates the result.
+prefill, and speculative decoding on either side dominates the result. Select
+either with `baseline --workload`; the capture records the name.
 
 Cache modes:
 

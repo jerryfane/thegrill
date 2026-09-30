@@ -5,7 +5,7 @@ Use the normal capture workflow with the explicit selection:
 ```sh
 grill-perf baseline --selection /absolute/path/to/conversation-selection-v2.json \
   --endpoint "$ENDPOINT" --model "$MODEL" --deployment "$DECLARATION" \
-  --auth-env MODEL_API_TOKEN --out "$PRIVATE/baseline"
+  --auth-env MODEL_API_TOKEN --client-placement network --out "$PRIVATE/baseline"
 grill-perf check "$PRIVATE/baseline" --change none \
   --deployment "$DECLARATION" --out "$PRIVATE/control"
 grill-perf compare "$PRIVATE/baseline" "$PRIVATE/control" --json

@@ -201,6 +201,8 @@ fn conversation_replays_streamed_facts_eviction_and_recovery() {
             "--model",
             "fixture",
             "--local-http",
+            "--client-placement",
+            "same-host",
             "--json",
         ])
         .arg("--selection")

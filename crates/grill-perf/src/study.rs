@@ -3,10 +3,11 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-const WORKLOAD: &[u8] = include_bytes!("../examples/baseline-v1.json");
 const ACQUISITIONS: usize = 8;
 const CRITICAL: f64 = 2.364624251;
 const METRIC_CONTRACT: &str = "generated-text-arrival-v2";
+// Cross-host captures are ordered by each client's clock; the gap absorbs ordinary clock skew.
+const DEPLOYMENT_GAP_MS: u64 = 60_000;
 const ASSUMPTIONS: &str = "Model-based interval assumes stable, independent acquisition-level variation and an adequate log-scale mean model. Resetting a client does not prove independence. Positive autocorrelation can make the interval narrower than justified, increasing false directional conclusions. Sequential captures cannot remove time or carryover confounding; no causal attribution, equivalence, noninferiority, or guaranteed precision/power is established.";
 const SCOPE: &str = "One short synthetic structured C1/exact400 workload; not general concurrency, long-context, model quality, tail SLOs, or full serving qualification. Deployment values are operator declarations, not server attestation. A settings fingerprint cannot prove only one internal knob changed.";
 const UNAVAILABLE_SCOPE: &str =
@@ -15,6 +16,8 @@ const UNCHANGED_SCOPE: &str = "Unchanged-deployment control: any directional res
 const SELECTED_SCOPE: &str = "Explicit selected workload: descriptive per-cell/acquisition observations only. No pooled improvement, C1 inference, capacity, tail-SLO, equivalence or causal claim; concurrent lanes are correlated, not independent acquisitions.";
 const OVERHEAD_STOP: &str =
     "whole-capture time allowance exhausted during setup or publication overhead";
+const DEPLOYMENT_SCOPE: &str = "Whole-deployment comparison: request throughput at C1 including prefill. Hardware, runtime, model build, settings, endpoint and client placement are confounded; no single-factor attribution, such as to a quantization format, is supported. Only the baseline deployment has a drift control; the candidate deployment has none. With same-host placement on different hosts, capture order relies on each client's clock. The synthetic count prompt is highly predictable, so speculative decoding on either side dominates it.";
+const PENDING: &str = "Verdict pending: after this candidate, capture the unchanged reference with `check <baseline> --change none`, then run `compare <baseline> <candidate> --reference <reference>`.";
 
 #[derive(clap::Args)]
 pub struct BaselineOptions {
@@ -33,6 +36,12 @@ pub struct BaselineOptions {
     /// Pin an explicit bounded workload and descriptive scope; check inherits it.
     #[arg(long)]
     pub selection: Option<PathBuf>,
+    /// Built-in workload to capture; the capture records its name.
+    #[arg(long, value_enum, default_value_t = Builtin::BaselineV1, conflicts_with = "selection")]
+    pub workload: Builtin,
+    /// Where this client runs relative to the server; deployment comparisons require equal placement.
+    #[arg(long, value_enum, required = true)]
+    pub client_placement: Option<Placement>,
     /// Whole-capture ceiling, including warmups; per-request limits remain fixed.
     #[arg(long, default_value_t = 300, value_parser = clap::value_parser!(u64).range(1..=3600))]
     pub seconds: u64,
@@ -53,6 +62,64 @@ pub struct CheckOptions {
     pub seconds: u64,
     #[arg(long)]
     pub json: bool,
+    /// With --change deployment only, like --model, --auth-env and --local-http; unset ones
+    /// inherit the baseline's.
+    #[arg(long)]
+    pub endpoint: Option<String>,
+    #[arg(long)]
+    pub model: Option<String>,
+    #[arg(long)]
+    pub auth_env: Option<String>,
+    #[arg(long, requires = "endpoint")]
+    pub local_http: bool,
+    /// With --change deployment only, and required there; it must equal the baseline's.
+    #[arg(long, value_enum, required_if_eq("change", "deployment"))]
+    pub client_placement: Option<Placement>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize, clap::ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+pub enum Builtin {
+    BaselineV1,
+    BaselineV2,
+    PortableV1,
+}
+
+impl Builtin {
+    fn bytes(self) -> &'static [u8] {
+        match self {
+            Self::BaselineV1 => include_bytes!("../examples/baseline-v1.json"),
+            Self::BaselineV2 => include_bytes!("../examples/baseline-v2.json"),
+            Self::PortableV1 => include_bytes!("../examples/portable-v1.json"),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize, clap::ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+pub enum Placement {
+    /// The client runs on the serving host.
+    SameHost,
+    /// The client reaches the server over a network.
+    Network,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Collector {
+    pub version: String,
+    pub source_commit: String,
+    pub target: String,
+}
+
+impl Collector {
+    fn current() -> Self {
+        Self {
+            version: env!("CARGO_PKG_VERSION").into(),
+            source_commit: env!("GRILL_PERF_SOURCE").into(),
+            target: env!("GRILL_PERF_TARGET").into(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize, clap::ValueEnum)]
@@ -63,6 +130,7 @@ pub enum Change {
     Runtime,
     Hardware,
     Settings,
+    Deployment,
     #[serde(rename = "none")]
     #[value(name = "none")]
     Unchanged,
@@ -111,6 +179,12 @@ struct Capture {
     acquisitions: Vec<Acquisition>,
     #[serde(skip_serializing_if = "Option::is_none")]
     selection_sha256: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    collector: Option<Collector>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    client_placement: Option<Placement>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    workload: Option<Builtin>,
 }
 
 struct Verified {
@@ -122,6 +196,7 @@ struct Verified {
     first_failure: Option<Failure>,
     selected: Option<SelectedReport>,
     complete_acquisitions: usize,
+    median_prompt_tokens: Option<f64>,
 }
 
 #[derive(Clone, Serialize)]
@@ -160,7 +235,38 @@ pub enum Outcome {
     Regressed,
     Inconclusive,
     Descriptive,
+    /// A complete deployment candidate awaiting its unchanged reference.
+    Pending,
     Invalid,
+}
+
+#[derive(Serialize)]
+pub struct DeploymentSide {
+    pub endpoint: String,
+    pub model: String,
+    pub declaration: Deployment,
+    pub collector: Collector,
+    pub collector_sha256: String,
+    pub client_placement: Placement,
+    /// Prefill work differs when servers template the same prompt differently.
+    pub median_prompt_tokens: Option<f64>,
+}
+
+#[derive(Serialize)]
+pub struct Interval {
+    pub result: Outcome,
+    pub observed_change_percent: Option<f64>,
+    pub model_based_interval_percent: Option<[f64; 2]>,
+}
+
+#[derive(Serialize)]
+pub struct DeploymentReport {
+    pub baseline: DeploymentSide,
+    pub candidate: DeploymentSide,
+    pub reference_path: Option<PathBuf>,
+    pub reference_capture_sha256: Option<String>,
+    pub candidate_against_reference: Option<Interval>,
+    pub reference_against_baseline: Option<Interval>,
 }
 
 #[derive(Serialize)]
@@ -227,6 +333,8 @@ pub struct Report {
     pub scope: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub selected: Option<SelectedReport>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deployment: Option<DeploymentReport>,
 }
 
 impl Report {
@@ -263,24 +371,14 @@ impl Report {
             assumptions: ASSUMPTIONS,
             scope: UNAVAILABLE_SCOPE,
             selected: None,
+            deployment: None,
         }
-    }
-
-    pub fn invalidate(&mut self, reason: String) {
-        self.result = Outcome::Invalid;
-        self.baseline_ready = false;
-        self.observed_change_percent = None;
-        self.model_based_interval_percent = None;
-        self.model_based_confidence_level = None;
-        self.log_mean_difference = None;
-        self.heteroscedastic_standard_error = None;
-        self.reasons.push(reason);
     }
 
     pub fn exit(&self) -> u8 {
         match self.result {
             Outcome::Invalid => 1,
-            Outcome::Improved | Outcome::Descriptive => 0,
+            Outcome::Improved | Outcome::Descriptive | Outcome::Pending => 0,
             Outcome::Inconclusive if self.baseline_ready => 0,
             Outcome::Regressed | Outcome::Inconclusive => 2,
         }
@@ -307,6 +405,12 @@ fn declaration(bytes: &[u8]) -> Result<Deployment> {
 }
 
 fn declared_change(before: &Deployment, after: &Deployment, selected: Change) -> Result<()> {
+    if selected == Change::Deployment {
+        if before == after {
+            return Err("declaration mismatch: --change deployment requires at least one deployment field to differ".into());
+        }
+        return Ok(());
+    }
     for (field, a, b) in [
         (
             Change::ModelRevision,
@@ -409,14 +513,20 @@ fn load(root: &Path) -> Result<Verified> {
     let mut identity = capture_sha256.clone();
     let mut manifest: Capture =
         serde_json::from_slice(&bytes).map_err(|e| format!("invalid capture manifest: {e}"))?;
+    let v3 = manifest.version == 3;
     if !matches!(
         (
             manifest.version,
             manifest.kind.as_str(),
             manifest.selection_sha256.is_some()
         ),
-        (1, "performance-capture-v1", false) | (2, "performance-capture-v2", true)
-    ) || manifest.metric_contract != METRIC_CONTRACT
+        (1, "performance-capture-v1", false)
+            | (2, "performance-capture-v2", true)
+            | (3, "performance-capture-v3", _)
+    ) || v3 != manifest.collector.is_some()
+        || v3 != manifest.client_placement.is_some()
+        || manifest.workload.is_some() != (v3 && manifest.selection_sha256.is_none())
+        || manifest.metric_contract != METRIC_CONTRACT
         || manifest.acquisitions.len() != ACQUISITIONS
         || !(1..=3600).contains(&manifest.seconds)
         || manifest.baseline_sha256.is_some() != manifest.change.is_some()
@@ -458,8 +568,9 @@ fn load(root: &Path) -> Result<Verified> {
             candidate_timing: None,
         })
     } else {
-        if workload != WORKLOAD {
-            return Err("capture workload differs from the fixed baseline workload".into());
+        // Only v3 names its built-in; v1 always used baseline-v1.
+        if workload != manifest.workload.unwrap_or(Builtin::BaselineV1).bytes() {
+            return Err("capture workload differs from its built-in workload".into());
         }
         None
     };
@@ -482,6 +593,7 @@ fn load(root: &Path) -> Result<Verified> {
     let mut identities = std::collections::HashSet::new();
     let mut lineages = std::collections::HashSet::new();
     let mut previous_finish = None;
+    let mut prompt_tokens = Vec::new();
     let mut accounting = Accounting {
         dispatched_requests: 0,
         complete_requests: 0,
@@ -491,18 +603,19 @@ fn load(root: &Path) -> Result<Verified> {
         request_ceiling: manifest.request_ceiling,
         output_token_ceiling: manifest.output_token_ceiling,
         allowance_seconds: manifest.seconds,
+        // A known output count per request bounds the rate needed to finish in the allowance.
         minimum_full_capture_tokens_per_second: ((warmup == 0
             || admitted_workload
                 .request
                 .effective_output(Phase::Warmup)
                 .mode
-                == OutputMode::Exact)
+                != OutputMode::Cap)
             && (measured == 0
                 || admitted_workload
                     .request
                     .effective_output(Phase::Measured)
                     .mode
-                    == OutputMode::Exact))
+                    != OutputMode::Cap))
             .then_some(manifest.output_token_ceiling as f64 / manifest.seconds as f64),
     };
     for (index, acquisition) in manifest.acquisitions.iter().enumerate() {
@@ -545,6 +658,10 @@ fn load(root: &Path) -> Result<Verified> {
             || plan.version != 3
             || plan.metric_contract.as_deref() != Some(METRIC_CONTRACT)
             || plan.collector_sha256 != manifest.collector_sha256
+            || manifest
+                .collector
+                .as_ref()
+                .is_some_and(|c| c.version != plan.tool_version)
             || plan.source_sha256 != manifest.workload_sha256
             || plan.workload != admitted_workload
             || plan.deployment.as_ref() != Some(&deployment)
@@ -648,6 +765,16 @@ fn load(root: &Path) -> Result<Verified> {
                 }
             }
         }
+        prompt_tokens.extend(
+            loaded
+                .waves
+                .iter()
+                .flatten()
+                .filter(|wave| wave.spec.phase == Phase::Measured)
+                .flat_map(|wave| &wave.attempts)
+                .filter_map(|attempt| attempt.usage.prompt_tokens)
+                .map(|tokens| tokens as f64),
+        );
         let (status, median) = inspect(&loaded, selected.is_some())?;
         complete_acquisitions += usize::from(status == CaptureStatus::Complete);
         if median != acquisition.median_achieved_completion_tokens_per_second {
@@ -674,7 +801,7 @@ fn load(root: &Path) -> Result<Verified> {
     // A local publication/preparation error may occur before any native receipt exists.
     if manifest.status != observed_status
         && !(manifest.status == CaptureStatus::Invalid && manifest.stop_reason.is_some())
-        && !(manifest.version == 2
+        && !(manifest.selection_sha256.is_some()
             && manifest.status == CaptureStatus::Incomplete
             && manifest.stop_reason.as_deref() == Some(OVERHEAD_STOP))
     {
@@ -736,6 +863,7 @@ fn load(root: &Path) -> Result<Verified> {
         first_failure,
         selected,
         complete_acquisitions,
+        median_prompt_tokens: evidence::median(prompt_tokens),
     })
 }
 
@@ -859,6 +987,7 @@ fn finalize_capture(
 
 fn manifest(
     options: &BaselineOptions,
+    version: u32,
     deployment: &[u8],
     collector_sha256: String,
     link: Option<(String, Change)>,
@@ -872,13 +1001,8 @@ fn manifest(
     let workload = selection::workload(source)?;
     let (warmup, measured, tokens) = selection::budgets(&workload, ACQUISITIONS)?;
     Ok(Capture {
-        version: if selected.is_some() { 2 } else { 1 },
-        kind: if selected.is_some() {
-            "performance-capture-v2"
-        } else {
-            "performance-capture-v1"
-        }
-        .into(),
+        version,
+        kind: format!("performance-capture-v{version}"),
         metric_contract: METRIC_CONTRACT.into(),
         collector_sha256,
         workload_sha256: evidence::digest(source),
@@ -895,6 +1019,9 @@ fn manifest(
         status: CaptureStatus::Complete,
         stop_reason: None,
         selection_sha256: selected.map(evidence::digest),
+        collector: (version == 3).then(Collector::current),
+        client_placement: options.client_placement.filter(|_| version == 3),
+        workload: (version == 3 && selected.is_none()).then_some(options.workload),
         acquisitions: (0..ACQUISITIONS)
             .map(|index| Acquisition {
                 directory: directory(index),
@@ -1009,7 +1136,9 @@ pub fn baseline(options: &BaselineOptions) -> Result<Report> {
             .as_deref()
             .map(selection::load)
             .transpose()?;
-        let source = selected.as_ref().map_or(WORKLOAD, |s| s.source.as_slice());
+        let source = selected
+            .as_ref()
+            .map_or(options.workload.bytes(), |s| s.source.as_slice());
         let selection_bytes = selected.as_ref().map(|s| s.bytes.as_slice());
         let default_workload;
         let workload = if let Some(selected) = &selected {
@@ -1021,6 +1150,7 @@ pub fn baseline(options: &BaselineOptions) -> Result<Report> {
         preflight(options, workload, selected.as_ref().map(|s| &s.manifest))?;
         let capture = manifest(
             options,
+            3,
             &deployment,
             evidence::binary_digest()?,
             None,
@@ -1064,6 +1194,15 @@ pub fn baseline(options: &BaselineOptions) -> Result<Report> {
 
 pub fn check(options: &CheckOptions) -> Result<Report> {
     let deadline = Instant::now() + Duration::from_secs(options.seconds);
+    let deployment_check = options.change == Change::Deployment;
+    if !deployment_check
+        && (options.endpoint.is_some()
+            || options.model.is_some()
+            || options.auth_env.is_some()
+            || options.client_placement.is_some())
+    {
+        return Err("--endpoint, --model, --auth-env, --local-http and --client-placement apply only to --change deployment; other checks inherit them from the baseline".into());
+    }
     if let Ok(baseline) = std::fs::canonicalize(&options.baseline) {
         let parent = options
             .out
@@ -1109,7 +1248,7 @@ pub fn check(options: &CheckOptions) -> Result<Report> {
             );
         }
         let collector_sha256 = evidence::binary_digest()?;
-        if collector_sha256 != before.manifest.collector_sha256 {
+        if !deployment_check && collector_sha256 != before.manifest.collector_sha256 {
             return Err("collector binary differs from baseline; use the original collector or record a new baseline".into());
         }
         let deployment = evidence::read(&options.deployment, 32 * 1024)?;
@@ -1119,17 +1258,7 @@ pub fn check(options: &CheckOptions) -> Result<Report> {
             report.reasons.push("Baseline acquisition coverage is incomplete; no candidate requests dispatched. Record a new complete baseline.".into());
             return Ok(());
         }
-        let inherited = BaselineOptions {
-            endpoint: before.manifest.endpoint,
-            model: before.manifest.model,
-            auth_env: before.manifest.auth_env,
-            local_http: before.manifest.local_http,
-            deployment: options.deployment.clone(),
-            out: options.out.clone(),
-            seconds: options.seconds,
-            json: options.json,
-            selection: None,
-        };
+        let inherited = inherit(options, &before.manifest);
         let source = evidence::read(&options.baseline.join("workload.json"), FILE_CAP)?;
         let selection_bytes = before
             .manifest
@@ -1143,7 +1272,7 @@ pub fn check(options: &CheckOptions) -> Result<Report> {
             return Err("baseline selection or workload changed during preflight".into());
         }
         let capture_bytes = evidence::read(&options.baseline.join("capture.json"), FILE_CAP)?;
-        let current_identity = if before.manifest.version == 2 {
+        let current_identity = if before.manifest.selection_sha256.is_some() {
             selected_identity(
                 &evidence::digest(&capture_bytes),
                 &evidence::read(&options.baseline.join("capture-timing.json"), FILE_CAP)?,
@@ -1158,18 +1287,22 @@ pub fn check(options: &CheckOptions) -> Result<Report> {
             .as_deref()
             .map(|bytes| selection::parse(bytes, &source))
             .transpose()?;
-        preflight(
-            &inherited,
-            &selection::workload(&source)?,
-            selected.as_ref(),
-        )?;
         let capture = manifest(
             &inherited,
+            before.manifest.version,
             &deployment,
             collector_sha256,
             Some((before.sha256, options.change)),
             &source,
             selection_bytes.as_deref(),
+        )?;
+        if deployment_check {
+            deployment_pair(&before.manifest, &capture)?;
+        }
+        preflight(
+            &inherited,
+            &selection::workload(&source)?,
+            selected.as_ref(),
         )?;
         collect(
             &options.out,
@@ -1179,7 +1312,14 @@ pub fn check(options: &CheckOptions) -> Result<Report> {
             selection_bytes.as_deref(),
             deadline,
         )?;
-        report = compare(&options.baseline, &options.out);
+        report = compare(&options.baseline, &options.out, None);
+        // A complete deployment candidate has no verdict until its unchanged reference exists.
+        if deployment_check
+            && report.result == Outcome::Inconclusive
+            && report.candidate_complete_acquisitions == ACQUISITIONS
+        {
+            report.result = Outcome::Pending;
+        }
         Ok::<(), String>(())
     })();
     if let Err(error) = operation {
@@ -1190,6 +1330,53 @@ pub fn check(options: &CheckOptions) -> Result<Report> {
     Ok(report)
 }
 
+/// The baseline's request settings, except what a deployment check declares anew.
+fn inherit(options: &CheckOptions, before: &Capture) -> BaselineOptions {
+    let (endpoint, local_http) = match &options.endpoint {
+        Some(endpoint) => (endpoint.clone(), options.local_http),
+        None => (before.endpoint.clone(), before.local_http),
+    };
+    BaselineOptions {
+        endpoint,
+        model: options
+            .model
+            .clone()
+            .unwrap_or_else(|| before.model.clone()),
+        deployment: options.deployment.clone(),
+        out: options.out.clone(),
+        local_http,
+        auth_env: options.auth_env.clone().or_else(|| before.auth_env.clone()),
+        selection: None,
+        workload: before.workload.unwrap_or(Builtin::BaselineV1),
+        client_placement: options.client_placement.or(before.client_placement),
+        seconds: options.seconds,
+        json: options.json,
+    }
+}
+
+/// Admits a deployment pair on collector version and recorded source instead of the platform binary.
+fn deployment_pair(before: &Capture, after: &Capture) -> Result<()> {
+    let (Some(a), Some(b)) = (&before.collector, &after.collector) else {
+        return Err("deployment comparison requires a capture v3 baseline; record a new baseline with this collector".into());
+    };
+    if before.workload.is_none() {
+        return Err("deployment comparison requires a built-in workload, not a selection".into());
+    }
+    if before.client_placement != after.client_placement {
+        return Err("client placement differs from the baseline; deployment comparisons require equal placement".into());
+    }
+    if a.version != b.version || a.source_commit != b.source_commit {
+        return Err(format!(
+            "collector {} (source {}) differs from baseline collector {} (source {}); build both sides from the same commit",
+            b.version, b.source_commit, a.version, a.source_commit
+        ));
+    }
+    if a.source_commit == "unrecorded" {
+        return Err("deployment comparison requires collectors built from a recorded source commit; build both from a clean git checkout".into());
+    }
+    Ok(())
+}
+
 pub fn is_capture(path: &Path) -> bool {
     std::fs::symlink_metadata(path.join("capture.json")).is_ok()
         || std::fs::symlink_metadata(path.join("acquisition-00")).is_ok()
@@ -1197,13 +1384,13 @@ pub fn is_capture(path: &Path) -> bool {
             && std::fs::symlink_metadata(path.join("plan.json")).is_err())
 }
 
-pub fn compare(baseline: &Path, candidate: &Path) -> Report {
+pub fn compare(baseline: &Path, candidate: &Path, reference: Option<&Path>) -> Report {
     let mut report = Report::new(candidate.join("report.json"));
     report.baseline_path = Some(baseline.to_owned());
     report.candidate_path = Some(candidate.to_owned());
     let operation = (|| {
-        let before = load(baseline)?;
-        let after = load(candidate)?;
+        let mut before = load(baseline)?;
+        let mut after = load(candidate)?;
         report.model = Some(before.manifest.model.clone());
         report.declared_change = after.manifest.change;
         if after.manifest.change == Some(Change::Unchanged) {
@@ -1226,64 +1413,20 @@ pub fn compare(baseline: &Path, candidate: &Path) -> Report {
             .stop_reason
             .clone()
             .or_else(|| before.manifest.stop_reason.clone());
-        let mut selected = before.selected;
-        if let (Some(selected), Some(candidate)) = (&mut selected, after.selected) {
+        let mut selected = before.selected.take();
+        if let (Some(selected), Some(candidate)) = (&mut selected, after.selected.take()) {
             selected.candidate_acquisitions = candidate.baseline_acquisitions;
             selected.candidate_timing = Some(candidate.baseline_timing);
         }
         selected_report(&mut report, selected);
-        if before.manifest.baseline_sha256.is_some()
-            || after.manifest.baseline_sha256.as_deref() != Some(before.sha256.as_str())
-            || before.manifest.endpoint != after.manifest.endpoint
-            || before.manifest.model != after.manifest.model
-            || before.manifest.auth_env != after.manifest.auth_env
-            || before.manifest.local_http != after.manifest.local_http
-            || before.manifest.workload_sha256 != after.manifest.workload_sha256
-            || before.manifest.metric_contract != after.manifest.metric_contract
-            || before.manifest.collector_sha256 != after.manifest.collector_sha256
-            || before.manifest.version != after.manifest.version
-            || before.manifest.selection_sha256 != after.manifest.selection_sha256
-        {
-            return Err(
-                "captures are incompatible or candidate does not reference this immutable baseline"
-                    .into(),
-            );
+        linked(&before, &after)?;
+        if after.manifest.change == Some(Change::Deployment) {
+            return deployment(&mut report, &before, &after, reference);
         }
-        if let (Some(finished), Some(started)) = (
-            before
-                .manifest
-                .acquisitions
-                .iter()
-                .rev()
-                .find_map(|a| a.finished_unix_ms),
-            after
-                .manifest
-                .acquisitions
-                .iter()
-                .find_map(|a| a.started_unix_ms),
-        ) && started < finished
-        {
-            return Err(
-                "candidate capture period overlaps or precedes baseline capture period".into(),
-            );
+        if reference.is_some() {
+            return Err("a capture reference applies only to a deployment candidate".into());
         }
-        declared_change(
-            &before.deployment,
-            &after.deployment,
-            after
-                .manifest
-                .change
-                .ok_or("candidate has no selected declaration change")?,
-        )?;
-        if before.manifest.status == CaptureStatus::Invalid
-            || after.manifest.status == CaptureStatus::Invalid
-        {
-            return Err("capture contains an invalid response, observation, or local collection failure; inspect capture.json and native receipts".into());
-        }
-        if before.manifest.status != CaptureStatus::Complete
-            || after.manifest.status != CaptureStatus::Complete
-        {
-            report.reasons.push("Incomplete acquisition coverage: no model-based interval or directional conclusion. All acquisitions must complete without replacement.".into());
+        if !coverage(&mut report, &[&before, &after])? {
             return Ok(());
         }
         if report.selected.is_some() {
@@ -1299,6 +1442,185 @@ pub fn compare(baseline: &Path, candidate: &Path) -> Report {
         report.reasons.push(error);
     }
     report
+}
+
+/// Verifies that `after` is a compatible capture of the immutable baseline `before`.
+fn linked(before: &Verified, after: &Verified) -> Result<()> {
+    let (a, b) = (&before.manifest, &after.manifest);
+    let deployment = b.change == Some(Change::Deployment);
+    if a.baseline_sha256.is_some()
+        || b.baseline_sha256.as_deref() != Some(before.sha256.as_str())
+        || (!deployment
+            && (a.endpoint != b.endpoint
+                || a.model != b.model
+                || a.auth_env != b.auth_env
+                || a.local_http != b.local_http
+                || a.collector_sha256 != b.collector_sha256
+                || a.client_placement != b.client_placement))
+        || a.workload_sha256 != b.workload_sha256
+        || a.metric_contract != b.metric_contract
+        || a.version != b.version
+        || a.selection_sha256 != b.selection_sha256
+    {
+        return Err(
+            "captures are incompatible or candidate does not reference this immutable baseline"
+                .into(),
+        );
+    }
+    if deployment {
+        deployment_pair(a, b)?;
+    }
+    if !ordered(a, b, 0) {
+        return Err("candidate capture period overlaps or precedes baseline capture period".into());
+    }
+    declared_change(
+        &before.deployment,
+        &after.deployment,
+        b.change
+            .ok_or("candidate has no selected declaration change")?,
+    )
+}
+
+/// Whether `later` starts at least `gap_ms` after `earlier` finished; captures without
+/// recorded periods are incomplete and withheld elsewhere.
+fn ordered(earlier: &Capture, later: &Capture, gap_ms: u64) -> bool {
+    let finished = earlier
+        .acquisitions
+        .iter()
+        .rev()
+        .find_map(|a| a.finished_unix_ms);
+    let started = later.acquisitions.iter().find_map(|a| a.started_unix_ms);
+    !matches!((finished, started), (Some(finished), Some(started)) if started < finished.saturating_add(gap_ms))
+}
+
+/// Whether every capture is complete; an invalid capture fails the comparison.
+fn coverage(report: &mut Report, captures: &[&Verified]) -> Result<bool> {
+    if captures
+        .iter()
+        .any(|c| c.manifest.status == CaptureStatus::Invalid)
+    {
+        return Err("capture contains an invalid response, observation, or local collection failure; inspect capture.json and native receipts".into());
+    }
+    if captures
+        .iter()
+        .any(|c| c.manifest.status != CaptureStatus::Complete)
+    {
+        report.reasons.push("Incomplete acquisition coverage: no model-based interval or directional conclusion. All acquisitions must complete without replacement.".into());
+        return Ok(false);
+    }
+    Ok(true)
+}
+
+/// Whole-deployment comparison; its verdict needs the unchanged reference captured after the candidate.
+fn deployment(
+    report: &mut Report,
+    before: &Verified,
+    after: &Verified,
+    reference: Option<&Path>,
+) -> Result<()> {
+    report.kind = "performance-deployment-comparison-v1";
+    report.scope = DEPLOYMENT_SCOPE;
+    report.model = None;
+    let control = reference
+        .map(|path| control(before, after, path))
+        .transpose()?;
+    let captures: Vec<&Verified> = [before, after].into_iter().chain(&control).collect();
+    let complete = coverage(report, &captures)?;
+    let (candidate_against_reference, reference_against_baseline) = match &control {
+        Some(control) if complete => {
+            let (reference, drift) = verdict(report, before, after, control)?;
+            (Some(reference), Some(drift))
+        }
+        None if complete => {
+            report.reasons.push(PENDING.into());
+            (None, None)
+        }
+        _ => (None, None),
+    };
+    if before.median_prompt_tokens != after.median_prompt_tokens {
+        report.reasons.push(format!(
+            "Median reported prompt tokens differ (baseline {}, candidate {}): the servers render the same prompt differently, so prefill work differs.",
+            OrNull(before.median_prompt_tokens),
+            OrNull(after.median_prompt_tokens)
+        ));
+    }
+    report.deployment = Some(DeploymentReport {
+        baseline: side(before),
+        candidate: side(after),
+        reference_path: reference.map(Path::to_owned),
+        reference_capture_sha256: control.map(|c| c.sha256),
+        candidate_against_reference,
+        reference_against_baseline,
+    });
+    Ok(())
+}
+
+/// The unchanged reference: `check <baseline> --change none`, captured after the candidate.
+fn control(before: &Verified, after: &Verified, path: &Path) -> Result<Verified> {
+    let control = load(path)?;
+    if control.manifest.change != Some(Change::Unchanged) {
+        return Err("the reference must be an unchanged control of the baseline (check <baseline> --change none)".into());
+    }
+    linked(before, &control)?;
+    if !ordered(&before.manifest, &after.manifest, DEPLOYMENT_GAP_MS)
+        || !ordered(&after.manifest, &control.manifest, DEPLOYMENT_GAP_MS)
+    {
+        return Err("baseline, candidate and reference must be captured in that order, each starting at least 60 s after the previous one finished".into());
+    }
+    Ok(control)
+}
+
+/// A direction only when the candidate differs the same way from both baseline capture periods.
+fn verdict(
+    report: &mut Report,
+    before: &Verified,
+    after: &Verified,
+    control: &Verified,
+) -> Result<(Interval, Interval)> {
+    let directional = |result| matches!(result, Outcome::Improved | Outcome::Regressed);
+    assess(report, &before.observations, &after.observations)?;
+    let reference = interval(&control.observations, &after.observations)?;
+    let drift = interval(&before.observations, &control.observations)?;
+    if !directional(report.result) || reference.result != report.result {
+        report.result = Outcome::Inconclusive;
+        report
+            .reasons
+            .push("candidate is not directional against both baseline capture periods".into());
+    }
+    if directional(drift.result) {
+        report
+            .reasons
+            .push("baseline deployment shifted between capture periods".into());
+    }
+    Ok((reference, drift))
+}
+
+fn interval(before: &[f64], after: &[f64]) -> Result<Interval> {
+    let mut scratch = Report::new(PathBuf::new());
+    assess(&mut scratch, before, after)?;
+    Ok(Interval {
+        result: scratch.result,
+        observed_change_percent: scratch.observed_change_percent,
+        model_based_interval_percent: scratch.model_based_interval_percent,
+    })
+}
+
+fn side(capture: &Verified) -> DeploymentSide {
+    let manifest = &capture.manifest;
+    DeploymentSide {
+        endpoint: manifest.endpoint.clone(),
+        model: manifest.model.clone(),
+        declaration: capture.deployment.clone(),
+        collector: manifest
+            .collector
+            .clone()
+            .expect("deployment pairs are admitted only as v3 captures"),
+        collector_sha256: manifest.collector_sha256.clone(),
+        client_placement: manifest
+            .client_placement
+            .expect("deployment pairs are admitted only as v3 captures"),
+        median_prompt_tokens: capture.median_prompt_tokens,
+    }
 }
 
 fn assess(report: &mut Report, before: &[f64], after: &[f64]) -> Result<()> {
@@ -1369,6 +1691,9 @@ pub fn human(report: &Report) -> String {
             Outcome::Regressed => "MEASURED SLOWER: lower throughput in these capture periods",
             Outcome::Inconclusive => {
                 "INCONCLUSIVE: no direction established; this does not mean equivalent performance"
+            }
+            Outcome::Pending => {
+                "VERDICT PENDING: deployment candidate captured; the verdict needs the unchanged reference"
             }
             Outcome::Invalid => "INVALID: evidence or declarations cannot support this comparison",
         }
@@ -1460,6 +1785,9 @@ pub fn human(report: &Report) -> String {
     }
     if let Some(model) = &report.model {
         text.push_str(&format!("Model: {model}\n"));
+    }
+    if let Some(deployment) = &report.deployment {
+        text.push_str(&deployment_text(deployment));
     }
     for (label, path, accounting) in [
         (
@@ -1591,7 +1919,7 @@ pub fn human(report: &Report) -> String {
         && let Some(root) = report.report_path.parent()
     {
         let quoted_root = root.to_string_lossy().replace('\'', "'\\''");
-        text.push_str(&format!("Next: grill-perf check '{quoted_root}' --deployment serving-after.json --change settings --out after\nSelect the declaration field you changed; the other fields must match.\nFor an unchanged-deployment control: grill-perf check '{quoted_root}' --deployment '{quoted_root}/deployment.json' --change none --out control\n"));
+        text.push_str(&format!("Next: grill-perf check '{quoted_root}' --deployment serving-after.json --change settings --out after\nSelect the declaration field you changed; the other fields must match.\nFor an unchanged-deployment control: grill-perf check '{quoted_root}' --deployment '{quoted_root}/deployment.json' --change none --out control\nTo compare another deployment: grill-perf check '{quoted_root}' --change deployment --deployment other.json --endpoint URL --model NAME --client-placement PLACEMENT --out candidate, then the unchanged control, then compare with --reference (see INSTALL.md).\n"));
     }
     if report.observed_change_percent.is_some() {
         text.push_str("Limits: a measured direction does not establish its cause or practical importance. These sequential measurements may be correlated or drift over time, making the uncertainty range too narrow. No guaranteed precision.\n");
@@ -1600,6 +1928,59 @@ pub fn human(report: &Report) -> String {
         "Serving identity is declared, not attested.\nReport: {}\n",
         report.report_path.display()
     ));
+    text
+}
+
+fn deployment_text(deployment: &DeploymentReport) -> String {
+    let mut text = String::new();
+    for (label, side) in [
+        ("Baseline", &deployment.baseline),
+        ("Candidate", &deployment.candidate),
+    ] {
+        let declared = &side.declaration;
+        let placement = clap::ValueEnum::to_possible_value(&side.client_placement)
+            .expect("every placement is a CLI value");
+        text.push_str(&format!(
+            "{label} deployment: model {}; endpoint {}; model_revision {}; runtime {}; hardware {}; settings {}; client placement {}; collector {} (source {}, target {}); median prompt tokens {}\n",
+            side.model,
+            side.endpoint,
+            OrNull(declared.model_revision.as_deref()),
+            OrNull(declared.runtime.as_deref()),
+            OrNull(declared.hardware.as_deref()),
+            OrNull(declared.settings.as_deref()),
+            placement.get_name(),
+            side.collector.version,
+            side.collector.source_commit,
+            side.collector.target,
+            OrNull(side.median_prompt_tokens),
+        ));
+    }
+    if let Some(path) = &deployment.reference_path {
+        text.push_str(&format!("Reference: {}\n", path.display()));
+    }
+    for (label, interval) in [
+        (
+            "Candidate against the reference period",
+            &deployment.candidate_against_reference,
+        ),
+        (
+            "Reference against the baseline period (baseline drift)",
+            &deployment.reference_against_baseline,
+        ),
+    ] {
+        if let Some(interval) = interval {
+            text.push_str(&format!(
+                "{label}: observed {:+.2}%; uncertainty range (model-based, nominal 95%) ",
+                OrNull(interval.observed_change_percent)
+            ));
+            match interval.model_based_interval_percent {
+                Some([lower, upper]) => {
+                    text.push_str(&format!("[{lower:+.2}%, {upper:+.2}%]\n"));
+                }
+                None => text.push_str("null\n"),
+            }
+        }
+    }
     text
 }
 

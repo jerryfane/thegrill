@@ -654,7 +654,7 @@ pub struct CellSummary {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sequence_checks: Option<Vec<Option<crate::sequence::Check>>>,
 }
-fn median(mut values: Vec<f64>) -> Option<f64> {
+pub fn median(mut values: Vec<f64>) -> Option<f64> {
     if values.is_empty() {
         return None;
     }
