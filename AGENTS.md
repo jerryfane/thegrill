@@ -1,6 +1,6 @@
 # Development guide
 
-Read README.md, CONTRIBUTING.md, and docs/PROJECT.md before changing behavior.
+Read README.md, CONTRIBUTING.md (including its code standards), and docs/PROJECT.md before changing behavior.
 
 - Keep The Grill a standalone Rust CLI. Reuse existing modules and avoid speculative abstractions or dependencies.
 - Preserve protocol compatibility, deterministic identities, and fixed example bytes. Grading behavior changes require an explicit implementation revision.
