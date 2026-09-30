@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Record the build's source commit in `grill-perf --version`:
+  `grill-perf <version> (source <commit>)`. Release staging sets it through
+  `GRILL_PERF_SOURCE_COMMIT` and checks the output; inside a git checkout that
+  value must equal a clean HEAD. Other builds record HEAD only when the compiled
+  inputs, including untracked files, match it, and otherwise print
+  `(source unrecorded)` with a build warning.
 - Add Apple Silicon macOS source support for portable `grill-perf` serving
   captures. Binary identity uses the native executable path while Unix evidence
   no-follow opens, directory synchronization and advisory locking retain their

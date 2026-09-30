@@ -26,7 +26,7 @@ use std::path::PathBuf;
 #[derive(Parser)]
 #[command(
     name = "grill-perf",
-    version,
+    version = concat!(env!("CARGO_PKG_VERSION"), " (source ", env!("GRILL_PERF_SOURCE"), ")"),
     about = "Measure declared serving workloads; compare saved performance evidence offline"
 )]
 struct Cli {

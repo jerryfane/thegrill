@@ -3839,6 +3839,27 @@ fn comparison_reference_lane_permutation_preserves_totals_but_is_ineligible() {
         false
     );
 }
+// Release staging and installed smoke checks compare this exact line.
+#[test]
+fn version_names_package_and_source_commit() {
+    let output = cli().arg("--version").output().unwrap();
+    successful(&output);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let (release, source) = stdout
+        .strip_prefix("grill-perf ")
+        .and_then(|rest| rest.strip_suffix(")\n"))
+        .and_then(|rest| rest.split_once(" (source "))
+        .unwrap_or_else(|| panic!("unexpected version line {stdout:?}"));
+    assert_eq!(release, env!("CARGO_PKG_VERSION"));
+    assert!(
+        source == "unrecorded"
+            || source.len() == 40
+                && source
+                    .bytes()
+                    .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')),
+        "unexpected source {source:?}"
+    );
+}
 #[path = "support/bundle.rs"]
 mod bundle_tests;
 #[path = "support/measurement.rs"]
