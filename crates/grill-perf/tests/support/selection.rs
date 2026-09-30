@@ -197,10 +197,8 @@ fn selected_cli_inherits_pinned_workload_and_auth_outside_checkout_and_replays_o
         ["median_prefill_tokens_per_second"]
         .as_f64()
         .unwrap();
-    assert!(
-        human.contains(&format!("prefill Some({prefill:?}) tokens/s")),
-        "{human}"
-    );
+    assert!(human.contains(&prefill.to_string()), "{human}");
+    assert!(!human.contains("Some("), "{human}");
     assert_eq!(
         terminal.lines().nth(1).unwrap(),
         format!(
