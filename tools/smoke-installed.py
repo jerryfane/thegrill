@@ -73,8 +73,8 @@ def unpack(archive, destination, root_name, receipt):
 
 
 class Fixture:
-    def __init__(self, model, control, token):
-        self.model, self.control, self.token = model, control, token
+    def __init__(self, model, kwargs, token):
+        self.model, self.kwargs, self.token = model, kwargs, token
         self.delay = 0.02
         self.reject = False
         self.requests = []
@@ -101,7 +101,7 @@ class Fixture:
                         self.send_error(400, "fixture rejects declared control")
                         return
                     require(body["model"] == fixture.model, "model declaration not preserved")
-                    require(body["chat_template_kwargs"] == {fixture.control: False}, "control spelling changed")
+                    require(body["chat_template_kwargs"] == fixture.kwargs, "control spelling changed")
                     require(body["stream"] and body["stream_options"] == {"include_usage": True},
                             "fixture requires the declared streaming profile")
                     tokens = body["max_tokens"]
@@ -260,11 +260,11 @@ def main():
     scenarios = []
     checks = ["checksum_before_execution", "corrupt_download_rejected", "payload_hashes",
               "native_clean_runtime", "elf_architecture", "local_runtime_guard", "version", "help", "bundle_verify", "bundle_inspect"]
-    for name, control, token, selection in [
-        ("neutral-alpha", "thinking", None, None),
-        ("neutral-beta", "enable_thinking", TOKEN, "concurrency-enable-thinking-selection-v1.json"),
+    for name, kwargs, token, selection in [
+        ("neutral-alpha", {"thinking": False, "enable_thinking": False}, None, None),
+        ("neutral-beta", {"enable_thinking": False}, TOKEN, "concurrency-enable-thinking-selection-v1.json"),
     ]:
-        fixture = Fixture(name, control, token)
+        fixture = Fixture(name, kwargs, token)
         try:
             declaration = {"model_revision": "cpu-fixture-weights", "runtime": "cpu-fixture-runtime",
                            "hardware": "cpu-loopback", "settings": "before"}

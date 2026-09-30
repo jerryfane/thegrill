@@ -28,8 +28,9 @@
 - Add whole-deployment comparison. New baselines write capture v3, which records
   the collector's version, source commit and build target, the required
   `--client-placement same-host|network` and the built-in workload chosen with
-  `baseline --workload baseline-v1|baseline-v2|portable-v1` (default
-  `baseline-v1`). `check --change deployment` accepts another endpoint, model,
+  `baseline --workload baseline-v1|baseline-v2|portable-v1`. The default is now
+  `baseline-v2`, which sends both thinking keys, so Qwen-family templates also
+  turn thinking off; `baseline-v1` stays selectable. `check --change deployment` accepts another endpoint, model,
   credential name and collector binary when the collector version and recorded
   source commit match, and reports `PENDING` (exit 0). `compare A B --reference A2`
   gives a verdict only when B differs in the same direction from the baseline and

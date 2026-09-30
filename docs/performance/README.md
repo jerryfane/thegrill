@@ -97,11 +97,13 @@ what is compared.
 
 ### Default scope and budget
 
-The versioned `baseline-v1.json` workload, the default for `baseline --workload`,
+The versioned `baseline-v2.json` workload, the default for `baseline --workload`,
 selects the existing structured count prompt at C1. It requests streaming,
-thinking off through the legacy
-`chat_template_kwargs.thinking` field, temperature zero, top_p one and **exactly
-400** output tokens using vLLM controls. A backend rejecting those controls is
+thinking off through `chat_template_kwargs` with both the `thinking` and
+`enable_thinking` keys (thinking control `chat-template-thinking-v1`), temperature
+zero, top_p one and **exactly 400** output tokens using vLLM controls. It differs
+from the earlier default `baseline-v1` only in that control, which sent the legacy
+`thinking` key alone. A backend rejecting those controls is
 an error, not an invitation to retry with weaker controls. Generated text and
 server completion usage can include reasoning; channels remain in the receipts.
 
@@ -217,6 +219,23 @@ Selection manifests use a separate closed schema, not the frozen four-entry
 | `workload_sha256` | lowercase SHA-256 of compact typed Workload serialization |
 | `scope` | nonblank control-free text, at most 256 bytes |
 | `operation_scope` | closed enum `normal`, `stress`, or `unknown` |
+
+To pin a custom workload, run `grill-perf preflight WORKLOAD --endpoint URL --model NAME`.
+It validates the workload offline, sends no request and prints both digests
+(`source_sha256` and `workload_sha256`); put them in a manifest beside the
+workload file:
+
+```json
+{
+  "version": 1,
+  "id": "my-decode-v1",
+  "workload": "my-decode-v1.json",
+  "source_sha256": "<source_sha256 from preflight>",
+  "workload_sha256": "<workload_sha256 from preflight>",
+  "scope": "Descriptive C1 decode on my coding prompts.",
+  "operation_scope": "normal"
+}
+```
 
 The manifest is bounded to 64 KiB and the workload to the existing native
 admission limits. There is no provider registry, model-name mapping or field

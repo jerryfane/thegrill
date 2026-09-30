@@ -37,7 +37,7 @@ pub struct BaselineOptions {
     #[arg(long)]
     pub selection: Option<PathBuf>,
     /// Built-in workload to capture; the capture records its name.
-    #[arg(long, value_enum, default_value_t = Builtin::BaselineV1, conflicts_with = "selection")]
+    #[arg(long, value_enum, default_value_t = Builtin::BaselineV2, conflicts_with = "selection")]
     pub workload: Builtin,
     /// Where this client runs relative to the server; deployment comparisons require equal placement.
     #[arg(long, value_enum, required = true)]
