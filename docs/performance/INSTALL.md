@@ -93,7 +93,8 @@ guessing them:
 
 - Full Chat Completions resource URL and explicit server model selector.
 - A request-control profile the backend actually supports. The default C1 workload
-  requires vLLM-compatible exact-output controls and `chat_template_kwargs.thinking: false`.
+  requires vLLM-compatible exact-output controls and `chat_template_kwargs` with
+  both `thinking: false` and `enable_thinking: false`.
 - The credential environment-variable **name**, if authentication is required.
   Add `--auth-env NAME` to baseline; supply its value independently. No environment
   file is discovered and the value is not stored by the collector.

@@ -79,11 +79,13 @@ whole-deployment scope does not support.
 
 ### Default scope and budget
 
-The versioned `baseline-v1.json` workload, the default for `baseline --workload`,
+The versioned `baseline-v2.json` workload, the default for `baseline --workload`,
 selects the existing structured count prompt at C1. It requests streaming,
-thinking off through the legacy
-`chat_template_kwargs.thinking` field, temperature zero, top_p one and **exactly
-400** output tokens using vLLM controls. A backend rejecting those controls is
+thinking off through `chat_template_kwargs` with both the `thinking` and
+`enable_thinking` keys (thinking control `chat-template-thinking-v1`), temperature
+zero, top_p one and **exactly 400** output tokens using vLLM controls. It differs
+from the earlier default `baseline-v1` only in that control, which sent the legacy
+`thinking` key alone. A backend rejecting those controls is
 an error, not an invitation to retry with weaker controls. Generated text and
 server completion usage can include reasoning; channels remain in the receipts.
 
