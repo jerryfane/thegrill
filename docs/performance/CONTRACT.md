@@ -589,6 +589,35 @@ so no single factor such as a quantization format is attributed; only the
 baseline deployment has a drift control; and the synthetic count prompt lets
 speculative decoding on either side dominate.
 
+## Output identity
+
+`outputs A B` is offline. A and B are both native run directories or both
+capture roots; captures pair acquisition `i` of A with acquisition `i` of B.
+Each run and capture is fully verified by the ordinary loaders first.
+Admission requires, else exit 1: equal normalized workloads (`workload_sha256`,
+which also fixes the waves and lanes), `temperature_milli` 0 on every measured
+lane (absent means the provider default and is refused), no `{salt}` text in a
+filled case (its prompt differs per capture), and at least one measured lane.
+Endpoint, model, deployment declaration and collector may differ.
+
+For each measured lane (warmups excluded) the retained response, rechecked
+against its recorded digest, is replayed with the completion parser into two
+channels: answer (`content`) and reasoning (`reasoning`, else
+`reasoning_content`, per event). A lane needs a `complete` attempt on both
+sides; performance eligibility errors do not affect it. The channels are
+compared separately, reasoning first. The result is `identical` (with each
+channel's character count), `differs` (the channel, the first differing
+Unicode character and UTF-8 byte offset, and up to 24 characters on each side
+of it from A and B; a proper prefix differs where it ends) or `unavailable`
+(`reasons` per side: acquisition not started, wave not published, response not
+complete, or evidence that does not replay as completion text).
+
+The report kind is `performance-output-identity-v1` (`version` 1) with the
+paths, `workload_sha256`, counts and per-lane results; `acquisition` is present
+only for captures. Exit 0 requires every lane identical; any `differs` or
+`unavailable` lane exits 2. This is text identity only: token IDs are not
+retained, and equal text does not show equal logits.
+
 ## Validation
 
 Run the real CLI fixture regressions and strict package checks:

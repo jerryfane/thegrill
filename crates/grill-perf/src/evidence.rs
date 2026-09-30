@@ -191,6 +191,17 @@ pub(crate) fn text_decode_rate(attempt: &Attempt) -> Option<f64> {
 fn prefill_rate(attempt: &Attempt) -> Option<f64> {
     prefill_sample(attempt).map(|(n, d)| n as f64 * 1_000_000.0 / d as f64)
 }
+/// Reads one lane's retained response and checks it against its attempt's size and digest.
+pub(crate) fn response(wave_dir: &Path, attempt: &Attempt, cap: usize) -> Result<Vec<u8>> {
+    let body = read(
+        &wave_dir.join(format!("response-{:04}.bin", attempt.lane)),
+        cap,
+    )?;
+    if body.len() != attempt.response_bytes || digest(&body) != attempt.response_sha256 {
+        return Err("response evidence hash mismatch".into());
+    }
+    Ok(body)
+}
 pub struct Loaded {
     pub plan: Plan,
     pub waves: Vec<Option<Wave>>,
@@ -473,13 +484,7 @@ pub(crate) fn load_verified(root: &Path) -> Result<Loaded, LoadError> {
             {
                 return Err("invalid attempt facts".into());
             }
-            let body = read(
-                &dir.join(format!("response-{lane:04}.bin")),
-                workload.limits.response_bytes,
-            )?;
-            if body.len() != a.response_bytes || digest(&body) != a.response_sha256 {
-                return Err("response evidence hash mismatch".into());
-            }
+            let body = response(&dir, a, workload.limits.response_bytes)?;
             a.timing.validate_tools(tool_step)?;
             if sequence.observe(&plan, spec, a, &body)? != a.sequence {
                 return Err(

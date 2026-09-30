@@ -1384,6 +1384,16 @@ pub fn is_capture(path: &Path) -> bool {
             && std::fs::symlink_metadata(path.join("plan.json")).is_err())
 }
 
+/// Verifies a whole capture and returns its fixed acquisitions' run directories, `None` when unstarted.
+pub fn acquisition_runs(root: &Path) -> Result<Vec<Option<PathBuf>>> {
+    Ok(load(root)?
+        .manifest
+        .acquisitions
+        .iter()
+        .map(|a| a.plan_sha256.is_some().then(|| root.join(&a.directory)))
+        .collect())
+}
+
 pub fn compare(baseline: &Path, candidate: &Path, reference: Option<&Path>) -> Report {
     let mut report = Report::new(candidate.join("report.json"));
     report.baseline_path = Some(baseline.to_owned());

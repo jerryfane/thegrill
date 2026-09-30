@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Add `grill-perf outputs A B [--json]`, an offline output-identity check
+  between two run directories or two captures (paired by acquisition) of the
+  same greedy workload, for example to show that speculative decoding leaves
+  the text unchanged. Each measured lane's answer and reasoning text is
+  replayed from verified response evidence and reported `identical`, `differs`
+  (first differing character and byte, with excerpts) or `unavailable`; exit 0
+  only when every lane is identical. The report kind is
+  `performance-output-identity-v1`. See the
+  [contract](CONTRACT.md#output-identity).
 - Record the build's source commit in `grill-perf --version`:
   `grill-perf <version> (source <commit>)`. Release staging sets it through
   `GRILL_PERF_SOURCE_COMMIT` and checks the output; inside a git checkout that

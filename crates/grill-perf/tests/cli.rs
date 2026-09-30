@@ -3997,6 +3997,8 @@ mod acquisition_tests;
 #[path = "support/microbench.rs"]
 mod microbench_tests;
 
+#[path = "support/outputs.rs"]
+mod output_tests;
 #[cfg(target_os = "linux")]
 #[path = "support/serving_resources.rs"]
 mod serving_resource_tests;

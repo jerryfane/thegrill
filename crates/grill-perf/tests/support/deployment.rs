@@ -260,6 +260,7 @@ fn triple(temp: &Temp) {
     let server = Server::new(move |stream, _, _| {
         respond(
             stream,
+            "1 2",
             Some(400),
             false,
             served.load(Ordering::SeqCst) as u64,

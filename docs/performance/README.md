@@ -77,6 +77,24 @@ commit; their binaries may differ. The [deployment comparison contract](CONTRACT
 defines admission, the 60-second ordering, the verdict rule and what the
 whole-deployment scope does not support.
 
+### Output identity
+
+A speedup such as speculative decoding is lossless only if the text is
+unchanged. `grill-perf outputs A B [--json]` checks that offline for two run
+directories, or two captures paired acquisition by acquisition, of the same
+greedy workload, for example drafts off (A) and on (B):
+
+```sh
+grill-perf outputs before after
+```
+
+Each measured lane is `identical`, `differs` (first differing character and
+byte, with excerpts) or `unavailable`. Exit 0 means every lane is identical; 2
+means a lane differs or could not be compared; 1 means the inputs are invalid or
+not comparable. Endpoints, models and collectors may differ. The
+[output identity contract](CONTRACT.md#output-identity) defines admission and
+what is compared.
+
 ### Default scope and budget
 
 The versioned `baseline-v1.json` workload, the default for `baseline --workload`,
