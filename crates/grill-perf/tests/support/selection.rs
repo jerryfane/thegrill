@@ -1060,6 +1060,58 @@ fn selected_failure_expectation_and_wording_follow_the_failing_phase() {
 }
 
 #[test]
+fn realistic_decode_selection_sends_portable_cap_reached_cells_on_one_edit_module() {
+    let temp = Temp::new();
+    let selection = selection_input(&temp, "realistic-decode-selection-v1.json");
+    let declaration = deployment(&temp, "serving.json", "unchanged");
+    let prompts = Arc::new(std::sync::Mutex::new(std::collections::BTreeSet::new()));
+    let seen = prompts.clone();
+    let server = Server::new(move |stream, _, body| {
+        assert_eq!(body["max_tokens"], 400);
+        assert_eq!(
+            body["chat_template_kwargs"],
+            json!({"thinking":false,"enable_thinking":false})
+        );
+        for field in ["min_tokens", "ignore_eos", "cache_salt", "seed"] {
+            assert!(body.get(field).is_none(), "unexpected {field}: {body}");
+        }
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 1);
+        let content = messages[0]["content"].as_str().unwrap().to_owned();
+        seen.lock().unwrap().insert(content);
+        response(stream, Some(400), false);
+    });
+    let output = selected_baseline(&temp, &server.endpoint, &declaration, &selection, "real")
+        .output()
+        .unwrap();
+    let report = decoded(&output);
+    assert!(output.status.success(), "{report}");
+    assert_eq!(server.count.load(Ordering::SeqCst), 192);
+    for acquisition in report["selected"]["baseline_acquisitions"]
+        .as_array()
+        .unwrap()
+    {
+        let cells = acquisition["cells"].as_array().unwrap();
+        assert_eq!(cells.len(), 6);
+        assert!(
+            cells.iter().all(|cell| cell["eligible_trials"] == 3),
+            "{acquisition}"
+        );
+    }
+
+    let prompts = prompts.lock().unwrap();
+    assert_eq!(prompts.len(), 6);
+    // Both edits must rewrite the same module, and each edit's target must occur in it.
+    let modules: Vec<&str> = prompts
+        .iter()
+        .filter_map(|prompt| prompt.split_once("```python\n").map(|(_, module)| module))
+        .collect();
+    assert_eq!(modules.len(), 2);
+    assert_eq!(modules[0], modules[1]);
+    assert!(modules[0].contains("logger.debug(") && modules[0].contains("qty"));
+}
+
+#[test]
 fn concurrency_ladder_selection_reaches_c8_with_portable_cap_reached_lanes() {
     let temp = Temp::new();
     let selection = selection_input(&temp, "concurrency-ladder-selection-v1.json");

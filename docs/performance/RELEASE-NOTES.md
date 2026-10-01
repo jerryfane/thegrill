@@ -5,6 +5,9 @@
 - Add the [`concurrency-ladder-v1`](README.md#concurrency-ladder) selection:
   one ordinary coding question at C1/C2/C4/C8 with 400-token portable
   `cap-reached` replies.
+- Add the [`realistic-decode-v1`](README.md#realistic-decode) selection:
+  four ordinary coding questions and two whole-file edits at C1 with portable
+  `cap-reached` output, reported per cell apart from the count prompts.
 - Add `grill-perf outputs A B [--json]`, an offline output-identity check
   between two run directories or two captures (paired by acquisition) of the
   same greedy workload, for example to show that speculative decoding leaves

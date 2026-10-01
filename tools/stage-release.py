@@ -45,6 +45,8 @@ WORKLOADS = (
     "portable-v1.json",
     "prefill-ladder-v1.json",
     "quick.json",
+    "realistic-decode-selection-v1.json",
+    "realistic-decode-v1.json",
     "recipe-smoke.json",
     "recipes-v1.json",
     "sparkdash-decode-v1.json",
