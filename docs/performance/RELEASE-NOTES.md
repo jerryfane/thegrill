@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Add the [`realistic-decode-v1`](README.md#realistic-decode) selection:
+  four ordinary coding questions and two whole-file edits at C1 with portable
+  `cap-reached` output, reported per cell apart from the count prompts.
 - Add `grill-perf outputs A B [--json]`, an offline output-identity check
   between two run directories or two captures (paired by acquisition) of the
   same greedy workload, for example to show that speculative decoding leaves
