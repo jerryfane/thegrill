@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "id": "realistic-decode-v1",
+  "workload": "realistic-decode-v1.json",
+  "source_sha256": "e5d0489f7f2c93d5500b8bad4c3e06a6a7a95f6d765560ab57df6d6b89781fc0",
+  "workload_sha256": "8f7c8dc1cde1e27b1c3892a9373632e618eff9b4f8c4621788d37f69bce4a69a",
+  "scope": "Prospective fixed C1 decode on four ordinary coding questions and two whole-file edits of one fixed 5.8 KB Python module, each its own cell; 400-token cap-reached output, thinking off. All cells retained; descriptive acquisition-level comparisons only.",
+  "operation_scope": "unknown"
+}
