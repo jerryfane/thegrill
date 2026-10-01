@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Add the [`long-context-recall-v1`](README.md#long-context-recall) workload:
+  six ordered recall steps at about 16K, 48K and 96K tokens, graded as exact
+  JSON facts, run with `grill-perf run`.
 - Add `grill-perf outputs A B [--json]`, an offline output-identity check
   between two run directories or two captures (paired by acquisition) of the
   same greedy workload, for example to show that speculative decoding leaves
