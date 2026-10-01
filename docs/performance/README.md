@@ -328,6 +328,74 @@ does not qualify the backend or produce a faster/slower, equivalence or
 no-regression verdict. See the [installation guide](INSTALL.md#optional-selections-and-failures)
 for current-source versus next-reviewed-release paths.
 
+### Realistic decode
+
+The [realistic decode selection](../../crates/grill-perf/examples/realistic-decode-selection-v1.json)
+pins [`realistic-decode-v1`](../../crates/grill-perf/examples/realistic-decode-v1.json):
+four ordinary coding questions and two whole-file edits of one fixed 5.8 KB
+Python module (change every `logger.debug(` to `logger.info(`; rename `qty` to
+`quantity`), each its own C1 cell with one warmup and three measured trials. It
+uses `portable-chat-v1` with a 400-token [`cap-reached`](#exact-output-and-cache-observations)
+output, greedy sampling and thinking off. Eight acquisitions permit 192 requests
+and 76,800 requested output tokens.
+
+Speculative decoding accepts far more drafts on the count prompts of
+`portable-v1` and `baseline-v2` than on these questions, and a reply that
+copies its prompt, as a file edit does, rewards drafting from the context. Read
+the chat and edit cells separately and never pool them with count prompts.
+The selection is descriptive only.
+
+### Concurrency ladder
+
+The [concurrency ladder selection](../../crates/grill-perf/examples/concurrency-ladder-selection-v1.json)
+pins [`concurrency-ladder-v1`](../../crates/grill-perf/examples/concurrency-ladder-v1.json):
+one ordinary coding question in every lane at C1, C2, C4 and C8, each cell with
+one warmup and three measured waves. It uses `portable-chat-v1` with a 400-token
+[`cap-reached`](#exact-output-and-cache-observations) output, greedy sampling
+and thinking off. Eight acquisitions permit 480 requests and 192,000 requested
+output tokens. Unlike the [small ladder](#small-concurrency-ladder)'s 64-token
+count replies, each lane decodes long enough to measure sustained multi-stream
+decode as well as admission. The selection is descriptive only.
+
+### Long-context decode and prefill
+
+Two selections cover long prompts with portable controls only.
+[`long-context-decode-v1`](../../crates/grill-perf/examples/long-context-decode-selection-v1.json)
+decodes an ordinary coding answer after about 32K, 48K and 96K filler tokens,
+with a 256-token [`cap-reached`](#exact-output-and-cache-observations) output.
+[`prefill-ladder-96k-v1`](../../crates/grill-perf/examples/prefill-ladder-96k-selection-v1.json)
+reads about 2K, 8K, 32K and 96K filler tokens for one `cap-reached` token. It
+keeps the prompt shape of
+[`prefill-ladder-v1`](../../crates/grill-perf/examples/prefill-ladder-v1.json)
+but ends at 96K, so it fits a 131,072-token window, and uses `portable-chat-v1`
+instead of vLLM cache controls. Each C1 cell has one warmup and three measured
+trials, with greedy sampling and thinking off. Eight acquisitions permit 96
+requests and 24,576 output tokens for decode, 128 requests and 128 output
+tokens for prefill.
+
+Filler is one `" the"` per token on common tokenizers; the counts are
+approximate. `cache: observe` sends no cache control: a per-request `{salt}` at
+the start of the prompt keeps it from matching an earlier prefix, while any
+reported cached tokens remain visible in the evidence. Both are descriptive only.
+
+### Long-context recall
+
+[`long-context-recall-v1`](../../crates/grill-perf/examples/long-context-recall-v1.json)
+checks that a server still reads a long prompt correctly. Each of six ordered
+C1 steps places one fixed access code before or after about 16K, 48K or 96K
+filler tokens and asks for it back; the answer is graded as the exact
+[JSON fact](CONVERSATIONS.md), and the first wrong answer stops the run. Steps
+run from the shortest and nearest record to the 96K record at the start of the
+prompt, so a stop names the length and depth where recall failed. Three
+repetitions give 18 requests with a 32-token cap, greedy sampling and thinking
+off.
+
+Recall needs more than a selected capture's 128 KiB conversation request, so it
+is a workload-6 conversation acquisition: run it with
+`grill-perf run long-context-recall-v1.json` and compare runs descriptively.
+The profile sends `cache_salt`, which servers without it may ignore; a cached
+prefix does not change the graded answer.
+
 ### Selected reports
 
 Selected reports use comparison v2 and retain `selected.manifest`, its digest,
