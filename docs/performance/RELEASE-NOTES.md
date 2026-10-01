@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Add the [`long-context-decode-v1` and `prefill-ladder-96k-v1`](README.md#long-context-decode-and-prefill)
+  selections: decode after about 32K/48K/96K-token prompts, and a prefill
+  ladder ending at 96K, both with portable `cap-reached` controls.
 - Add `grill-perf outputs A B [--json]`, an offline output-identity check
   between two run directories or two captures (paired by acquisition) of the
   same greedy workload, for example to show that speculative decoding leaves
