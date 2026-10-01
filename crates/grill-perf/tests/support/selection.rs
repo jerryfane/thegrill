@@ -1058,3 +1058,49 @@ fn selected_failure_expectation_and_wording_follow_the_failing_phase() {
     assert!(human.contains("exactly 400 were required"), "{human}");
     assert!(!human.contains("the declared cap was 32"), "{human}");
 }
+
+#[test]
+fn concurrency_ladder_selection_reaches_c8_with_portable_cap_reached_lanes() {
+    let temp = Temp::new();
+    let selection = selection_input(&temp, "concurrency-ladder-selection-v1.json");
+    let declaration = deployment(&temp, "serving.json", "unchanged");
+    let server = Server::new(|stream, _, body| {
+        assert_eq!(body["max_tokens"], 400);
+        assert_eq!(
+            body["chat_template_kwargs"],
+            json!({"thinking":false,"enable_thinking":false})
+        );
+        for field in ["min_tokens", "ignore_eos", "cache_salt", "seed"] {
+            assert!(body.get(field).is_none(), "unexpected {field}: {body}");
+        }
+        assert!(
+            body["messages"][0]["content"]
+                .as_str()
+                .unwrap()
+                .starts_with("Implement a thread-safe LRU cache")
+        );
+        response(stream, Some(400), false);
+    });
+    let output = selected_baseline(&temp, &server.endpoint, &declaration, &selection, "ladder")
+        .output()
+        .unwrap();
+    let report = decoded(&output);
+    assert!(output.status.success(), "{report}");
+    assert_eq!(server.count.load(Ordering::SeqCst), 480);
+    for acquisition in report["selected"]["baseline_acquisitions"]
+        .as_array()
+        .unwrap()
+    {
+        let lanes: Vec<u64> = acquisition["waves"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|wave| wave["spec"]["phase"] == "measured")
+            .map(|wave| {
+                assert_eq!(wave["eligible"], true, "{wave}");
+                wave["attempts"].as_array().unwrap().len() as u64
+            })
+            .collect();
+        assert_eq!(lanes, [1, 1, 1, 2, 2, 2, 4, 4, 4, 8, 8, 8]);
+    }
+}

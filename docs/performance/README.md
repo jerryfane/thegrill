@@ -328,6 +328,18 @@ does not qualify the backend or produce a faster/slower, equivalence or
 no-regression verdict. See the [installation guide](INSTALL.md#optional-selections-and-failures)
 for current-source versus next-reviewed-release paths.
 
+### Concurrency ladder
+
+The [concurrency ladder selection](../../crates/grill-perf/examples/concurrency-ladder-selection-v1.json)
+pins [`concurrency-ladder-v1`](../../crates/grill-perf/examples/concurrency-ladder-v1.json):
+one ordinary coding question in every lane at C1, C2, C4 and C8, each cell with
+one warmup and three measured waves. It uses `portable-chat-v1` with a 400-token
+[`cap-reached`](#exact-output-and-cache-observations) output, greedy sampling
+and thinking off. Eight acquisitions permit 480 requests and 192,000 requested
+output tokens. Unlike the [small ladder](#small-concurrency-ladder)'s 64-token
+count replies, each lane decodes long enough to measure sustained multi-stream
+decode as well as admission. The selection is descriptive only.
+
 ### Selected reports
 
 Selected reports use comparison v2 and retain `selected.manifest`, its digest,
