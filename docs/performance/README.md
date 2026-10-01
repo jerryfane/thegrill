@@ -328,6 +328,35 @@ does not qualify the backend or produce a faster/slower, equivalence or
 no-regression verdict. See the [installation guide](INSTALL.md#optional-selections-and-failures)
 for current-source versus next-reviewed-release paths.
 
+### Realistic decode
+
+The [realistic decode selection](../../crates/grill-perf/examples/realistic-decode-selection-v1.json)
+pins [`realistic-decode-v1`](../../crates/grill-perf/examples/realistic-decode-v1.json):
+four ordinary coding questions and two whole-file edits of one fixed 5.8 KB
+Python module (change every `logger.debug(` to `logger.info(`; rename `qty` to
+`quantity`), each its own C1 cell with one warmup and three measured trials. It
+uses `portable-chat-v1` with a 400-token [`cap-reached`](#exact-output-and-cache-observations)
+output, greedy sampling and thinking off. Eight acquisitions permit 192 requests
+and 76,800 requested output tokens.
+
+Speculative decoding accepts far more drafts on the count prompts of
+`portable-v1` and `baseline-v2` than on these questions, and a reply that
+copies its prompt, as a file edit does, rewards drafting from the context. Read
+the chat and edit cells separately and never pool them with count prompts.
+The selection is descriptive only.
+
+### Concurrency ladder
+
+The [concurrency ladder selection](../../crates/grill-perf/examples/concurrency-ladder-selection-v1.json)
+pins [`concurrency-ladder-v1`](../../crates/grill-perf/examples/concurrency-ladder-v1.json):
+one ordinary coding question in every lane at C1, C2, C4 and C8, each cell with
+one warmup and three measured waves. It uses `portable-chat-v1` with a 400-token
+[`cap-reached`](#exact-output-and-cache-observations) output, greedy sampling
+and thinking off. Eight acquisitions permit 480 requests and 192,000 requested
+output tokens. Unlike the [small ladder](#small-concurrency-ladder)'s 64-token
+count replies, each lane decodes long enough to measure sustained multi-stream
+decode as well as admission. The selection is descriptive only.
+
 ### Long-context decode and prefill
 
 Two selections cover long prompts with portable controls only.
